@@ -256,6 +256,66 @@ describe("supervision", () => {
     assert.deepEqual(calls, [["plugin.approval.resolve", { id: "plugin:ap-3", decision: "allow-always" }]]);
   });
 
+  it("tells Chips of an approval answered in OpenClaw, once, so the card cools", async () => {
+    asked();
+    await bridge.settled();
+    const card = sent.find((event) => event.type === "approval.request");
+    bridge.onClaw({ event: "exec.approval.resolved", payload: { id: "ap-1", decision: "allow-always", resolvedBy: "cli", ts: Date.now() } });
+    await bridge.settled();
+    const settled = sent.find((event) => event.type === "approval.resolved");
+    assert.deepEqual(
+      { ...settled, idempotency_key: undefined },
+      {
+        type: "approval.resolved",
+        run_id: card?.["run_id"],
+        approval_id: card?.["approval_id"],
+        decision: "approved",
+        scope: "once",
+        reason: "Answered in OpenClaw.",
+        idempotency_key: undefined,
+      },
+    );
+    assert.deepEqual(calls, []);
+    // A no in OpenClaw is a no on the card.
+    bridge.onClaw({ event: "chat", payload: { runId: "r10", sessionKey: key(), seq: 1, state: "status" } });
+    bridge.onClaw({ event: "plugin.approval.requested", payload: { id: "plugin:ap-4", request: { title: "Allow?", sessionKey: key(), runId: "r10" } } });
+    bridge.onClaw({ event: "plugin.approval.resolved", payload: { id: "plugin:ap-4", decision: "deny" } });
+    await bridge.settled();
+    assert.equal(sent.filter((event) => event.type === "approval.resolved").at(-1)?.["decision"], "denied");
+  });
+
+  it("does not tell Chips of an answer Chips gave, nor pass its own back to OpenClaw", async () => {
+    asked();
+    await bridge.settled();
+    const card = sent.find((event) => event.type === "approval.request");
+    await bridge.onChips({ type: "approval.resolved", approval_id: card?.["approval_id"], run_id: card?.["run_id"], decision: "approved", scope: "once", resolved_by: ARJUN.participant_id });
+    bridge.onClaw({ event: "exec.approval.resolved", payload: { id: "ap-1", decision: "allow-once" } });
+    await bridge.settled();
+    assert.equal(sent.filter((event) => event.type === "approval.resolved").length, 0);
+    // Its own settle, delivered back by Chips, is not an answer for OpenClaw.
+    calls = [];
+    await bridge.onChips({ type: "approval.resolved", approval_id: card?.["approval_id"], decision: "approved", scope: "once", resolved_by: ME });
+    assert.deepEqual(calls, []);
+  });
+
+  it("tells Chips of a question answered in OpenClaw, and not of one cancelled", async () => {
+    bridge.onClaw({ event: "chat", payload: { runId: "r11", sessionKey: key(), seq: 1, state: "status" } });
+    bridge.onClaw({
+      event: "question.requested",
+      payload: { id: "q-2", sessionKey: key(), runId: "r11", questions: [{ questionId: "day", question: "Which day?", options: [{ label: "Saturday" }, { label: "Sunday" }] }] },
+    });
+    bridge.onClaw({ event: "question.resolved", payload: { id: "q-2", status: "answered", answers: { answers: { day: ["Sunday"] } } } });
+    await bridge.settled();
+    const ask = sent.find((event) => event.type === "question.ask");
+    const answer = sent.find((event) => event.type === "question.answered");
+    assert.equal(answer?.["ask_id"], ask?.["ask_id"]);
+    assert.equal(answer?.["run_id"], ask?.["run_id"]);
+    assert.deepEqual(answer?.["answers"], [{ question_id: "day", values: ["Sunday"] }]);
+    bridge.onClaw({ event: "question.resolved", payload: { id: "q-9", status: "cancelled" } });
+    await bridge.settled();
+    assert.equal(sent.filter((event) => event.type === "question.answered").length, 1);
+  });
+
   it("asks OpenClaw's question as a question card, and sends the answer back", async () => {
     bridge.onClaw({ event: "chat", payload: { runId: "r7", sessionKey: key(), seq: 1, state: "status" } });
     bridge.onClaw({
@@ -302,8 +362,9 @@ describe("words", () => {
     assert.equal(wordsOf({ attachments: [{ mime_type: "image/jpeg" }] }), "A photo");
   });
 
-  it("reports usage only when it has both token counts", () => {
+  it("reports usage with its tokens out, and its tokens in when it knows them", () => {
     assert.equal(usageOf({ input: 1 }, "m"), undefined);
+    assert.deepEqual(usageOf({ output: 232 }, "m"), { scope: "run", model: "m", output_tokens: 232 });
     assert.deepEqual(usageOf({ inputTokens: 3, outputTokens: 4 }, "m"), { scope: "run", model: "m", input_tokens: 3, output_tokens: 4 });
   });
 });

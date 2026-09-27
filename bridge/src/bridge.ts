@@ -8,7 +8,8 @@
  * - OpenClaw's `chat` events for a turn become a run: started on the first, answered and completed
  *   on `final`, failed on `error` or `aborted`. Its tool events become steps.
  * - An exec approval becomes an approval card, and the person's answer goes back as allow-once,
- *   allow-always or deny. An `ask_user` question becomes a question card.
+ *   allow-always or deny. An `ask_user` question becomes a question card. An ask answered in
+ *   OpenClaw's own tools instead is settled in Chips, once, so its card cools (Chips ADR 0079).
  *
  * Every Chips id is derived from OpenClaw's, so everything written again after a restart is the
  * same event and Chips answers it as a duplicate.
@@ -96,12 +97,13 @@ export function usageOf(usage: unknown, fallbackModel: string): Payload | undefi
   const u = usage as Payload;
   const input = num(u["input"]) ?? num(u["inputTokens"]) ?? num(u["input_tokens"]) ?? num(u["promptTokens"]);
   const output = num(u["output"]) ?? num(u["outputTokens"]) ?? num(u["output_tokens"]) ?? num(u["completionTokens"]);
-  if (input === undefined || output === undefined) return undefined;
+  // Codex's runtime often knows only the tokens out, and Chips takes those alone (finding 11).
+  if (output === undefined) return undefined;
   const cost = num((u["cost"] as Payload | undefined)?.["total"]) ?? num(u["costUsd"]);
   return {
     scope: "run",
     model: str(u["model"]) ?? fallbackModel,
-    input_tokens: input,
+    ...(input === undefined ? {} : { input_tokens: input }),
     output_tokens: output,
     ...(cost === undefined || cost <= 0 ? {} : { cost: { usd: cost, estimated: true } }),
   };
@@ -128,9 +130,15 @@ export class Bridge {
    */
   private readonly approvals = new Map<
     string,
-    { readonly id: string; readonly always: boolean; readonly method: "exec.approval.resolve" | "plugin.approval.resolve" }
+    {
+      readonly id: string;
+      readonly always: boolean;
+      readonly method: "exec.approval.resolve" | "plugin.approval.resolve";
+      readonly run: Run;
+    }
   >();
-  private readonly questions = new Map<string, string>();
+  /** Chips's question id to OpenClaw's, and the run that asked it. */
+  private readonly questions = new Map<string, { readonly id: string; readonly run: Run }>();
 
   constructor(
     private readonly chips: ChipsPort,
@@ -258,8 +266,12 @@ export class Bridge {
   }
 
   private async decided(event: ChipsEvent): Promise<void> {
+    // Its own settle, delivered back, was OpenClaw's answer already.
+    if (event["resolved_by"] === this.self.harnessId) return;
     const asked = this.approvals.get(String(event["approval_id"]));
     if (asked === undefined) return;
+    // Forgotten before OpenClaw is told, so its `resolved` event is not taken for an answer there.
+    this.approvals.delete(String(event["approval_id"]));
     const decision = str(event["decision"]);
     const allowed = decision === "approved" || decision === "edited";
     // Chips offers every scope; OpenClaw may take only allow-once for a command (a native Codex
@@ -284,8 +296,10 @@ export class Bridge {
   }
 
   private async answered(event: ChipsEvent): Promise<void> {
-    const clawId = this.questions.get(String(event["ask_id"]));
+    if (event["answered_by"] === this.self.harnessId) return;
+    const clawId = this.questions.get(String(event["ask_id"]))?.id;
     if (clawId === undefined) return;
+    this.questions.delete(String(event["ask_id"]));
     const answers = Array.isArray(event["answers"]) ? (event["answers"] as Payload[]) : [];
     await this.claw.request("question.resolve", {
       id: clawId,
@@ -312,9 +326,60 @@ export class Bridge {
         return this.asksPluginApproval(p);
       case "question.requested":
         return this.asksQuestion(p);
+      case "exec.approval.resolved":
+      case "plugin.approval.resolved":
+        return this.settlesApproval(p);
+      case "question.resolved":
+        return this.settlesQuestion(p);
       default:
         return;
     }
+  }
+
+  /**
+   * An approval answered in OpenClaw's own tools (its command line, its TUI), so the Chips card
+   * cools rather than waiting out its expiry (ADR 0079). Once: This session and Always are a
+   * person's to give in Chips. An ask Chips answered was forgotten when OpenClaw was told.
+   */
+  private settlesApproval(p: Payload): void {
+    const clawId = str(p["id"]);
+    const entry = [...this.approvals].find(([, asked]) => asked.id === clawId);
+    if (entry === undefined) return;
+    const [approvalId, asked] = entry;
+    const decision = str(p["decision"]);
+    if (decision !== "allow-once" && decision !== "allow-always" && decision !== "deny") return;
+    this.approvals.delete(approvalId);
+    this.write(asked.run, {
+      type: "approval.resolved",
+      run_id: asked.run.chipsRun,
+      approval_id: approvalId,
+      decision: decision === "deny" ? "denied" : "approved",
+      scope: "once",
+      reason: "Answered in OpenClaw.",
+      idempotency_key: `openclaw-approval:${clawId}:settled`,
+    });
+  }
+
+  /** A question answered in OpenClaw's own tools; a cancelled or expired one is Chips's to time out. */
+  private settlesQuestion(p: Payload): void {
+    const clawId = str(p["id"]);
+    const entry = [...this.questions].find(([, asked]) => asked.id === clawId);
+    if (entry === undefined || p["status"] !== "answered") return;
+    const [askId, asked] = entry;
+    this.questions.delete(askId);
+    const given = ((p["answers"] ?? {}) as Payload)["answers"];
+    const answers = Object.entries((given ?? {}) as Record<string, unknown>).map(([questionId, values]) => ({
+      question_id: questionId,
+      values: Array.isArray(values) ? values.map(String) : [],
+    }));
+    if (answers.length === 0) return;
+    this.write(asked.run, {
+      type: "question.answered",
+      run_id: asked.run.chipsRun,
+      ask_id: askId,
+      answers,
+      idempotency_key: `openclaw-question:${clawId}:settled`,
+    });
   }
 
   /** The Chips run a turn is, started the first time the turn is heard from in one of our rooms. */
@@ -470,7 +535,7 @@ export class Bridge {
     const unavailable = Array.isArray(request["unavailableDecisions"]) ? (request["unavailableDecisions"] as unknown[]) : [];
     const offered = Array.isArray(request["allowedDecisions"]) ? (request["allowedDecisions"] as unknown[]) : undefined;
     const always = !unavailable.includes("allow-always") && (offered === undefined || offered.includes("allow-always"));
-    this.approvals.set(approvalId, { id: clawId, always, method: "exec.approval.resolve" });
+    this.approvals.set(approvalId, { id: clawId, always, method: "exec.approval.resolve", run });
     const expires = num(p["expiresAtMs"]);
     this.write(run, {
       type: "approval.request",
@@ -505,7 +570,7 @@ export class Bridge {
     const approvalId = chipsId("apr", `openclaw-approval:${clawId}`);
     const offered = Array.isArray(request["allowedDecisions"]) ? (request["allowedDecisions"] as unknown[]) : undefined;
     const always = offered === undefined || offered.includes("allow-always");
-    this.approvals.set(approvalId, { id: clawId, always, method: "plugin.approval.resolve" });
+    this.approvals.set(approvalId, { id: clawId, always, method: "plugin.approval.resolve", run });
     const expires = num(p["expiresAtMs"]);
     this.write(run, {
       type: "approval.request",
@@ -535,7 +600,7 @@ export class Bridge {
     const run = clawRun === undefined ? this.latestRun(sessionKey) : this.runFor(clawRun, sessionKey);
     if (run === undefined) return;
     const askId = chipsId("qst", `openclaw-question:${clawId}`);
-    this.questions.set(askId, clawId);
+    this.questions.set(askId, { id: clawId, run });
     const questions = (Array.isArray(p["questions"]) ? (p["questions"] as Payload[]) : []).map((q) => ({
       question_id: String(q["questionId"]),
       prompt: String(q["question"] ?? q["header"] ?? ""),
