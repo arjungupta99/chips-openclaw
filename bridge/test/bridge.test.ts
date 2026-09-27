@@ -196,6 +196,21 @@ describe("supervision", () => {
     assert.equal(sent.at(-1)?.type, "approval.executed");
   });
 
+  it("takes a yes for always as a yes for once when OpenClaw offers only once", async () => {
+    bridge.onClaw({ event: "chat", payload: { runId: "r8", sessionKey: key(), seq: 1, state: "status" } });
+    bridge.onClaw({
+      event: "exec.approval.requested",
+      payload: {
+        id: "ap-2",
+        request: { command: "pwd", sessionKey: key(), runId: "r8", unavailableDecisions: ["allow-always"], allowedDecisions: ["allow-once", "deny"] },
+      },
+    });
+    await bridge.settled();
+    const card = sent.find((event) => event.type === "approval.request");
+    await bridge.onChips({ type: "approval.resolved", approval_id: card?.["approval_id"], decision: "approved", scope: "always" });
+    assert.deepEqual(calls, [["exec.approval.resolve", { id: "ap-2", decision: "allow-once" }]]);
+  });
+
   it("passes a no, or an expiry, back as deny", async () => {
     asked();
     await bridge.settled();
@@ -228,7 +243,7 @@ describe("supervision", () => {
       },
     ]);
     await bridge.onChips({ type: "question.answered", ask_id: ask?.["ask_id"], answers: [{ question_id: "day", values: ["Sunday"] }] });
-    assert.deepEqual(calls, [["question.resolve", { id: "q-1", answers: { answers: { day: { answers: ["Sunday"] } } } }]]);
+    assert.deepEqual(calls, [["question.resolve", { id: "q-1", answers: { answers: { day: ["Sunday"] } } }]]);
   });
 });
 

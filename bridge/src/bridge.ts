@@ -37,6 +37,12 @@ interface Run {
   /** Writes for one run go in order. */
   chain: Promise<void>;
   ended: boolean;
+  /** From the turn's `lifecycle` model phase and its `usage` stream, reported when it ends. */
+  model?: string;
+  inputTokens?: number;
+  outputTokens?: number;
+  contextTokens?: number;
+  contextWindow?: number;
 }
 
 type Payload = Record<string, unknown>;
@@ -93,7 +99,8 @@ export class Bridge {
   private readonly goals = new Map<string, string[]>();
   /** Tool events that came before the turn's first `chat` event said which room it is in. */
   private readonly early = new Map<string, Payload[]>();
-  private readonly approvals = new Map<string, string>();
+  /** Chips's approval id → OpenClaw's, and whether OpenClaw takes allow-always for it. */
+  private readonly approvals = new Map<string, { readonly id: string; readonly always: boolean }>();
   private readonly questions = new Map<string, string>();
 
   constructor(
@@ -165,13 +172,16 @@ export class Bridge {
     });
   }
 
-  /** The session for a room, made the first time; making it again with the same key adopts it. */
+  /**
+   * The session for a room, made the first time. Making it again with the same key adopts it and
+   * changes nothing, so the key is its identity; no idempotency key is sent, because OpenClaw
+   * refuses one reused with other parameters (a later room's words as the name, after a restart).
+   */
   private async ensureSession(key: string, firstWords: string): Promise<void> {
     if (this.sessions.has(key)) return;
     await this.claw.request("sessions.create", {
       key,
       agentId: this.self.agent,
-      idempotencyKey: key,
       displayName: titleFrom(firstWords),
     });
     this.sessions.add(key);
@@ -217,13 +227,17 @@ export class Bridge {
   }
 
   private async decided(event: ChipsEvent): Promise<void> {
-    const clawId = this.approvals.get(String(event["approval_id"]));
-    if (clawId === undefined) return;
+    const asked = this.approvals.get(String(event["approval_id"]));
+    if (asked === undefined) return;
     const decision = str(event["decision"]);
     const allowed = decision === "approved" || decision === "edited";
+    // Chips offers every scope; OpenClaw may take only allow-once for a command (a native Codex
+    // command does). A yes for always is then a yes for this once, rather than a refusal that
+    // leaves the turn waiting for an answer that never comes.
+    const always = event["scope"] === "always" && asked.always;
     await this.claw.request("exec.approval.resolve", {
-      id: clawId,
-      decision: !allowed ? "deny" : event["scope"] === "always" ? "allow-always" : "allow-once",
+      id: asked.id,
+      decision: !allowed ? "deny" : always ? "allow-always" : "allow-once",
     });
     const runId = str(event["run_id"]);
     const run = runId === undefined ? undefined : this.runByChips.get(runId);
@@ -246,7 +260,7 @@ export class Bridge {
       id: clawId,
       answers: {
         answers: Object.fromEntries(
-          answers.map((each) => [String(each["question_id"]), { answers: each["values"] ?? [] }]),
+          answers.map((each) => [String(each["question_id"]), Array.isArray(each["values"]) ? each["values"] : []]),
         ),
       },
     });
@@ -293,7 +307,7 @@ export class Bridge {
       goal: goal.slice(0, 500),
       idempotency_key: `openclaw-run:${clawRun}:started`,
     });
-    for (const early of this.early.get(clawRun) ?? []) this.tool(run, early);
+    for (const early of this.early.get(clawRun) ?? []) this.stream(run, early);
     this.early.delete(clawRun);
     return run;
   }
@@ -324,29 +338,65 @@ export class Bridge {
     if (text !== "") {
       this.write(run, { type: "message.post", run_id: run.chipsRun, text, idempotency_key: `openclaw-run:${clawRun}:reply` });
     }
-    const usage = usageOf(p["usage"], str(p["model"]) ?? "openai");
+    const model = run.model ?? str(p["model"]) ?? "openai";
+    const usage =
+      usageOf(p["usage"], model) ??
+      usageOf({ inputTokens: run.inputTokens, outputTokens: run.outputTokens }, model);
     if (usage !== undefined) {
       this.write(run, { type: "usage", run_id: run.chipsRun, ...usage, idempotency_key: `openclaw-run:${clawRun}:usage` });
     }
+    if (run.contextTokens !== undefined && run.contextWindow !== undefined && run.contextWindow > 0) {
+      this.write(run, {
+        type: "context.usage",
+        run_id: run.chipsRun,
+        used_tokens: run.contextTokens,
+        limit_tokens: run.contextWindow,
+        model,
+        idempotency_key: `openclaw-run:${clawRun}:context`,
+      });
+    }
+    // The whole reply, so Chips draws the answer and the summary as one card rather than two.
     this.write(run, {
       type: "run.completed",
       run_id: run.chipsRun,
-      summary: text === "" ? "Done." : titleFrom(text),
+      summary: text === "" ? "Done." : text.slice(0, 20_000),
       idempotency_key: `openclaw-run:${clawRun}:completed`,
     });
   }
 
-  /** A tool's start and end, as a step; held until the turn's room is known. */
+  /**
+   * The turn's own stream: which model it is, what it used, and its tools. Events that come
+   * before the turn's room is known are held (a tool's start can precede the turn's first `chat`).
+   */
   private agent(p: Payload): void {
-    if (p["stream"] !== "tool") return;
     const clawRun = str(p["runId"]);
     if (clawRun === undefined) return;
-    const run = this.runs.get(clawRun);
+    const sessionKey = str(p["sessionKey"]);
+    const run = this.runs.get(clawRun) ?? (sessionKey === undefined ? undefined : this.runFor(clawRun, sessionKey));
     if (run === undefined) {
       this.early.set(clawRun, [...(this.early.get(clawRun) ?? []), p]);
       return;
     }
-    this.tool(run, p);
+    this.stream(run, p);
+  }
+
+  private stream(run: Run, p: Payload): void {
+    const data = (p["data"] ?? {}) as Payload;
+    switch (p["stream"]) {
+      case "lifecycle":
+        if (data["phase"] === "model") run.model = str(data["model"]) ?? run.model;
+        return;
+      case "usage":
+        run.inputTokens = num(data["inputTokens"]) ?? run.inputTokens;
+        run.outputTokens = num(data["outputTokens"]) ?? run.outputTokens;
+        run.contextTokens = num(data["activeContextTokens"]) ?? run.contextTokens;
+        run.contextWindow = num(data["modelContextWindow"]) ?? run.contextWindow;
+        return;
+      case "tool":
+        return this.tool(run, p);
+      default:
+        return;
+    }
   }
 
   private tool(run: Run, p: Payload): void {
@@ -380,7 +430,10 @@ export class Bridge {
     const command = str(plan["commandText"]) ?? str(request["command"]) ?? "a command";
     const cwd = str(plan["cwd"]) ?? str(request["cwd"]);
     const approvalId = chipsId("apr", `openclaw-approval:${clawId}`);
-    this.approvals.set(approvalId, clawId);
+    const unavailable = Array.isArray(request["unavailableDecisions"]) ? (request["unavailableDecisions"] as unknown[]) : [];
+    const offered = Array.isArray(request["allowedDecisions"]) ? (request["allowedDecisions"] as unknown[]) : undefined;
+    const always = !unavailable.includes("allow-always") && (offered === undefined || offered.includes("allow-always"));
+    this.approvals.set(approvalId, { id: clawId, always });
     const expires = num(p["expiresAtMs"]);
     this.write(run, {
       type: "approval.request",

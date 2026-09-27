@@ -24,12 +24,19 @@ const chips = new Chips({
   log,
 });
 let bridge: Bridge | undefined;
+/** BRIDGE_TRACE=1: each OpenClaw event's name and the start of its payload, to check the mapping. */
+const trace = process.env["BRIDGE_TRACE"] === "1";
 const claw = new OpenClaw({
   url: config.gatewayUrl,
   token: config.gatewayToken,
   stateDir: config.stateDir,
   log,
-  onEvent: (event) => bridge?.onClaw(event),
+  onEvent: (event) => {
+    if (trace && event.event !== "tick" && event.event !== "health") {
+      log(`trace ${event.event} ${JSON.stringify(event.payload).slice(0, 600)}`);
+    }
+    bridge?.onClaw(event);
+  },
 });
 bridge = new Bridge(chips, claw, { harnessId: config.harnessId, agent: config.agent }, log);
 
