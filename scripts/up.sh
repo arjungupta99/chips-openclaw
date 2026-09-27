@@ -21,7 +21,18 @@ if [ ! -f "$DIR/state/openclaw.json" ]; then
     --skip-channels --skip-daemon --no-install-daemon --skip-health --skip-hooks \
     --skip-search --skip-skills --skip-ui
   say "every command the agent runs asks first; unanswered is denied"
+  # The host's approvals: ask always, deny what nobody answers.
   oc_run exec-policy set --host gateway --security allowlist --ask always --ask-fallback deny
+  # A ChatGPT sign-in runs turns on OpenClaw's Codex runtime, where an allowlist exec policy blocks
+  # every command outright. Mode `ask` with Codex's own reviewer set to the user sends each command
+  # to the operator's approval route instead, which is what the bridge turns into Chips cards.
+  oc_run config unset tools.exec.security
+  oc_run config unset tools.exec.ask
+  oc_run config set tools.exec.mode ask
+  oc_run config set plugins.entries.codex.enabled true
+  oc_run config set plugins.entries.codex.config.appServer.approvalPolicy on-request
+  oc_run config set plugins.entries.codex.config.appServer.approvalsReviewer user
+  oc_run config set plugins.entries.codex.config.appServer.sandbox workspace-write
 fi
 
 compose up -d gateway
