@@ -46,14 +46,16 @@ export interface OpenClawOptions {
 
 export class OpenClaw {
   private readonly client: GatewayClient;
-  private ready: Promise<void>;
+  /**
+   * Whether the gateway has said hello on the current socket, and who is waiting for it to. A flag
+   * and a list rather than a promise replaced at each close: a request made while the gateway was
+   * down waited on one promise, a second failed reconnect replaced it, and the request never woke.
+   */
+  private connected = false;
+  private readonly waiting: (() => void)[] = [];
 
   constructor(options: OpenClawOptions) {
     const tokenFile = join(options.stateDir, "device-token.json");
-    let resolveReady: () => void = () => undefined;
-    this.ready = new Promise((resolve) => {
-      resolveReady = resolve;
-    });
     this.client = new GatewayClient({
       url: options.url,
       token: options.token,
@@ -81,32 +83,44 @@ export class OpenClaw {
       },
       onHelloOk: (hello) => {
         options.log(`openclaw: connected, protocol ${hello.protocol}, scopes ${hello.auth.scopes.join(" ")}`);
-        resolveReady();
+        this.connected = true;
+        for (const wake of this.waiting.splice(0)) wake();
       },
       onConnectError: (error) => options.log(`openclaw: connect failed: ${error.message}`),
       onReconnectPaused: (info) =>
         options.log(`openclaw: reconnect paused (${info.detailCode ?? info.code}): ${info.reason}`),
       onClose: (code) => {
         options.log(`openclaw: closed (${code})`);
-        this.ready = new Promise((resolve) => {
-          resolveReady = resolve;
-        });
+        this.connected = false;
       },
       onEvent: (frame) =>
         options.onEvent({ event: frame.event, payload: (frame.payload ?? {}) as Record<string, unknown> }),
     });
   }
 
+  /** Until the gateway has said hello on a live socket; at once when it has. */
+  private async ready(): Promise<void> {
+    if (this.connected) return;
+    await new Promise<void>((resolve) => this.waiting.push(resolve));
+  }
+
   /** Connect, and resolve once the gateway has said hello. */
   async start(): Promise<void> {
     this.client.start();
-    await this.ready;
+    await this.ready();
   }
 
-  /** A gateway method, once connected. */
+  /** A gateway method, once connected; one the socket dropped under is tried again after hello. */
   async request<T = Record<string, unknown>>(method: string, params: Record<string, unknown>): Promise<T> {
-    await this.ready;
-    return (await this.client.request(method, params)) as T;
+    for (let attempt = 1; ; attempt += 1) {
+      await this.ready();
+      try {
+        return (await this.client.request(method, params)) as T;
+      } catch (error) {
+        // A refusal from the gateway is its answer; only a lost socket is worth another try.
+        if (this.connected || attempt >= 3) throw error;
+      }
+    }
   }
 
   stop(): void {
