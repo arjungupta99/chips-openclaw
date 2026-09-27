@@ -1,0 +1,26 @@
+{
+  "name": "chips-openclaw-bridge",
+  "version": "0.1.0",
+  "private": true,
+  "description": "OpenClaw as a Chips harness: one operator connection to the OpenClaw gateway, Chips's public wire on the other side.",
+  "type": "module",
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "scripts": {
+    "start": "tsx src/main.ts",
+    "test": "node --import tsx --test test/*.test.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@openclaw/gateway-client": "2026.9.6",
+    "@openclaw/gateway-protocol": "2026.9.6",
+    "ws": "8.21.3"
+  },
+  "devDependencies": {
+    "@types/node": "22.19.0",
+    "@types/ws": "8.18.1",
+    "tsx": "4.21.0",
+    "typescript": "5.9.3"
+  }
+}
