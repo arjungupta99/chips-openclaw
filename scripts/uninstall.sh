@@ -9,7 +9,7 @@ set -euo pipefail
 
 cat <<EOF
   This will:
-    · stop the bridge and the scratch Chips server, by the PIDs in $DIR
+    · stop the bridge, the scratch Chips server and its web app, by the PIDs in $DIR
     · remove the container, the project's volumes and the image $IMAGE
     · delete $DIR: OpenClaw's state, its ChatGPT sign-in, logs, the scratch Chips database
     · check every place OpenClaw could have left something, against $BASELINE
@@ -20,7 +20,7 @@ if [ "${1:-}" != "--yes" ]; then
   [ "$answer" = "y" ] || { say "nothing was changed"; exit 1; }
 fi
 
-for pidfile in "$DIR/bridge/bridge.pid" "$DIR/chips/chipsd.pid"; do
+for pidfile in "$DIR/bridge/bridge.pid" "$DIR/chips/chipsd.pid" "$DIR/chips/web.pid"; do
   if [ -f "$pidfile" ] && kill -0 "$(cat "$pidfile")" 2>/dev/null; then
     kill "$(cat "$pidfile")" && say "stopped $(basename "$pidfile" .pid) ($(cat "$pidfile"))"
   fi
