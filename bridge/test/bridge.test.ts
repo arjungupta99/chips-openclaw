@@ -5,7 +5,7 @@
 
 import assert from "node:assert/strict";
 import { beforeEach, describe, it } from "node:test";
-import { Bridge, type ChipsPort, type ClawPort, textOf, titleFrom, usageOf } from "../src/bridge.ts";
+import { Bridge, type ChipsPort, type ClawPort, textOf, titleFrom, usageOf, wordsOf } from "../src/bridge.ts";
 import type { ChipsEvent } from "../src/chips.ts";
 
 const ME = "hrn_01K4ZQPX000000000000000004";
@@ -293,6 +293,13 @@ describe("words", () => {
 
   it("names a room from the first line of its first words", () => {
     assert.equal(titleFrom("Short one\nsecond line"), "Short one");
+  });
+
+  it("names a message with no words from its transcript, or from what was sent", () => {
+    assert.equal(wordsOf({ text: " Hi " }), "Hi");
+    assert.equal(wordsOf({ text: "", attachments: [{ mime_type: "audio/mp4", transcript: "Testing of voice note" }] }), "Testing of voice note");
+    assert.equal(wordsOf({ attachments: [{ mime_type: "audio/mp4" }] }), "A voice note");
+    assert.equal(wordsOf({ attachments: [{ mime_type: "image/jpeg" }] }), "A photo");
   });
 
   it("reports usage only when it has both token counts", () => {

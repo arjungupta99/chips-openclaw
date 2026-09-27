@@ -58,6 +58,24 @@ export function titleFrom(text: string): string {
   return `${cut.slice(0, Math.max(cut.lastIndexOf(" "), 24))}…`;
 }
 
+/**
+ * What a person's message says, for naming its run and its room: its words, else a voice note's
+ * transcript, else what was sent. A photo or a voice note alone has no words, and Chips refuses a
+ * run whose goal is empty.
+ */
+export function wordsOf(event: Record<string, unknown>): string {
+  const text = String(event["text"] ?? "").trim();
+  if (text !== "") return text;
+  const files = Array.isArray(event["attachments"]) ? (event["attachments"] as Record<string, unknown>[]) : [];
+  const heard = files.map((file) => str(file["transcript"])?.trim()).filter((words) => words !== undefined && words !== "");
+  if (heard.length > 0) return heard.join(" ");
+  const mime = str(files[0]?.["mime_type"]) ?? "";
+  if (mime.startsWith("image/")) return "A photo";
+  if (mime.startsWith("audio/")) return "A voice note";
+  if (mime.startsWith("video/")) return "A video";
+  return files.length > 0 ? "A file" : "A message";
+}
+
 /** The text of an OpenClaw message, whether a string or content blocks. */
 export function textOf(message: unknown): string {
   if (typeof message === "string") return message;
@@ -171,11 +189,12 @@ export class Bridge {
     const mentions = Array.isArray(event["mentions"]) ? (event["mentions"] as string[]) : [];
     if (from["kind"] === "harness" && !mentions.includes(this.self.harnessId)) return;
     const text = String(event["text"] ?? "");
+    const words = wordsOf(event);
     const key = this.keyFor(spaceId);
-    await this.ensureSession(key, text);
-    if (this.asked.delete(spaceId)) await this.chips.claim(spaceId, key, titleFrom(text));
-    this.goals.set(String(event["message_id"] ?? event["id"]), text);
-    this.latest.set(key, text);
+    await this.ensureSession(key, words);
+    if (this.asked.delete(spaceId)) await this.chips.claim(spaceId, key, titleFrom(words));
+    this.goals.set(String(event["message_id"] ?? event["id"]), words);
+    this.latest.set(key, words);
     await this.claw.request("chat.send", {
       sessionKey: key,
       message: text,
