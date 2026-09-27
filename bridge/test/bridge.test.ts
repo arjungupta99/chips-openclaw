@@ -87,11 +87,13 @@ describe("rooms and sessions", () => {
 describe("a turn as a run", () => {
   it("starts on the turn's first event, answers, reports usage, and completes, in order", async () => {
     await bridge.onChips(said("What can you do?"));
-    bridge.onClaw({ event: "chat", payload: { runId: "r1", sessionKey: key(), seq: 1, state: "status", phase: "starting_model" } });
+    // OpenClaw names the turn a message starts after the message's id, the chat.send key.
+    const r1 = "msg_01K4ZQPX0000000000000000A1";
+    bridge.onClaw({ event: "chat", payload: { runId: r1, sessionKey: key(), seq: 1, state: "status", phase: "starting_model" } });
     bridge.onClaw({
       event: "chat",
       payload: {
-        runId: "r1",
+        runId: r1,
         sessionKey: key(),
         seq: 2,
         state: "final",
@@ -112,9 +114,18 @@ describe("a turn as a run", () => {
       model: "gpt-5.5",
       input_tokens: 1200,
       output_tokens: 40,
-      idempotency_key: "openclaw-run:r1:usage",
+      idempotency_key: `openclaw-run:${r1}:usage`,
     });
     assert.ok(sent.every((event) => event["run_id"] === run));
+  });
+
+  it("names a follow-up turn OpenClaw starts on its own after the room's latest words", async () => {
+    await bridge.onChips(said("Name a snack."));
+    bridge.onClaw({ event: "chat", payload: { runId: "0c5f-follow-up", sessionKey: key(), seq: 1, state: "status" } });
+    bridge.onClaw({ event: "chat", payload: { runId: "0c5f-follow-up", sessionKey: key(), seq: 2, state: "final", message: "" } });
+    await bridge.settled();
+    assert.equal(sent[0]?.["goal"], "Following up: Name a snack.");
+    assert.equal(sent.at(-1)?.["summary"], "No reply of its own; answered in the next turn.");
   });
 
   it("names the same run after a restart, so Chips takes the retry as a duplicate", async () => {

@@ -95,8 +95,12 @@ export class Bridge {
   private readonly sessions = new Set<string>();
   private readonly runs = new Map<string, Run>();
   private readonly runByChips = new Map<string, Run>();
-  /** A person's words, oldest first, waiting for the turn they start to name its run. */
-  private readonly goals = new Map<string, string[]>();
+  /**
+   * A person's words by their message id, which OpenClaw uses as the id of the turn they start;
+   * and the latest words in each room, for a follow-up turn OpenClaw starts on its own.
+   */
+  private readonly goals = new Map<string, string>();
+  private readonly latest = new Map<string, string>();
   /** Tool events that came before the turn's first `chat` event said which room it is in. */
   private readonly early = new Map<string, Payload[]>();
   /** Chips's approval id → OpenClaw's, and whether OpenClaw takes allow-always for it. */
@@ -163,7 +167,8 @@ export class Bridge {
     const key = this.keyFor(spaceId);
     await this.ensureSession(key, text);
     if (this.asked.delete(spaceId)) await this.chips.claim(spaceId, key, titleFrom(text));
-    this.goals.set(key, [...(this.goals.get(key) ?? []), text]);
+    this.goals.set(String(event["message_id"] ?? event["id"]), text);
+    this.latest.set(key, text);
     await this.claw.request("chat.send", {
       sessionKey: key,
       message: text,
@@ -299,7 +304,10 @@ export class Bridge {
     };
     this.runs.set(clawRun, run);
     this.runByChips.set(run.chipsRun, run);
-    const goal = this.goals.get(sessionKey)?.shift() ?? "Answer in the room.";
+    const own = this.goals.get(clawRun);
+    this.goals.delete(clawRun);
+    const latest = this.latest.get(sessionKey);
+    const goal = own ?? (latest === undefined ? "Answer in the room." : `Following up: ${latest}`);
     this.write(run, {
       type: "run.started",
       run_id: run.chipsRun,
@@ -359,7 +367,8 @@ export class Bridge {
     this.write(run, {
       type: "run.completed",
       run_id: run.chipsRun,
-      summary: text === "" ? "Done." : text.slice(0, 20_000),
+      // A queued message's own turn can end empty, its answer given in a follow-up turn.
+      summary: text === "" ? "No reply of its own; answered in the next turn." : text.slice(0, 20_000),
       idempotency_key: `openclaw-run:${clawRun}:completed`,
     });
   }
@@ -413,7 +422,7 @@ export class Bridge {
       step_id: stepId,
       status,
       tool: str(data["name"]) ?? "tool",
-      ...(str(data["title"]) === undefined ? {} : { summary: str(data["title"]) }),
+      ...(summaryOf(data) === undefined ? {} : { summary: summaryOf(data) }),
       idempotency_key: `openclaw-step:${stepId}:${status}`,
     });
   }
@@ -503,4 +512,12 @@ export class Bridge {
   async settled(): Promise<void> {
     await Promise.all([...this.runs.values()].map((run) => run.chain));
   }
+}
+
+/** A step's line for the receipt: what OpenClaw says the call is for, cut to one short line. */
+function summaryOf(data: Payload): string | undefined {
+  const line = str(data["meta"]) ?? str(data["title"]);
+  if (line === undefined || line.trim() === "") return undefined;
+  const one = line.trim().split("\n")[0] ?? "";
+  return one.length <= 200 ? one : `${one.slice(0, 199)}…`;
 }
