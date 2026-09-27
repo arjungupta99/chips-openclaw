@@ -65,10 +65,10 @@ export class OpenClaw {
       mode: "backend",
       platform: "macos",
       role: "operator",
-      // Not operator.admin, though a plugin's ask (Codex's own shell) names no reviewer device and
-      // OpenClaw shows such an ask only to the client that raised it and to admins: without it those
-      // commands are denied at once ("no-approval-route"). Widening the scope is Arjun's call.
-      scopes: ["operator.read", "operator.write", "operator.approvals", "operator.questions"],
+      // operator.admin (Arjun's call, 27 September 2026): a plugin's ask (Codex's own shell) names
+      // no reviewer device, and OpenClaw shows such an ask only to the client that raised it and to
+      // admins, so without it those commands are denied at once ("no-approval-route").
+      scopes: ["operator.read", "operator.write", "operator.approvals", "operator.questions", "operator.admin"],
       caps: ["tool-events", "exec-approvals", "plugin-approvals", "approvals"],
       minProtocol: 4,
       maxProtocol: 4,
