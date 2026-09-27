@@ -1,0 +1,67 @@
+# OpenClaw for testing Chips (the plan is Chips's docs/proposals/openclaw-test-plan.md).
+#
+# One pinned image, one container, and everything it keeps under $CHIPS_OPENCLAW_DIR
+# (~/chips-openclaw). Loopback only, never a launch agent, restart never. The scripts beside this file
+# run it; `uninstall.sh` takes all of it away. Every Docker command they run is scoped to this
+# project, so the other containers on the same Colima are never touched.
+#
+# Shaped after OpenClaw's own docker-compose.yml at v2026.9.6, less what a test does not use: no
+# channel ports, no host-wide ~/.openclaw, no OpenTelemetry, no restart.
+
+name: chips-openclaw
+
+x-openclaw: &openclaw
+  image: ghcr.io/openclaw/openclaw:2026.9.6
+  env_file:
+    - path: ${CHIPS_OPENCLAW_DIR:?set by the scripts}/.env
+      required: true
+  environment: &environment
+    HOME: /home/node
+    OPENCLAW_HOME: /home/node
+    TERM: xterm-256color
+    # Container paths, pinned so nothing from the Mac leaks in (OpenClaw #77436).
+    OPENCLAW_STATE_DIR: /home/node/.openclaw
+    OPENCLAW_CONFIG_PATH: /home/node/.openclaw/openclaw.json
+    OPENCLAW_CONFIG_DIR: /home/node/.openclaw
+    OPENCLAW_WORKSPACE_DIR: /home/node/.openclaw/workspace
+    OPENCLAW_GATEWAY_PORT: "18789"
+    OPENCLAW_DISABLE_BONJOUR: "1"
+    TZ: America/Los_Angeles
+  volumes:
+    # State: config, sessions, the agent's workspace, SQLite (the model sign-in included), logs.
+    - ${CHIPS_OPENCLAW_DIR}/state:/home/node/.openclaw
+    # Auth-profile secrets, which OpenClaw keeps apart from its state.
+    - ${CHIPS_OPENCLAW_DIR}/secrets:/home/node/.config/openclaw
+  cap_drop:
+    - NET_RAW
+    - NET_ADMIN
+  security_opt:
+    - no-new-privileges:true
+  init: true
+
+services:
+  gateway:
+    <<: *openclaw
+    restart: "no"
+    # Bound to every interface inside the container, published on the Mac's loopback only.
+    ports:
+      - "127.0.0.1:18789:18789"
+    command: ["node", "dist/index.js", "gateway", "--bind", "lan", "--port", "18789"]
+    healthcheck:
+      test: ["CMD", "node", "dist/docker-healthcheck.js"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 20s
+
+  # One-off CLI runs (`cli.sh`, onboarding), in the gateway's network namespace. Never started by `up`.
+  cli:
+    <<: *openclaw
+    profiles: ["cli"]
+    network_mode: "service:gateway"
+    environment:
+      <<: *environment
+      BROWSER: echo
+    entrypoint: ["node", "dist/index.js"]
+    stdin_open: true
+    tty: true
