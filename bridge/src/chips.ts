@@ -46,7 +46,8 @@ export class Chips {
   private readonly cursorFile: string;
 
   constructor(private readonly options: ChipsOptions) {
-    this.cursorFile = join(options.stateDir, "chips-cursor.json");
+    // One cursor per harness: the scratch server's place in its log means nothing on 4431's.
+    this.cursorFile = join(options.stateDir, `chips-cursor-${options.harnessId}.json`);
     if (existsSync(this.cursorFile)) {
       this.cursor = (JSON.parse(readFileSync(this.cursorFile, "utf8")) as { since: number }).since;
     }

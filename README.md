@@ -15,6 +15,8 @@ and Chips's own guard fails if anything of OpenClaw appears in Chips.
 | `scripts/up.sh` | start it; the first run makes `~/chips-openclaw`, a gateway token, and OpenClaw's config (no model, no channels, ask before every command) |
 | `scripts/login.sh` | sign OpenClaw in to ChatGPT by device code; the sign-in stays in `~/chips-openclaw` |
 | `scripts/cli.sh` | OpenClaw's own CLI inside the container, e.g. `scripts/cli.sh doctor` |
+| `scripts/scratch-chips.sh` | a scratch Chips on 4436, apart from the live one (Phase 3) |
+| `scripts/bridge.sh` | start the bridge against the scratch Chips or the live one on 4431, stop it by its PID |
 | `scripts/check.sh` | what is running; `--gone` proves it has all gone, against the baseline taken before the install |
 | `scripts/down.sh` | stop it, keeping everything |
 | `scripts/uninstall.sh` | take it all away and prove it |
@@ -26,7 +28,9 @@ Everything OpenClaw and the bridge keep is under `~/chips-openclaw/`:
 - `state/`: OpenClaw's config, sessions, workspace and logs
 - `secrets/`: its sign-in
 - `.env`: the gateway token
-- `bridge/`: the bridge's device key and cursor
+- `bridge/`: the bridge's device key, one cursor per Chips harness, its log, `chips.env` (the scratch
+  harness) and `live.env` (4431's harness address; its token stays in the login keychain)
 - `chips/`: the scratch Chips server's database
 
-The uninstall deletes that folder, the container and the image. This repository stays.
+The uninstall deletes that folder, the container and the image. This repository stays. On 4431,
+`chips remove OpenClaw` takes the harness away first (the plan's Phase 8).
