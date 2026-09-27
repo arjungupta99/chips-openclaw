@@ -104,7 +104,14 @@ export class Bridge {
   /** Tool events that came before the turn's first `chat` event said which room it is in. */
   private readonly early = new Map<string, Payload[]>();
   /** Chips's approval id → OpenClaw's, and whether OpenClaw takes allow-always for it. */
-  private readonly approvals = new Map<string, { readonly id: string; readonly always: boolean }>();
+  /**
+   * Chips's approval id to OpenClaw's, the method that answers it (an exec approval and a plugin
+   * approval are resolved apart) and whether OpenClaw takes a yes for always.
+   */
+  private readonly approvals = new Map<
+    string,
+    { readonly id: string; readonly always: boolean; readonly method: "exec.approval.resolve" | "plugin.approval.resolve" }
+  >();
   private readonly questions = new Map<string, string>();
 
   constructor(
@@ -240,7 +247,7 @@ export class Bridge {
     // command does). A yes for always is then a yes for this once, rather than a refusal that
     // leaves the turn waiting for an answer that never comes.
     const always = event["scope"] === "always" && asked.always;
-    await this.claw.request("exec.approval.resolve", {
+    await this.claw.request(asked.method, {
       id: asked.id,
       decision: !allowed ? "deny" : always ? "allow-always" : "allow-once",
     });
@@ -282,6 +289,8 @@ export class Bridge {
         return this.agent(p);
       case "exec.approval.requested":
         return this.asksApproval(p);
+      case "plugin.approval.requested":
+        return this.asksPluginApproval(p);
       case "question.requested":
         return this.asksQuestion(p);
       default:
@@ -442,7 +451,7 @@ export class Bridge {
     const unavailable = Array.isArray(request["unavailableDecisions"]) ? (request["unavailableDecisions"] as unknown[]) : [];
     const offered = Array.isArray(request["allowedDecisions"]) ? (request["allowedDecisions"] as unknown[]) : undefined;
     const always = !unavailable.includes("allow-always") && (offered === undefined || offered.includes("allow-always"));
-    this.approvals.set(approvalId, { id: clawId, always });
+    this.approvals.set(approvalId, { id: clawId, always, method: "exec.approval.resolve" });
     const expires = num(p["expiresAtMs"]);
     this.write(run, {
       type: "approval.request",
@@ -451,6 +460,47 @@ export class Bridge {
       action: { kind: "shell.exec", input: { command, ...(cwd === undefined ? {} : { cwd }) } },
       preview: { format: "markdown", title: "Run a command", body: `\`\`\`sh\n${command}\n\`\`\`${cwd === undefined ? "" : `\nin \`${cwd}\``}` },
       // A command in the sandboxed container fits none of Chips's closed risk classes.
+      risk: [],
+      expires_in: expires === undefined ? 900 : Math.max(30, Math.round((expires - Date.now()) / 1000)),
+      fallback: "deny",
+      idempotency_key: `openclaw-approval:${clawId}`,
+    });
+  }
+
+  /**
+   * A plugin's ask. Codex's own shell asks this way ("Codex app-server command approval") when the
+   * model runs a command natively rather than through OpenClaw's exec tool; the command is on the
+   * description's `Command:` line.
+   */
+  private asksPluginApproval(p: Payload): void {
+    const clawId = str(p["id"]);
+    const request = (p["request"] ?? {}) as Payload;
+    const sessionKey = str(request["sessionKey"]);
+    const clawRun = str(request["runId"]);
+    if (clawId === undefined || sessionKey === undefined) return;
+    const run = clawRun === undefined ? this.latestRun(sessionKey) : this.runFor(clawRun, sessionKey);
+    if (run === undefined) return;
+    const title = str(request["title"]) ?? "Allow this?";
+    const description = str(request["description"]) ?? "";
+    const command = /^Command: (.+)$/m.exec(description)?.[1];
+    const approvalId = chipsId("apr", `openclaw-approval:${clawId}`);
+    const offered = Array.isArray(request["allowedDecisions"]) ? (request["allowedDecisions"] as unknown[]) : undefined;
+    const always = offered === undefined || offered.includes("allow-always");
+    this.approvals.set(approvalId, { id: clawId, always, method: "plugin.approval.resolve" });
+    const expires = num(p["expiresAtMs"]);
+    this.write(run, {
+      type: "approval.request",
+      run_id: run.chipsRun,
+      approval_id: approvalId,
+      action:
+        command === undefined
+          ? { kind: "tool.call", input: { tool: str(request["toolName"]) ?? "a tool", title } }
+          : { kind: "shell.exec", input: { command } },
+      preview: {
+        format: "markdown",
+        title: command === undefined ? title.slice(0, 120) : "Run a command",
+        body: command === undefined ? description || title : `\`\`\`sh\n${command}\n\`\`\``,
+      },
       risk: [],
       expires_in: expires === undefined ? 900 : Math.max(30, Math.round((expires - Date.now()) / 1000)),
       fallback: "deny",

@@ -230,6 +230,32 @@ describe("supervision", () => {
     assert.deepEqual(calls, [["exec.approval.resolve", { id: "ap-1", decision: "deny" }]]);
   });
 
+  it("asks for Codex's own command as a card, and answers it as a plugin approval", async () => {
+    bridge.onClaw({ event: "chat", payload: { runId: "r9", sessionKey: key(), seq: 1, state: "status" } });
+    bridge.onClaw({
+      event: "plugin.approval.requested",
+      payload: {
+        approvalKind: "plugin",
+        id: "plugin:ap-3",
+        expiresAtMs: Date.now() + 120_000,
+        request: {
+          title: "Codex app-server command approval",
+          description: "Allow Always requests a persistent allow rule for future sessions.\nCommand prefix: [\"ls\",\"-la\"]\nCommand: ls -la\nProposed exec policy: ls, -la",
+          pluginId: "codex",
+          toolName: "codex_command_approval",
+          allowedDecisions: ["allow-once", "allow-always", "deny"],
+          sessionKey: key(),
+          runId: "r9",
+        },
+      },
+    });
+    await bridge.settled();
+    const card = sent.find((event) => event.type === "approval.request");
+    assert.deepEqual(card?.["action"], { kind: "shell.exec", input: { command: "ls -la" } });
+    await bridge.onChips({ type: "approval.resolved", approval_id: card?.["approval_id"], decision: "approved", scope: "always" });
+    assert.deepEqual(calls, [["plugin.approval.resolve", { id: "plugin:ap-3", decision: "allow-always" }]]);
+  });
+
   it("asks OpenClaw's question as a question card, and sends the answer back", async () => {
     bridge.onClaw({ event: "chat", payload: { runId: "r7", sessionKey: key(), seq: 1, state: "status" } });
     bridge.onClaw({
