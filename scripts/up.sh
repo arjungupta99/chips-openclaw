@@ -30,9 +30,12 @@ if [ ! -f "$DIR/state/openclaw.json" ]; then
   oc_run config unset tools.exec.ask
   oc_run config set tools.exec.mode ask
   oc_run config set plugins.entries.codex.enabled true
-  oc_run config set plugins.entries.codex.config.appServer.approvalPolicy on-request
+  # Codex's own sandbox (bubblewrap) cannot start in an unprivileged container, so every command
+  # failed after its yes. The container is the sandbox instead (Arjun's call, 27 September 2026):
+  # full access inside it, and `untrusted` asks for everything beyond Codex's read-only safe list.
+  oc_run config set plugins.entries.codex.config.appServer.approvalPolicy untrusted
   oc_run config set plugins.entries.codex.config.appServer.approvalsReviewer user
-  oc_run config set plugins.entries.codex.config.appServer.sandbox workspace-write
+  oc_run config set plugins.entries.codex.config.appServer.sandbox danger-full-access
 fi
 
 compose up -d gateway
