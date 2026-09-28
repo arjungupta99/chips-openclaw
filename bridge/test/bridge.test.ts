@@ -73,18 +73,25 @@ describe("rooms and sessions", () => {
     assert.deepEqual(calls.map(([method]) => method), ["sessions.create", "chat.send"]);
   });
 
-  it("takes a harness's message Chips says is for it, and answers that harness with to (ADR 0081)", async () => {
-    const other = { participant_id: "hrn_01K4ZQPX000000000000000009", kind: "harness", display_name: "J", role: "member" };
+  it("takes a harness's message Chips says is for it, says whose it is, and answers with no to (ADR 0081)", async () => {
+    const other = { participant_id: "hrn_01K4ZQPX000000000000000009", kind: "harness", display_name: "J Bot", role: "member" };
     await bridge.onChips(said("Is main green?", { from: other, addressed_to: [ME] }));
     assert.deepEqual(calls.map(([method]) => method), ["sessions.create", "chat.send"]);
+    assert.equal(
+      calls[1]?.[1]["message"],
+      "J Bot (an agent in this room) said this to you. Everyone here reads your answer; J Bot acts on it only if you address it as @JBot:\nIs main green?",
+    );
     const r1 = "msg_01K4ZQPX0000000000000000A1";
     bridge.onClaw({
       event: "chat",
       payload: { runId: r1, sessionKey: key(), seq: 1, state: "final", message: { role: "assistant", content: "Yes." } },
     });
     await bridge.settled();
+    // Sent back by itself, an answer kept two agents trading thanks until Chips's guard stopped
+    // them (the live test); the words' @ decides.
     const reply = sent.find((event) => event.type === "message.post");
-    assert.deepEqual(reply?.["to"], [other.participant_id]);
+    assert.equal(reply?.["text"], "Yes.");
+    assert.equal(reply?.["to"], undefined);
   });
 
   it("answers a person with no to", async () => {

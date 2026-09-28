@@ -113,6 +113,16 @@ export function usageOf(usage: unknown, fallbackModel: string): Payload | undefi
 const OVERHEARD_LINES = 20;
 const OVERHEARD_CHARS = 4000;
 
+/**
+ * Another harness's words, as OpenClaw is given them: whose they are, and that it acts on the
+ * answer only when OpenClaw addresses it by the handle Chips answers it to (Chips ADR 0081).
+ */
+function fromAgent(from: Payload, text: string): string {
+  const name = str(from["display_name"]) ?? "Another agent";
+  const handle = `@${name.replace(/\s+/g, "")}`;
+  return `${name} (an agent in this room) said this to you. Everyone here reads your answer; ${name} acts on it only if you address it as ${handle}:\n${text}`;
+}
+
 export class Bridge {
   /** Rooms asked of this harness from the +, waiting for their first words to be claimed. */
   private readonly asked = new Set<string>();
@@ -130,8 +140,6 @@ export class Bridge {
    * `Name: words` (Chips ADR 0081's `message.overheard`): context for its next turn, never a turn.
    */
   private readonly overheard = new Map<string, string[]>();
-  /** The harness that asked, by the message that started a turn: its answer goes back to it. */
-  private readonly askers = new Map<string, string>();
   /** Tool events that came before the turn's first `chat` event said which room it is in. */
   private readonly early = new Map<string, Payload[]>();
   /** Chips's approval id → OpenClaw's, and whether OpenClaw takes allow-always for it. */
@@ -220,10 +228,9 @@ export class Bridge {
     if (this.asked.delete(spaceId)) await this.chips.claim(spaceId, key, titleFrom(words));
     this.goals.set(messageId, words);
     this.latest.set(key, words);
-    if (from["kind"] === "harness") this.askers.set(messageId, String(from["participant_id"]));
     await this.claw.request("chat.send", {
       sessionKey: key,
-      message: this.withOverheard(spaceId, text),
+      message: this.withOverheard(spaceId, from["kind"] === "harness" ? fromAgent(from, text) : text),
       idempotencyKey: messageId,
       ...(await this.attachments(event)),
     });
@@ -481,15 +488,14 @@ export class Bridge {
   private finish(run: Run, clawRun: string, p: Payload): void {
     run.ended = true;
     const text = textOf(p["message"]).trim();
-    // An answer to another harness goes back to it, whether or not the words name it (ADR 0081).
-    const asker = this.askers.get(clawRun);
-    this.askers.delete(clawRun);
+    // No `to`, even for an answer to another harness: it acts on the words only when they @ it.
+    // Sending it back by itself kept Jacobian and OpenClaw trading thanks until Chips's guard
+    // held the fifth (the live test, 27 September 2026).
     if (text !== "") {
       this.write(run, {
         type: "message.post",
         run_id: run.chipsRun,
         text,
-        ...(asker === undefined ? {} : { to: [asker] }),
         idempotency_key: `openclaw-run:${clawRun}:reply`,
       });
     }
