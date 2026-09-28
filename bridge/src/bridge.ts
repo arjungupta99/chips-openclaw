@@ -109,6 +109,10 @@ export function usageOf(usage: unknown, fallbackModel: string): Payload | undefi
   };
 }
 
+/** How much overheard talk goes ahead of a turn: the last twenty lines, about four thousand characters. */
+const OVERHEARD_LINES = 20;
+const OVERHEARD_CHARS = 4000;
+
 export class Bridge {
   /** Rooms asked of this harness from the +, waiting for their first words to be claimed. */
   private readonly asked = new Set<string>();
@@ -121,6 +125,13 @@ export class Bridge {
    */
   private readonly goals = new Map<string, string>();
   private readonly latest = new Map<string, string>();
+  /**
+   * What was said in each room for somebody else since OpenClaw last took a turn there, as
+   * `Name: words` (Chips ADR 0081's `message.overheard`): context for its next turn, never a turn.
+   */
+  private readonly overheard = new Map<string, string[]>();
+  /** The harness that asked, by the message that started a turn: its answer goes back to it. */
+  private readonly askers = new Map<string, string>();
   /** Tool events that came before the turn's first `chat` event said which room it is in. */
   private readonly early = new Map<string, Payload[]>();
   /** Chips's approval id → OpenClaw's, and whether OpenClaw takes allow-always for it. */
@@ -175,6 +186,8 @@ export class Bridge {
         return;
       case "message.new":
         return this.heard(event);
+      case "message.overheard":
+        return this.overhear(event);
       case "run.cancel":
         return this.cancel(event);
       case "run.steer":
@@ -193,22 +206,54 @@ export class Bridge {
     const from = event["from"] as Payload | undefined;
     if (spaceId === undefined || from === undefined) return;
     if (from["participant_id"] === this.self.harnessId) return;
-    // Another harness's words reach this one only when they name it (Chips ADR 0077's rule).
+    // Chips says who a message is for (ADR 0081), and a `message.new` that says is this
+    // harness's. A Chips from before then says nothing, and hands every harness everything:
+    // there another harness's words are this one's only when they name it (ADR 0077's rule).
     const mentions = Array.isArray(event["mentions"]) ? (event["mentions"] as string[]) : [];
-    if (from["kind"] === "harness" && !mentions.includes(this.self.harnessId)) return;
+    const said = Array.isArray(event["addressed_to"]);
+    if (from["kind"] === "harness" && !said && !mentions.includes(this.self.harnessId)) return;
     const text = String(event["text"] ?? "");
     const words = wordsOf(event);
     const key = this.keyFor(spaceId);
+    const messageId = String(event["message_id"] ?? event["id"]);
     await this.ensureSession(key, words);
     if (this.asked.delete(spaceId)) await this.chips.claim(spaceId, key, titleFrom(words));
-    this.goals.set(String(event["message_id"] ?? event["id"]), words);
+    this.goals.set(messageId, words);
     this.latest.set(key, words);
+    if (from["kind"] === "harness") this.askers.set(messageId, String(from["participant_id"]));
     await this.claw.request("chat.send", {
       sessionKey: key,
-      message: text,
-      idempotencyKey: String(event["message_id"] ?? event["id"]),
+      message: this.withOverheard(spaceId, text),
+      idempotencyKey: messageId,
       ...(await this.attachments(event)),
     });
+  }
+
+  /**
+   * Something said in a room for somebody else: kept, the last `OVERHEARD_LINES` of it and no more
+   * than `OVERHEARD_CHARS`, to go ahead of OpenClaw's next turn there. It starts no turn.
+   */
+  private overhear(event: ChipsEvent): void {
+    const spaceId = str(event["space_id"]);
+    const from = event["from"] as Payload | undefined;
+    if (spaceId === undefined || from?.["participant_id"] === this.self.harnessId) return;
+    const name = str(from?.["display_name"]) ?? "Someone";
+    const lines = [...(this.overheard.get(spaceId) ?? []), `${name}: ${wordsOf(event)}`];
+    while (
+      lines.length > OVERHEARD_LINES ||
+      (lines.length > 1 && lines.join("\n").length > OVERHEARD_CHARS)
+    ) {
+      lines.shift();
+    }
+    this.overheard.set(spaceId, lines);
+  }
+
+  /** A turn's words, with what was said in the room since OpenClaw last spoke there ahead of them. */
+  private withOverheard(spaceId: string, text: string): string {
+    const lines = this.overheard.get(spaceId);
+    this.overheard.delete(spaceId);
+    if (lines === undefined || lines.length === 0) return text;
+    return `Said in this room since you last spoke:\n${lines.join("\n")}\n\n${text}`;
   }
 
   /**
@@ -436,8 +481,17 @@ export class Bridge {
   private finish(run: Run, clawRun: string, p: Payload): void {
     run.ended = true;
     const text = textOf(p["message"]).trim();
+    // An answer to another harness goes back to it, whether or not the words name it (ADR 0081).
+    const asker = this.askers.get(clawRun);
+    this.askers.delete(clawRun);
     if (text !== "") {
-      this.write(run, { type: "message.post", run_id: run.chipsRun, text, idempotency_key: `openclaw-run:${clawRun}:reply` });
+      this.write(run, {
+        type: "message.post",
+        run_id: run.chipsRun,
+        text,
+        ...(asker === undefined ? {} : { to: [asker] }),
+        idempotency_key: `openclaw-run:${clawRun}:reply`,
+      });
     }
     const model = run.model ?? str(p["model"]) ?? "openai";
     const usage =

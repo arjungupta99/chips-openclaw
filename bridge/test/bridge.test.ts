@@ -65,12 +65,62 @@ describe("rooms and sessions", () => {
     assert.equal(claims.length, 1);
   });
 
-  it("does not hear another harness unless it is named", async () => {
+  it("from a Chips that does not say who a message is for, hears another harness only when named", async () => {
     const other = { participant_id: "hrn_01K4ZQPX000000000000000009", kind: "harness", display_name: "J", role: "member" };
     await bridge.onChips(said("I will take this one", { from: other }));
     assert.equal(calls.length, 0);
     await bridge.onChips(said("@OpenClaw your turn", { from: other, mentions: [ME] }));
     assert.deepEqual(calls.map(([method]) => method), ["sessions.create", "chat.send"]);
+  });
+
+  it("takes a harness's message Chips says is for it, and answers that harness with to (ADR 0081)", async () => {
+    const other = { participant_id: "hrn_01K4ZQPX000000000000000009", kind: "harness", display_name: "J", role: "member" };
+    await bridge.onChips(said("Is main green?", { from: other, addressed_to: [ME] }));
+    assert.deepEqual(calls.map(([method]) => method), ["sessions.create", "chat.send"]);
+    const r1 = "msg_01K4ZQPX0000000000000000A1";
+    bridge.onClaw({
+      event: "chat",
+      payload: { runId: r1, sessionKey: key(), seq: 1, state: "final", message: { role: "assistant", content: "Yes." } },
+    });
+    await bridge.settled();
+    const reply = sent.find((event) => event.type === "message.post");
+    assert.deepEqual(reply?.["to"], [other.participant_id]);
+  });
+
+  it("answers a person with no to", async () => {
+    await bridge.onChips(said("Hi", { addressed_to: [ME] }));
+    bridge.onClaw({
+      event: "chat",
+      payload: { runId: "msg_01K4ZQPX0000000000000000A1", sessionKey: key(), seq: 1, state: "final", message: { role: "assistant", content: "Hello." } },
+    });
+    await bridge.settled();
+    assert.equal(sent.find((event) => event.type === "message.post")?.["to"], undefined);
+  });
+
+  it("keeps what it overheard for the room's next turn, and takes no turn on it (ADR 0081)", async () => {
+    const other = { participant_id: "hrn_01K4ZQPX000000000000000009", kind: "harness", display_name: "Jacobian", role: "member" };
+    await bridge.onChips({ ...said("@Jacobian draft the notes"), type: "message.overheard" });
+    await bridge.onChips({ ...said("On it.", { from: other }), type: "message.overheard" });
+    assert.equal(calls.length, 0);
+    await bridge.onChips(said("@OpenClaw and the build?", { message_id: "msg_01K4ZQPX0000000000000000A2" }));
+    const send = calls.find(([method]) => method === "chat.send")?.[1];
+    assert.equal(
+      send?.["message"],
+      "Said in this room since you last spoke:\nArjun: @Jacobian draft the notes\nJacobian: On it.\n\n@OpenClaw and the build?",
+    );
+    // Said once: the next turn starts clean.
+    await bridge.onChips(said("Thanks", { message_id: "msg_01K4ZQPX0000000000000000A3" }));
+    assert.equal(calls.filter(([method]) => method === "chat.send").at(-1)?.[1]["message"], "Thanks");
+  });
+
+  it("keeps only the last twenty lines it overheard", async () => {
+    for (let n = 1; n <= 25; n += 1) {
+      await bridge.onChips({ ...said(`line ${n}`), type: "message.overheard" });
+    }
+    await bridge.onChips(said("So?"));
+    const message = String(calls.find(([method]) => method === "chat.send")?.[1]["message"]);
+    assert.ok(message.includes("Arjun: line 6\n"));
+    assert.ok(!message.includes("Arjun: line 5\n"));
   });
 
   it("sends a person's photo inline, as base64", async () => {

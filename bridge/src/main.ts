@@ -42,7 +42,9 @@ bridge = new Bridge(chips, claw, { harnessId: config.harnessId, agent: config.ag
 
 /**
  * Rooms asked of this harness while the bridge was away: their first words are already in the log,
- * as `message.post`, so they are read back and handed over as the words would have arrived live.
+ * as `message.post`, so they are read back and handed over as the words would have arrived live —
+ * as `message.new` when they were for this harness, or say nothing of who they were for (from a
+ * Chips before ADR 0081), and as `message.overheard`, context and no turn, when they were not.
  */
 async function catchUp(active: Bridge): Promise<void> {
   const { asked } = await chips.ownSpaces();
@@ -55,12 +57,15 @@ async function catchUp(active: Bridge): Promise<void> {
       const spaceId = String(event["space_id"]);
       const actor = event["actor"] as { kind?: string; id?: string } | undefined;
       if (event.type !== "message.post" || !waiting.has(spaceId) || actor?.kind !== "person") continue;
-      waiting.delete(spaceId);
+      const addressed = event["addressed_to"];
+      const forMe = !Array.isArray(addressed) || addressed.includes(config.harnessId);
+      // What was for somebody else is the room's context; the room waits for words that are ours.
+      if (forMe) waiting.delete(spaceId);
       // DOCS: the log holds `message.post`; a harness hears `message.new`. The message id is the
       // event's ULID with `msg_` (connect/websocket), and `from` is rebuilt from the actor.
       const heard: ChipsEvent = {
         ...event,
-        type: "message.new",
+        type: forMe ? "message.new" : "message.overheard",
         message_id: `msg_${String(event["id"]).replace(/^evt_/, "")}`,
         from: { participant_id: actor.id, kind: "person" },
       };
