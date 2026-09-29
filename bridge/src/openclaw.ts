@@ -42,6 +42,10 @@ export interface OpenClawOptions {
   readonly stateDir: string;
   readonly log: (message: string) => void;
   readonly onEvent: (event: ClawEvent) => void;
+  /** The gateway said hello: OpenClaw can answer. */
+  readonly onUp?: () => void;
+  /** The gateway's socket closed, or a connect failed: OpenClaw cannot answer until it is back. */
+  readonly onDown?: () => void;
 }
 
 export class OpenClaw {
@@ -88,13 +92,18 @@ export class OpenClaw {
         options.log(`openclaw: connected, protocol ${hello.protocol}, scopes ${hello.auth.scopes.join(" ")}`);
         this.connected = true;
         for (const wake of this.waiting.splice(0)) wake();
+        options.onUp?.();
       },
-      onConnectError: (error) => options.log(`openclaw: connect failed: ${error.message}`),
+      onConnectError: (error) => {
+        options.log(`openclaw: connect failed: ${error.message}`);
+        options.onDown?.();
+      },
       onReconnectPaused: (info) =>
         options.log(`openclaw: reconnect paused (${info.detailCode ?? info.code}): ${info.reason}`),
       onClose: (code) => {
         options.log(`openclaw: closed (${code})`);
         this.connected = false;
+        options.onDown?.();
       },
       onEvent: (frame) =>
         options.onEvent({ event: frame.event, payload: (frame.payload ?? {}) as Record<string, unknown> }),

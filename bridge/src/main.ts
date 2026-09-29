@@ -24,6 +24,35 @@ const chips = new Chips({
   log,
 });
 let bridge: Bridge | undefined;
+
+/**
+ * OpenClaw down for this long is trouble Chips shows people (Chips ADR 0083): its face marked,
+ * and why, under a message it has not picked up. A blip shorter than this is not.
+ */
+const DOWN_FOR_MS = 10_000;
+let down: ReturnType<typeof setTimeout> | undefined;
+let troubled = false;
+const say = (trouble: string | undefined): void => {
+  void chips.status(trouble).catch((error) => log(`chips: could not say how OpenClaw is: ${String(error)}`));
+};
+const clawUp = (): void => {
+  if (down !== undefined) clearTimeout(down);
+  down = undefined;
+  if (!troubled) return;
+  troubled = false;
+  log("bridge: OpenClaw is back; telling Chips");
+  say(undefined);
+};
+const clawDown = (): void => {
+  if (down !== undefined || troubled) return;
+  down = setTimeout(() => {
+    down = undefined;
+    troubled = true;
+    log("bridge: OpenClaw's gateway has been unreachable for 10 s; telling Chips");
+    say("Can't reach its gateway");
+  }, DOWN_FOR_MS);
+  down.unref();
+};
 /** BRIDGE_TRACE=1: each OpenClaw event's name and the start of its payload, to check the mapping. */
 const trace = process.env["BRIDGE_TRACE"] === "1";
 const claw = new OpenClaw({
@@ -37,6 +66,8 @@ const claw = new OpenClaw({
     }
     bridge?.onClaw(event);
   },
+  onUp: clawUp,
+  onDown: clawDown,
 });
 bridge = new Bridge(chips, claw, { harnessId: config.harnessId, agent: config.agent }, log);
 

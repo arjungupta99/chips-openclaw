@@ -44,6 +44,11 @@ export class Chips {
   private workspaceId: string | undefined;
   private cursor: number | undefined;
   private readonly cursorFile: string;
+  /**
+   * What is wrong on OpenClaw's side, as Chips was last told (Chips ADR 0083). Chips forgets it
+   * when the harness goes offline, so it is said again on every connection.
+   */
+  private trouble: string | undefined;
 
   constructor(private readonly options: ChipsOptions) {
     // One cursor per harness: the scratch server's place in its log means nothing on 4431's.
@@ -96,6 +101,19 @@ export class Chips {
 
   async ownSpaces(): Promise<OwnSpaces> {
     return (await this.call("GET", `/v1/harnesses/${this.options.harnessId}/spaces`)) as OwnSpaces;
+  }
+
+  /**
+   * Say what is wrong on OpenClaw's side, or with nothing that nothing is (Chips ADR 0083). People
+   * see OpenClaw marked, and why, under a message it has not picked up.
+   */
+  async status(trouble: string | undefined): Promise<void> {
+    this.trouble = trouble;
+    await this.call(
+      "PUT",
+      `/v1/harnesses/${this.options.harnessId}/status`,
+      trouble === undefined ? { state: "ok" } : { state: "trouble", reason: trouble },
+    );
   }
 
   /** Claim a room a person asked for, under this harness's own key for its session. */
@@ -181,6 +199,12 @@ export class Chips {
   private subscribe(socket: WebSocket, hello: ChipsEvent): void {
     this.workspaceId = String(hello["workspace_id"]);
     this.options.log(`chips: connected to workspace ${this.workspaceId}, from seq ${this.cursor ?? "now"}`);
+    // Said again, since Chips forgot it when this harness went offline (Chips ADR 0083).
+    if (this.trouble !== undefined) {
+      void this.status(this.trouble).catch((error) =>
+        this.options.log(`chips: could not say the trouble again: ${String(error)}`),
+      );
+    }
     socket.send(
       JSON.stringify({
         frame: "subscribe",
