@@ -75,7 +75,7 @@ bridge = new Bridge(chips, claw, { harnessId: config.harnessId, agent: config.ag
  * Rooms asked of this harness while the bridge was away: their first words are already in the log,
  * as `message.post`, so they are read back and handed over as the words would have arrived live —
  * as `message.new` when they were for this harness, or say nothing of who they were for (from a
- * Chips before ADR 0081), and as `message.overheard`, context and no turn, when they were not.
+ * Chips before ADR 0081), and as `message.overheard`, no turn, when they were not.
  */
 async function catchUp(active: Bridge): Promise<void> {
   const { asked } = await chips.ownSpaces();

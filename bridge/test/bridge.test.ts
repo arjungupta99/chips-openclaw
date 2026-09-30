@@ -104,25 +104,16 @@ describe("rooms and sessions", () => {
     assert.equal(sent.find((event) => event.type === "message.post")?.["to"], undefined);
   });
 
-  it("keeps what it overheard for the room's next turn, and takes no turn on it (ADR 0081)", async () => {
+  it("takes no turn on what it overheard, and keeps none of it (ADR 0081, ADR 0088)", async () => {
     const other = { participant_id: "hrn_01K4ZQPX000000000000000009", kind: "harness", display_name: "Jacobian", role: "member" };
     await bridge.onChips({ ...said("@Jacobian draft the notes"), type: "message.overheard" });
     await bridge.onChips({ ...said("On it.", { from: other }), type: "message.overheard" });
     assert.equal(calls.length, 0);
     await bridge.onChips(said("@OpenClaw and the build?", { message_id: "msg_01K4ZQPX0000000000000000A2" }));
-    const send = calls.find(([method]) => method === "chat.send")?.[1];
-    assert.equal(
-      send?.["message"],
-      "Said in this room since you last spoke:\nArjun: @Jacobian draft the notes\nJacobian: On it.\n\n@OpenClaw and the build?",
-    );
-    // Said once: the next turn starts clean.
-    await bridge.onChips(said("Thanks", { message_id: "msg_01K4ZQPX0000000000000000A3" }));
-    assert.equal(calls.filter(([method]) => method === "chat.send").at(-1)?.[1]["message"], "Thanks");
+    assert.equal(calls.find(([method]) => method === "chat.send")?.[1]["message"], "@OpenClaw and the build?");
   });
 
-  it("puts what Chips handed over ahead of the turn in place of its own buffer (Chips ADR 0088)", async () => {
-    // Overheard before a restart of the bridge, and lost with it; Chips hands the room over anyway.
-    await bridge.onChips({ ...said("an older line"), type: "message.overheard" });
+  it("puts what Chips handed over ahead of the turn (Chips ADR 0088)", async () => {
     await bridge.onChips(
       said("@OpenClaw what did Jacobian say?", {
         message_id: "msg_01K4ZQPX0000000000000000A2",
@@ -145,13 +136,14 @@ describe("rooms and sessions", () => {
       send?.["message"],
       "Said in this room since you last spoke:\nArjun: @Jacobian the notes?\nJacobian: Drafted, in the doc.\n(Dana joined the room)\n\n@OpenClaw what did Jacobian say?",
     );
-    // The buffer went with it: a turn Chips hands nothing with is told nothing stale.
+    // A turn Chips hands nothing with is told nothing, whatever was overheard before it.
+    await bridge.onChips({ ...said("an overheard line"), type: "message.overheard" });
     await bridge.onChips(said("Thanks", { message_id: "msg_01K4ZQPX0000000000000000A3" }));
     assert.equal(calls.filter(([method]) => method === "chat.send").at(-1)?.[1]["message"], "Thanks");
   });
 
-  it("reads Chips's context as lines, and nothing from a Chips that hands none over", () => {
-    assert.equal(heardIn(undefined, ME), undefined);
+  it("reads Chips's context as lines, and nothing when it hands none over", () => {
+    assert.deepEqual(heardIn(undefined, ME), []);
     assert.deepEqual(heardIn({ lines: [] }, ME), []);
     assert.deepEqual(
       heardIn(
@@ -179,16 +171,6 @@ describe("rooms and sessions", () => {
         "(Dana K left the room)",
       ],
     );
-  });
-
-  it("keeps only the last twenty lines it overheard", async () => {
-    for (let n = 1; n <= 25; n += 1) {
-      await bridge.onChips({ ...said(`line ${n}`), type: "message.overheard" });
-    }
-    await bridge.onChips(said("So?"));
-    const message = String(calls.find(([method]) => method === "chat.send")?.[1]["message"]);
-    assert.ok(message.includes("Arjun: line 6\n"));
-    assert.ok(!message.includes("Arjun: line 5\n"));
   });
 
   it("sends a person's photo inline, as base64", async () => {

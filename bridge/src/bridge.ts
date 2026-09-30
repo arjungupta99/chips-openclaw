@@ -110,11 +110,11 @@ function contextLineOf(line: Payload): string | undefined {
  * What Chips handed over with a message (Chips ADR 0088): the room's lines since this harness last
  * spoke there, read from Chips's log, so a restart of the bridge loses none. A message that was
  * this harness's to answer is left out: it had a turn of its own. Nothing when the message carries
- * no context, as from a Chips older than that; the bridge's own buffer answers then.
+ * no context.
  */
-export function heardIn(context: unknown, self: string): string[] | undefined {
+export function heardIn(context: unknown, self: string): string[] {
   const lines = (context as Payload | null | undefined)?.["lines"];
-  if (!Array.isArray(lines)) return undefined;
+  if (!Array.isArray(lines)) return [];
   return lines.flatMap((each) => {
     if (typeof each !== "object" || each === null) return [];
     const line = each as Payload;
@@ -157,10 +157,6 @@ export function usageOf(usage: unknown, fallbackModel: string): Payload | undefi
   };
 }
 
-/** How much overheard talk goes ahead of a turn: the last twenty lines, about four thousand characters. */
-const OVERHEARD_LINES = 20;
-const OVERHEARD_CHARS = 4000;
-
 /**
  * Another harness's words, as OpenClaw is given them: whose they are, and that it acts on the
  * answer only when OpenClaw addresses it by the handle Chips answers it to (Chips ADR 0081).
@@ -183,11 +179,6 @@ export class Bridge {
    */
   private readonly goals = new Map<string, string>();
   private readonly latest = new Map<string, string>();
-  /**
-   * What was said in each room for somebody else since OpenClaw last took a turn there, as
-   * `Name: words` (Chips ADR 0081's `message.overheard`): context for its next turn, never a turn.
-   */
-  private readonly overheard = new Map<string, string[]>();
   /** Tool events that came before the turn's first `chat` event said which room it is in. */
   private readonly early = new Map<string, Payload[]>();
   /** Chips's approval id → OpenClaw's, and whether OpenClaw takes allow-always for it. */
@@ -242,8 +233,10 @@ export class Bridge {
         return;
       case "message.new":
         return this.heard(event);
+      // Said for somebody else (Chips ADR 0081): never a turn, and not kept. Its words come back
+      // with the next message for OpenClaw in that room (ADR 0088).
       case "message.overheard":
-        return this.overhear(event);
+        return;
       case "run.cancel":
         return this.cancel(event);
       case "run.steer":
@@ -279,7 +272,6 @@ export class Bridge {
     await this.claw.request("chat.send", {
       sessionKey: key,
       message: this.withOverheard(
-        spaceId,
         from["kind"] === "harness" ? fromAgent(from, text) : text,
         event["context"],
       ),
@@ -289,34 +281,12 @@ export class Bridge {
   }
 
   /**
-   * Something said in a room for somebody else: kept, the last `OVERHEARD_LINES` of it and no more
-   * than `OVERHEARD_CHARS`, to go ahead of OpenClaw's next turn there. It starts no turn.
+   * A turn's words, with what was said in the room since OpenClaw last spoke there ahead of them,
+   * as Chips handed it over (ADR 0088).
    */
-  private overhear(event: ChipsEvent): void {
-    const spaceId = str(event["space_id"]);
-    const from = event["from"] as Payload | undefined;
-    if (spaceId === undefined || from?.["participant_id"] === this.self.harnessId) return;
-    const name = str(from?.["display_name"]) ?? "Someone";
-    const lines = [...(this.overheard.get(spaceId) ?? []), `${name}: ${wordsOf(event)}`];
-    while (
-      lines.length > OVERHEARD_LINES ||
-      (lines.length > 1 && lines.join("\n").length > OVERHEARD_CHARS)
-    ) {
-      lines.shift();
-    }
-    this.overheard.set(spaceId, lines);
-  }
-
-  /**
-   * A turn's words, with what was said in the room since OpenClaw last spoke there ahead of them:
-   * as Chips handed it over (ADR 0088), else as the bridge overheard it. The buffer is taken either
-   * way, so it never holds lines already told.
-   */
-  private withOverheard(spaceId: string, text: string, context?: unknown): string {
-    const buffered = this.overheard.get(spaceId);
-    this.overheard.delete(spaceId);
-    const lines = heardIn(context, this.self.harnessId) ?? buffered;
-    if (lines === undefined || lines.length === 0) return text;
+  private withOverheard(text: string, context: unknown): string {
+    const lines = heardIn(context, this.self.harnessId);
+    if (lines.length === 0) return text;
     return `Said in this room since you last spoke:\n${lines.join("\n")}\n\n${text}`;
   }
 
