@@ -15,22 +15,28 @@ const ARJUN = { participant_id: "usr_01K4ZQPX000000000000000003", kind: "person"
 let sent: ChipsEvent[] = [];
 let claims: [string, string, string | undefined][] = [];
 let calls: [string, Record<string, unknown>][] = [];
-/** This harness's agents as Chips keeps them, and what attaching did. */
+/** This harness's agents as Chips keeps them, one room each (ADR 0087), and what attaching did. */
 let agents: ChipsAgent[] = [];
 let attached: [string, string, string][] = [];
-let keyed: Record<string, unknown>[] = [];
 let bridge: Bridge;
+
+/** One of our agents as Chips lists it, in one room or in none. */
+function agentIn(agentId: string, key: string, room: string | null, name = "OpenClaw"): ChipsAgent {
+  return { agent_id: agentId, key, name, lead: false, state: "active", spaces: room === null ? [] : [room], room };
+}
 
 const chips: ChipsPort = {
   send: async (event) => void sent.push(event),
-  claim: async (spaceId, key, title) => void claims.push([spaceId, key, title]),
+  // As Chips does since one room per agent: the claim key's own agent takes the harness's place.
+  claim: async (spaceId, key, title) => {
+    claims.push([spaceId, key, title]);
+    agents = [...agents.filter((each) => each.key !== key), agentIn(`agt_${key}`, key, spaceId)];
+  },
   fetchAttachment: async () => Buffer.from("png-bytes"),
   agents: async () => agents.map((each) => ({ ...each, spaces: [...each.spaces] })),
   registerAgent: async ({ key, name }) => {
     const had = agents.find((each) => each.key === key);
-    const agent: ChipsAgent = had === undefined
-      ? { agent_id: `agt_${key}`, key, name, lead: false, state: "active", spaces: [] }
-      : { ...had, name };
+    const agent: ChipsAgent = had === undefined ? agentIn(`agt_${key}`, key, null, name) : { ...had, name };
     agents = [...agents.filter((each) => each.key !== key), agent];
     return agent;
   },
@@ -38,14 +44,13 @@ const chips: ChipsPort = {
     attached.push([agentId, spaceId, replacing]);
     agents = agents.map((each) =>
       each.agent_id === agentId
-        ? { ...each, spaces: [...each.spaces, spaceId] }
+        ? { ...each, spaces: [spaceId], room: spaceId }
         : each.agent_id === replacing
-          ? { ...each, spaces: each.spaces.filter((room) => room !== spaceId) }
+          ? { ...each, spaces: [], room: null }
           : each,
     );
     return true;
   },
-  ownSpaces: async () => ({ spaces: keyed, asked: [] }),
 };
 const claw: ClawPort = {
   request: async <T>(method: string, params: Record<string, unknown>) => {
@@ -60,7 +65,6 @@ beforeEach(() => {
   calls = [];
   agents = [];
   attached = [];
-  keyed = [];
   bridge = new Bridge(chips, claw, { harnessId: ME, agent: "main" }, () => undefined);
 });
 
@@ -471,6 +475,18 @@ describe("supervision", () => {
     await bridge.onChips({ type: "question.answered", ask_id: ask?.["ask_id"], answers: [{ question_id: "day", values: ["Sunday"] }] });
     assert.deepEqual(calls, [["question.resolve", { id: "q-1", answers: { answers: { day: ["Sunday"] } } }]]);
   });
+
+  it("asks nothing for a turn that has ended: a stopped turn's late asks have no card to go on", async () => {
+    bridge.onClaw({ event: "chat", payload: { runId: "r12", sessionKey: key(), seq: 1, state: "aborted" } });
+    bridge.onClaw({ event: "exec.approval.requested", payload: { id: "ap-9", request: { command: "rm -rf build", sessionKey: key(), runId: "r12" } } });
+    bridge.onClaw({ event: "plugin.approval.requested", payload: { id: "plugin:ap-9", request: { title: "Allow?", sessionKey: key(), runId: "r12" } } });
+    bridge.onClaw({
+      event: "question.requested",
+      payload: { id: "q-9", sessionKey: key(), runId: "r12", questions: [{ questionId: "day", question: "Which day?", options: [] }] },
+    });
+    await bridge.settled();
+    assert.deepEqual(sent.map((event) => event.type), ["run.started", "run.failed"]);
+  });
 });
 
 describe("words", () => {
@@ -499,15 +515,14 @@ describe("words", () => {
 });
 
 describe("OpenClaw's agents as agents in Chips (Chips ADR 0087)", () => {
-  const FALLBACK: ChipsAgent = { agent_id: "agt_fallback", key: ME, name: "OpenClaw", lead: false, state: "active", spaces: [] };
+  const FALLBACK = agentIn("agt_fallback", ME, ROOM);
   const OTHER_ROOM = "spc_01K4ZQPX000000000000000077";
 
   beforeEach(() => {
-    agents = [{ ...FALLBACK, spaces: [ROOM, OTHER_ROOM] }];
-    keyed = [{ space_id: OTHER_ROOM, key: "agent:scout:chips-spc_01k4zqpx000000000000000077" }];
+    agents = [FALLBACK];
   });
 
-  it("registers each agent the gateway lists, named as the harness when it has no name of its own", async () => {
+  it("registers each agent the gateway lists, named as the harness when it has no name of its own, and moves none", async () => {
     await bridge.adoptAgents({
       defaultId: "main",
       agents: [{ id: "main" }, { id: "scout", identity: { name: "Scout" } }, { id: "ops", kind: "system" }],
@@ -516,16 +531,10 @@ describe("OpenClaw's agents as agents in Chips (Chips ADR 0087)", () => {
       agents.filter((each) => each.key !== ME).map((each) => [each.key, each.name]),
       [["main", "OpenClaw"], ["scout", "Scout"]],
     );
-    // Each takes the default agent's place in the rooms the bridge serves: its session's room, and
-    // the primary one everywhere else.
-    assert.deepEqual(attached, [
-      ["agt_main", ROOM, "agt_fallback"],
-      ["agt_scout", OTHER_ROOM, "agt_fallback"],
-    ]);
-    assert.deepEqual(agents.find((each) => each.key === ME)?.spaces, []);
-    // Again, and nothing moves.
-    await bridge.adoptAgents({ defaultId: "main", agents: [{ id: "main" }, { id: "scout" }] });
-    assert.equal(attached.length, 2);
+    // An agent is in one room at a time: putting each in the default agent's rooms at start, as
+    // the bridge did before, would have Chips refuse all but one. Each stays where Chips has it.
+    assert.deepEqual(attached, []);
+    assert.equal(agents.find((each) => each.key === ME)?.room, ROOM);
   });
 
   it("serves only OPENCLAW_AGENT when it is set", async () => {
@@ -534,8 +543,7 @@ describe("OpenClaw's agents as agents in Chips (Chips ADR 0087)", () => {
   });
 
   it("takes a turn for each of its agents a message is for, each in its own session, said as it", async () => {
-    await bridge.adoptAgents({ defaultId: "main", agents: [{ id: "main" }, { id: "scout", name: "Scout" }] });
-    agents = agents.map((each) => (each.key === "scout" ? { ...each, spaces: [...each.spaces, ROOM] } : each));
+    agents = [agentIn("agt_fallback", ME, OTHER_ROOM), agentIn("agt_main", "main", ROOM), agentIn("agt_scout", "scout", ROOM, "Scout")];
     await bridge.adoptAgents({ defaultId: "main", agents: [{ id: "main" }, { id: "scout", name: "Scout" }] });
     calls = [];
     await bridge.onChips(said("@OpenClaw @Scout which?", { addressed_to: ["agt_main", "agt_scout"], for: ["agt_main", "agt_scout"] }));
@@ -553,26 +561,167 @@ describe("OpenClaw's agents as agents in Chips (Chips ADR 0087)", () => {
     assert.deepEqual(sent.map((event) => event.type), ["run.started", "message.post", "run.completed"]);
   });
 
-  it("puts its primary agent in the default one's place in a room it is added to later", async () => {
-    await bridge.adoptAgents({ defaultId: "main", agents: [{ id: "main" }] });
+  it("puts its primary agent in the default one's place, for a message to the default one, when it is in no room", async () => {
     const later = "spc_01K4ZQPX000000000000000088";
-    agents = agents.map((each) => (each.key === ME ? { ...each, spaces: [later] } : each));
+    agents = [agentIn("agt_fallback", ME, later)];
+    await bridge.adoptAgents({ defaultId: "main", agents: [{ id: "main" }] });
     await bridge.onChips(said("Hi", { space_id: later, for: ["agt_fallback"] }));
-    assert.deepEqual(attached.at(-1), ["agt_main", later, "agt_fallback"]);
+    assert.deepEqual(attached, [["agt_main", later, "agt_fallback"]]);
     assert.equal(calls.find(([method]) => method === "chat.send")?.[1]["sessionKey"], bridge.keyFor(later, "main"));
+    bridge.onClaw({ event: "chat", payload: { runId: "msg_01K4ZQPX0000000000000000A1", sessionKey: bridge.keyFor(later, "main"), seq: 1, state: "final", message: "Hello." } });
+    await bridge.settled();
+    assert.deepEqual(sent.find((event) => event.type === "message.post")?.["actor"], { kind: "agent", id: "agt_main" });
   });
 
-  it("serves a room asked of it from the + when Chips says the message is for the harness itself", async () => {
+  it("answers as the default agent when its primary agent is in another room, and moves nobody", async () => {
+    agents = [FALLBACK, agentIn("agt_main", "main", OTHER_ROOM)];
+    await bridge.adoptAgents({ defaultId: "main", agents: [{ id: "main" }] });
+    await bridge.onChips(said("Hi", { for: ["agt_fallback"], addressed_to: ["agt_fallback"] }));
+    assert.deepEqual(attached, []);
+    assert.equal(calls.find(([method]) => method === "chat.send")?.[1]["sessionKey"], key());
+    bridge.onClaw({ event: "chat", payload: { runId: "msg_01K4ZQPX0000000000000000A1", sessionKey: key(), seq: 1, state: "final", message: "Hello." } });
+    await bridge.settled();
+    assert.deepEqual(sent.find((event) => event.type === "message.post")?.["actor"], { kind: "agent", id: "agt_fallback" });
+  });
+
+  it("claims a room asked of it from the + and answers as the agent Chips makes for the claim's key", async () => {
+    agents = [agentIn("agt_fallback", ME, OTHER_ROOM), agentIn("agt_main", "main", ROOM)];
     await bridge.adoptAgents({ defaultId: "main", agents: [{ id: "main" }] });
     calls = [];
     const asked = "spc_01K4ZQPX000000000000000099";
+    const session = bridge.keyFor(asked, "main");
     await bridge.onChips({ type: "space.created", space_id: asked, asked_of: ME, kind: "direct" });
-    // The claim puts the default agent in the harness's place; the primary one then takes its.
-    agents = agents.map((each) => (each.key === ME ? { ...each, spaces: [asked] } : each));
     await bridge.onChips(said("Plan a picnic", { space_id: asked, addressed_to: [ME], for: [ME] }));
-    assert.deepEqual(claims.at(-1)?.slice(0, 2), [asked, bridge.keyFor(asked, "main")]);
-    assert.deepEqual(attached.at(-1), ["agt_main", asked, "agt_fallback"]);
-    assert.equal(calls.find(([method]) => method === "chat.send")?.[1]["sessionKey"], bridge.keyFor(asked, "main"));
+    assert.deepEqual(claims.at(-1)?.slice(0, 2), [asked, session]);
+    // Chips puts the key's own agent in the harness's place; the bridge attaches nobody.
+    assert.deepEqual(attached, []);
+    assert.equal(calls.find(([method]) => method === "chat.send")?.[1]["sessionKey"], session);
+    bridge.onClaw({ event: "chat", payload: { runId: "msg_01K4ZQPX0000000000000000A1", sessionKey: session, seq: 1, state: "final", message: "Saturday?" } });
+    await bridge.settled();
+    const reply = sent.find((event) => event.type === "message.post");
+    assert.deepEqual(reply?.["actor"], { kind: "agent", id: `agt_${session}` });
+    assert.equal(sent[0]?.["space_id"], asked);
+  });
+
+  it("claims a room asked of it beside another harness (also_asked_of) as one asked of it", async () => {
+    await bridge.adoptAgents({ defaultId: "main", agents: [{ id: "main" }] });
+    const asked = "spc_01K4ZQPX000000000000000099";
+    const created = { type: "space.created", space_id: asked, asked_of: "hrn_01K4ZQPX000000000000000009", also_asked_of: [ME], kind: "group" };
+    assert.equal(bridge.asksMe(created), true);
+    await bridge.onChips(created);
+    await bridge.onChips(said("Plan a picnic", { space_id: asked, addressed_to: [ME], for: [ME] }));
+    assert.deepEqual(claims, [[asked, bridge.keyFor(asked, "main"), "Plan a picnic"]]);
+    // Asked of somebody else alone, it is not this harness's to claim.
+    await bridge.onChips({ ...created, space_id: OTHER_ROOM, also_asked_of: [] });
+    await bridge.onChips(said("Hi", { space_id: OTHER_ROOM, message_id: "msg_01K4ZQPX0000000000000000A2", addressed_to: [ME], for: [ME] }));
+    assert.equal(claims.length, 1);
+  });
+
+  it("takes a turn for an agent keyed by a session in that session, with its OpenClaw agent, wherever Chips moved it", async () => {
+    const carried = "agent:scout:chips-spc_01k4zqpx000000000000000077";
+    agents = [FALLBACK, agentIn("agt_carried", carried, OTHER_ROOM)];
+    await bridge.adoptAgents({ defaultId: "main", agents: [{ id: "main" }, { id: "scout" }] });
+    await bridge.onChips({ type: "agent.attached", agent_id: "agt_carried", space_id: ROOM, moved_from: OTHER_ROOM });
+    calls = [];
+    await bridge.onChips(said("Still there?", { addressed_to: ["agt_carried"], for: ["agt_carried"] }));
+    assert.deepEqual(calls[0], ["sessions.create", { key: carried, agentId: "scout", displayName: "Still there?" }]);
+    assert.deepEqual(calls[1]?.[1], { sessionKey: carried, message: "Still there?", idempotencyKey: "msg_01K4ZQPX0000000000000000A1:agt_carried" });
+    bridge.onClaw({ event: "chat", payload: { runId: "msg_01K4ZQPX0000000000000000A1:agt_carried", sessionKey: carried, seq: 1, state: "final", message: "Yes." } });
+    await bridge.settled();
+    // In the room it was asked in, not the one its session is named after.
+    assert.equal(sent[0]?.["space_id"], ROOM);
+    for (const event of sent) assert.deepEqual(event["actor"], { kind: "agent", id: "agt_carried" });
+  });
+
+  it("says a turn OpenClaw starts on its own as the agent keyed by the session, in the room Chips last put it in", async () => {
+    const carried = "agent:main:chips-spc_01k4zqpx000000000000000077";
+    agents = [FALLBACK, agentIn("agt_carried", carried, OTHER_ROOM)];
+    await bridge.adoptAgents({ defaultId: "main", agents: [{ id: "main" }] });
+    await bridge.onChips({ type: "agent.attached", agent_id: "agt_carried", space_id: ROOM, moved_from: OTHER_ROOM });
+    bridge.onClaw({ event: "chat", payload: { runId: "cron-1", sessionKey: carried, seq: 1, state: "final", message: "Reminder: the table." } });
+    await bridge.settled();
+    assert.deepEqual(sent.map((event) => event.type), ["run.started", "message.post", "run.completed"]);
+    assert.equal(sent[0]?.["space_id"], ROOM);
+    for (const event of sent) assert.deepEqual(event["actor"], { kind: "agent", id: "agt_carried" });
+  });
+
+  it("forgets an agent's room when Chips releases it, and says what it starts then with no room, for Chips to hold", async () => {
+    const carried = "agent:main:chips-spc_01k4zqpx000000000000000077";
+    agents = [FALLBACK, agentIn("agt_carried", carried, ROOM)];
+    await bridge.adoptAgents({ defaultId: "main", agents: [{ id: "main" }] });
+    await bridge.onChips({ type: "agent.released", agent_id: "agt_carried", space_id: ROOM, reason: "archived" });
+    bridge.onClaw({ event: "agent", payload: { runId: "cron-2", sessionKey: carried, seq: 1, stream: "tool", data: { phase: "start", name: "exec", toolCallId: "call_9" } } });
+    bridge.onClaw({ event: "chat", payload: { runId: "cron-2", sessionKey: carried, seq: 2, state: "final", message: "Done while you were away." } });
+    await bridge.settled();
+    // No run, no steps, no usage: only its words, naming no room.
+    assert.deepEqual(sent, [
+      {
+        type: "message.post",
+        text: "Done while you were away.",
+        idempotency_key: "openclaw-run:cron-2:reply",
+        actor: { kind: "agent", id: "agt_carried" },
+      },
+    ]);
+  });
+
+  it("puts what Chips handed with an agent put in a room ahead of its next turn there, once", async () => {
+    agents = [FALLBACK, agentIn("agt_main", "main", null)];
+    await bridge.adoptAgents({ defaultId: "main", agents: [{ id: "main" }] });
+    await bridge.onChips({
+      type: "agent.attached",
+      agent_id: "agt_main",
+      space_id: OTHER_ROOM,
+      by: ARJUN.participant_id,
+      catch_up: {
+        lines: [
+          { seq: 20, kind: "said", from: { id: "usr_01K4ZQPX000000000000000008", kind: "person", name: "Dana" }, text: "Book the table", addressed_to: [] },
+          { seq: 21, kind: "joined", from: { id: ARJUN.participant_id, kind: "person", name: "Arjun" } },
+        ],
+        since_seq: 0,
+        truncated: false,
+        before: 20,
+      },
+    });
+    calls = [];
+    const inOther = { space_id: OTHER_ROOM, for: ["agt_main"], addressed_to: ["agt_main"] };
+    await bridge.onChips(
+      said("@OpenClaw which one?", {
+        ...inOther,
+        seq: 30,
+        context: { lines: [{ seq: 25, kind: "said", from: { name: "Arjun" }, text: "Hi all", addressed_to: [] }], since_seq: 21, truncated: false, before: 25 },
+      }),
+    );
+    await bridge.onChips(said("Thanks", { ...inOther, seq: 40, message_id: "msg_01K4ZQPX0000000000000000A2" }));
+    assert.deepEqual(
+      calls.filter(([method]) => method === "chat.send").map(([, params]) => params["message"]),
+      ["Said in this room since you last spoke:\nDana: Book the table\n(Arjun joined the room)\nArjun: Hi all\n\n@OpenClaw which one?", "Thanks"],
+    );
+  });
+
+  it("leaves out of a catch-up what the agent heard there already, as after its own claim", async () => {
+    await bridge.adoptAgents({ defaultId: "main", agents: [{ id: "main" }] });
+    const asked = "spc_01K4ZQPX000000000000000099";
+    const session = bridge.keyFor(asked, "main");
+    await bridge.onChips({ type: "space.created", space_id: asked, asked_of: ME, kind: "direct" });
+    await bridge.onChips(said("Plan a picnic", { space_id: asked, seq: 40, for: [ME], addressed_to: [ME] }));
+    // Chips says so once the claim has put the key's agent in: the room's lines before it joined.
+    await bridge.onChips({
+      type: "agent.attached",
+      agent_id: `agt_${session}`,
+      space_id: asked,
+      catch_up: {
+        lines: [
+          { seq: 39, kind: "joined", from: { id: ARJUN.participant_id, kind: "person", name: "Arjun" } },
+          { seq: 40, kind: "said", from: { id: ARJUN.participant_id, kind: "person", name: "Arjun" }, text: "Plan a picnic", addressed_to: [ME] },
+        ],
+        since_seq: 0,
+        truncated: false,
+        before: 39,
+      },
+    });
+    calls = [];
+    await bridge.onChips(said("And a blanket", { space_id: asked, seq: 50, message_id: "msg_01K4ZQPX0000000000000000A2", for: [`agt_${session}`] }));
+    assert.equal(calls.find(([method]) => method === "chat.send")?.[1]["message"], "And a blanket");
   });
 
   it("takes an agent's words when Chips names it kind agent, and never its own agents' words", async () => {
@@ -588,6 +737,7 @@ describe("OpenClaw's agents as agents in Chips (Chips ADR 0087)", () => {
   });
 
   it("before the harness declares agents, answers in the room as the agent Chips has there", async () => {
+    agents = [FALLBACK, agentIn("agt_main", "main", ROOM)];
     await bridge.adoptAgents({ defaultId: "main", agents: [{ id: "main" }] });
     await bridge.onChips(said("Hi", { addressed_to: [ME] }));
     bridge.onClaw({
@@ -595,6 +745,7 @@ describe("OpenClaw's agents as agents in Chips (Chips ADR 0087)", () => {
       payload: { runId: "msg_01K4ZQPX0000000000000000A1", sessionKey: key(), seq: 1, state: "final", message: "Hello." },
     });
     await bridge.settled();
+    assert.deepEqual(attached, []);
     assert.deepEqual(sent.find((event) => event.type === "message.post")?.["actor"], { kind: "agent", id: "agt_main" });
   });
 });

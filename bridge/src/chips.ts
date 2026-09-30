@@ -41,6 +41,13 @@ export interface ChipsAgent {
   readonly state: "active" | "archived";
   /** The rooms it is in. */
   readonly spaces: readonly string[];
+  /**
+   * The one open room it is in, or null when it is free (ADR 0087: one room at a time). A Chips
+   * from before that says only `spaces`.
+   */
+  readonly room?: string | null;
+  /** How many of its words Chips holds, said while it was in no room. */
+  readonly held?: number;
 }
 
 export interface OwnSpaces {

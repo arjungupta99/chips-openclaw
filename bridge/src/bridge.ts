@@ -5,13 +5,18 @@
  * - Every agent the gateway lists (`agents.list`) is registered in Chips as one of this harness's
  *   agents, keyed by its OpenClaw id, all on the one token (Chips ADR 0087). `OPENCLAW_AGENT`
  *   keeps it to one. An agent with no name of its own is called what the harness is, so the
- *   rooms go on saying OpenClaw. Each takes the harness's default agent's place in the rooms the
- *   bridge serves, and in any room the default agent is added to later.
- * - A room's session key is made from the agent and the room's id, so the bridge keeps no map of
- *   its own: an agent has exactly one session in any room it hears from, and a restart finds it.
+ *   rooms go on saying OpenClaw. An agent is in one room at a time, and Chips says where
+ *   (`agent.attached`, `agent.released`), so the bridge moves nobody at start. One takes the
+ *   default agent's place in a room only when a message there is for the default agent and the
+ *   OpenClaw agent is in no room.
+ * - A session key is made from the OpenClaw agent and a room's id, so the bridge keeps no map of
+ *   its own. A room asked from the + is claimed under such a key, and Chips puts that key's own
+ *   agent in it: the session is the agent's wherever it is moved, so it keeps its conversation.
+ *   An OpenClaw agent, or the harness's default agent, has one session per room instead.
  * - A message says which of our agents it is for (`for`), once the harness declares `agents`;
  *   each takes a turn in its own session. Before that, it is the room's agent's.
- * - A room a person asks for from the + is claimed under that key, named from the first words.
+ * - A room a person asks for from the +, of this harness or of it beside another, is claimed
+ *   under that key, named from the first words.
  * - A person's words go to the session with `chat.send`, keyed by the message's id.
  * - OpenClaw's `chat` events for a turn become a run: started on the first, answered and completed
  *   on `final`, failed on `error` or `aborted`. Its tool events become steps.
@@ -23,7 +28,7 @@
  * same event and Chips answers it as a duplicate.
  */
 
-import { type ChipsAgent, type ChipsEvent, ChipsRefusal, type OwnSpaces } from "./chips.ts";
+import { type ChipsAgent, type ChipsEvent, ChipsRefusal } from "./chips.ts";
 import { chipsId } from "./ids.ts";
 import type { ClawEvent } from "./openclaw.ts";
 
@@ -35,7 +40,6 @@ export interface ChipsPort {
   agents(): Promise<ChipsAgent[]>;
   registerAgent(agent: { key: string; name: string }): Promise<ChipsAgent>;
   attach(agentId: string, spaceId: string, replacing: string): Promise<boolean>;
-  ownSpaces(): Promise<OwnSpaces>;
 }
 
 /** One agent as the gateway lists it (`agents.list`). */
@@ -53,7 +57,11 @@ export interface ClawPort {
 
 interface Run {
   readonly chipsRun: string;
-  readonly spaceId: string;
+  /**
+   * The room the turn is said in; none for a turn OpenClaw started for an agent in no room, which
+   * has no run in Chips: only its words go, and Chips holds them until the agent joins a room.
+   */
+  readonly spaceId: string | undefined;
   readonly sessionKey: string;
   /** The Chips agent the turn is by, whose name every write on it carries (Chips ADR 0087). */
   readonly agentId: string | undefined;
@@ -69,6 +77,14 @@ interface Run {
 }
 
 type Payload = Record<string, unknown>;
+
+/** Who takes a turn on a message: one of our Chips agents, and the OpenClaw agent and session it speaks with. */
+interface Taker {
+  /** The Chips agent the message is for; none for the harness itself, or from a Chips that does not say. */
+  readonly agentId: string | undefined;
+  readonly clawAgent: string;
+  readonly sessionKey: string;
+}
 
 const str = (value: unknown): string | undefined => (typeof value === "string" ? value : undefined);
 const num = (value: unknown): number | undefined => (typeof value === "number" ? value : undefined);
@@ -203,10 +219,12 @@ export class Bridge {
   private readonly runs = new Map<string, Run>();
   private readonly runByChips = new Map<string, Run>();
   /**
-   * A person's words by their message id, which OpenClaw uses as the id of the turn they start;
-   * and the latest words in each room, for a follow-up turn OpenClaw starts on its own.
+   * The turns the bridge asked for, by the idempotency key OpenClaw names each turn after: the
+   * words, the room and the agent it is said as, since a session that came with an agent from
+   * another room names the wrong one. And the latest words in each session, for a follow-up turn
+   * OpenClaw starts on its own.
    */
-  private readonly goals = new Map<string, string>();
+  private readonly asks = new Map<string, { readonly words: string; readonly spaceId: string; readonly agentId: string | undefined }>();
   private readonly latest = new Map<string, string>();
   /** Tool events that came before the turn's first `chat` event said which room it is in. */
   private readonly early = new Map<string, Payload[]>();
@@ -227,15 +245,20 @@ export class Bridge {
   /** Chips's question id to OpenClaw's, and the run that asked it. */
   private readonly questions = new Map<string, { readonly id: string; readonly run: Run }>();
 
-  /** OpenClaw's agents as Chips's (ADR 0087): OpenClaw's id → Chips's, and back. */
-  private readonly chipsAgentOf = new Map<string, string>();
-  private readonly clawAgentOf = new Map<string, string>();
-  /** The rooms each of our Chips agents is in, as Chips last said. */
-  private readonly roomsOf = new Map<string, Set<string>>();
-  /** The harness's default agent in Chips, whose place OpenClaw's agents take. */
-  private fallback: string | undefined;
-  /** Rooms the agents were read again for, once, when the bridge did not know who of ours is there. */
-  private readonly looked = new Set<string>();
+  /**
+   * Our agents in Chips (ADR 0087), by Chips's id: our key for each — an OpenClaw agent, a
+   * session, or the harness's own id for its default agent — and back.
+   */
+  private readonly keyOf = new Map<string, string>();
+  private readonly agentByKey = new Map<string, string>();
+  /** The one room each of our agents is in, as Chips last said; null when it is in none. */
+  private readonly roomOf = new Map<string, string | null>();
+  /**
+   * What Chips handed with an agent put in a room (`agent.attached`'s `catch_up`), for its next
+   * turn there; and where each last took a turn, so a catch-up leaves out what it heard already.
+   */
+  private readonly caughtUp = new Map<string, { readonly room: string; readonly lines: readonly unknown[] }>();
+  private readonly lastHeard = new Map<string, { readonly room: string; readonly seq: number }>();
   /** The OpenClaw agent a room with no other gets: `OPENCLAW_AGENT`, else the gateway's default. */
   private primary: string;
 
@@ -268,7 +291,22 @@ export class Bridge {
 
   /** Whether somebody in Chips is this harness: itself, or one of its agents. */
   isOwn(participantId: string): boolean {
-    return participantId === this.self.harnessId || this.clawAgentOf.has(participantId) || participantId === this.fallback;
+    return participantId === this.self.harnessId || this.keyOf.has(participantId);
+  }
+
+  /** The harness's default agent in Chips, keyed by the harness's own id. */
+  private get fallback(): string | undefined {
+    return this.agentByKey.get(this.self.harnessId);
+  }
+
+  /**
+   * Whether a room asks this harness from the +: first (`asked_of`), or beside another
+   * (`also_asked_of`, Chips ADR 0087's addendum of 30 September). Either way it is claimed on its
+   * first words, and Chips puts the claim key's own agent in the harness's place.
+   */
+  asksMe(event: Payload): boolean {
+    const also = event["also_asked_of"];
+    return event["asked_of"] === this.self.harnessId || (Array.isArray(also) && also.includes(this.self.harnessId));
   }
 
   // ------------------------------------------------------------------ OpenClaw's agents in Chips
@@ -276,32 +314,26 @@ export class Bridge {
   /**
    * OpenClaw's agents as this harness's agents in Chips (ADR 0087): each the gateway lists, or
    * only `only`, registered by its OpenClaw id and named as the gateway names it — or, with no
-   * name of its own, as the harness is. Then each room the harness's default agent is in goes to
-   * the agent its session is for, else the primary one, in the default agent's place. A refusal
-   * is logged; a room left as it was goes on as the default agent's.
+   * name of its own, as the harness is. Nobody is moved: an agent is in one room at a time, so
+   * putting each in the default agent's rooms would have Chips refuse all but one. Each stays
+   * where Chips has it, read again once all are registered.
    */
   async adoptAgents(listed: { defaultId?: string; agents?: readonly ClawAgent[] }, only?: string): Promise<void> {
     const agents = (listed.agents ?? []).filter((each) => each.kind !== "system" && (only === undefined || each.id === only));
     this.primary = only ?? listed.defaultId ?? this.primary;
     if (!agents.some((each) => each.id === this.primary)) agents.unshift({ id: this.primary });
     const known = await this.chips.agents();
-    this.learn(known);
     const harnessName = known.find((each) => each.key === this.self.harnessId)?.name ?? "OpenClaw";
     for (const agent of agents) {
       const named = agent.identity?.name ?? agent.name;
       const name = named === undefined || named === agent.id || named.trim() === "" ? harnessName : named.trim();
       try {
-        this.learn([await this.chips.registerAgent({ key: agent.id, name })]);
+        await this.chips.registerAgent({ key: agent.id, name });
       } catch (error) {
         this.log(`chips refused agent ${agent.id}: ${String(error)}`);
       }
     }
-    const fallback = this.fallback;
-    if (fallback === undefined) return;
-    const keyed = new Map((await this.chips.ownSpaces()).spaces.map((each) => [String(each["space_id"]), String(each["key"] ?? "")]));
-    for (const room of [...(this.roomsOf.get(fallback) ?? [])]) {
-      await this.attachIn(room, this.agentFor(keyed.get(room) ?? "") ?? this.primary);
-    }
+    this.learn(await this.chips.agents());
   }
 
   /**
@@ -309,97 +341,139 @@ export class Bridge {
    * there. Nothing otherwise, and Chips reads the harness as its one agent in the room.
    */
   private speakerIn(room: string, clawAgent: string | undefined): string | undefined {
-    const agentId = clawAgent === undefined ? undefined : this.chipsAgentOf.get(clawAgent);
-    return agentId !== undefined && this.roomsOf.get(agentId)?.has(room) === true ? agentId : undefined;
+    const agentId = clawAgent === undefined ? undefined : this.agentByKey.get(clawAgent);
+    return agentId !== undefined && this.roomOf.get(agentId) === room ? agentId : undefined;
   }
 
-  /**
-   * Who of ours came into a room, left one, or took another's place there, as Chips says once
-   * the harness declares `agents`.
-   */
-  private moved(event: ChipsEvent): void {
-    const room = str(event["space_id"]);
-    if (room === undefined) return;
-    const move = (id: unknown, into: boolean): void => {
-      if (typeof id !== "string" || !this.roomsOf.has(id)) return;
-      const rooms = this.roomsOf.get(id) ?? new Set<string>();
-      if (into) rooms.add(room);
-      else rooms.delete(room);
-    };
-    if (event.type === "membership.replaced") {
-      move(event["from"], false);
-      move(event["to"], true);
-      return;
-    }
-    move(event["participant_id"], event.type === "membership.added");
-  }
-
-  /** What Chips says our agents are: ids both ways, and their rooms. */
+  /** What Chips says our agents are: ids and keys both ways, and each one's room. */
   private learn(agents: readonly ChipsAgent[]): void {
     for (const agent of agents) {
-      this.roomsOf.set(agent.agent_id, new Set(agent.spaces));
-      if (agent.key === this.self.harnessId) {
-        this.fallback = agent.agent_id;
-        continue;
-      }
-      this.chipsAgentOf.set(agent.key, agent.agent_id);
-      this.clawAgentOf.set(agent.agent_id, agent.key);
+      this.keyOf.set(agent.agent_id, agent.key);
+      this.agentByKey.set(agent.key, agent.agent_id);
+      this.roomOf.set(agent.agent_id, agent.room !== undefined ? agent.room : (agent.spaces[0] ?? null));
     }
   }
 
   /**
-   * An OpenClaw agent's Chips agent in a room, in the default agent's place when it is there.
-   * Its Chips id, or nothing when it has none; a room it cannot be put in is left as it is.
+   * One of ours put in a room (ADR 0087): its room now, and the room's last lines before it
+   * joined (ADR 0088), for its next turn there — less what it heard there already, which is all
+   * of them when the bridge's own claim or attach put it there in the middle of a turn.
    */
-  private async attachIn(room: string, clawAgent: string): Promise<string | undefined> {
-    const agentId = this.chipsAgentOf.get(clawAgent);
-    if (agentId === undefined || this.roomsOf.get(agentId)?.has(room) === true) return agentId;
-    const there = (id: string | undefined): boolean => id !== undefined && this.roomsOf.get(id)?.has(room) === true;
-    // A room the default agent joined while the bridge was not told — before it declares
-    // `agents`, Chips shows it none of that — is read for, once.
-    if (!there(this.fallback) && !this.looked.has(room)) {
-      this.looked.add(room);
-      this.learn(await this.chips.agents());
-      if (this.roomsOf.get(agentId)?.has(room) === true) return agentId;
-    }
-    const fallback = this.fallback;
-    if (fallback === undefined || !there(fallback)) return agentId;
-    try {
-      if (await this.chips.attach(agentId, room, fallback)) this.log(`chips: ${clawAgent} is in ${room} now`);
-      this.roomsOf.get(fallback)?.delete(room);
-      this.roomsOf.set(agentId, new Set([...(this.roomsOf.get(agentId) ?? []), room]));
-    } catch (error) {
-      this.log(`chips refused ${clawAgent} in ${room}: ${String(error)}`);
-    }
-    return agentId;
+  private async attached(event: ChipsEvent): Promise<void> {
+    const agentId = str(event["agent_id"]);
+    const room = str(event["space_id"]);
+    if (agentId === undefined || room === undefined) return;
+    // One Chips made for a claim, or registered from somewhere else, is read for.
+    if (!this.keyOf.has(agentId)) this.learn(await this.chips.agents());
+    if (!this.keyOf.has(agentId)) return;
+    this.roomOf.set(agentId, room);
+    const from = str(event["moved_from"]);
+    this.log(`chips: ${this.keyOf.get(agentId)} is in ${room}${from === undefined ? "" : `, moved from ${from}`}`);
+    const heard = this.lastHeard.get(agentId);
+    const lines = ((event["catch_up"] as Payload | undefined)?.["lines"] ?? []) as unknown[];
+    const fresh = (Array.isArray(lines) ? lines : []).filter((line) => {
+      const seq = num((line as Payload | null)?.["seq"]);
+      return heard?.room !== room || seq === undefined || seq > heard.seq;
+    });
+    if (fresh.length > 0) this.caughtUp.set(agentId, { room, lines: fresh });
+    else this.caughtUp.delete(agentId);
+  }
+
+  /** One of ours taken out of its room: free, until Chips puts it in another. Its OpenClaw sessions stay. */
+  private released(event: ChipsEvent): void {
+    const agentId = str(event["agent_id"]);
+    if (agentId === undefined || !this.keyOf.has(agentId)) return;
+    this.roomOf.set(agentId, null);
+    const to = str(event["moved_to"]);
+    this.log(`chips: ${this.keyOf.get(agentId)} left ${str(event["space_id"])} (${str(event["reason"]) ?? "removed"}${to === undefined ? "" : `, to ${to}`})`);
   }
 
   /**
-   * Which OpenClaw agents a message is for. `for`, from a Chips that knows our agents: each of
-   * ours it names — the default agent is the primary one, which takes its place. Without it, the
-   * room's own: whichever of ours Chips last had in the room, else the primary one.
+   * One of ours gave its place in a room to another. Chips says `agent.attached` for the one that
+   * came in, and nothing for the one that went, which is in no room now.
    */
-  private async turnTakers(event: ChipsEvent, spaceId: string): Promise<string[]> {
+  private replaced(event: ChipsEvent): void {
+    const from = str(event["from"]);
+    if (from !== undefined && this.roomOf.get(from) === str(event["space_id"])) this.roomOf.set(from, null);
+  }
+
+  /**
+   * The OpenClaw agent and session one of our Chips agents speaks with in a room. An agent keyed
+   * by a session (a room asked from the +) has that session wherever Chips moves it, so it keeps
+   * its conversation. An agent keyed by an OpenClaw agent has that agent's session in each room;
+   * the default agent, and the harness itself, the primary agent's.
+   */
+  private takerFor(agentId: string | undefined, room: string): Taker {
+    const key = agentId === undefined ? undefined : this.keyOf.get(agentId);
+    const clawAgent = key === undefined ? undefined : this.agentFor(key);
+    if (key !== undefined && clawAgent !== undefined) return { agentId, clawAgent, sessionKey: key };
+    const agent = key === undefined || key === this.self.harnessId ? this.primary : key;
+    return { agentId, clawAgent: agent, sessionKey: this.keyFor(room, agent) };
+  }
+
+  /**
+   * Who of ours takes a turn on a message. `for`, from a Chips that knows our agents: each of ours
+   * it names, the harness itself as the primary agent (a room asked of it from the +, which its
+   * claim gives to an agent). Without it, the room's own: whichever of ours Chips has there, else
+   * the primary agent. One turn per session.
+   */
+  private async turnTakers(event: ChipsEvent, spaceId: string): Promise<Taker[]> {
     const named = event["for"];
     if (!Array.isArray(named)) {
-      const inRoom = [...this.roomsOf].find(([agentId, rooms]) => rooms.has(spaceId) && this.clawAgentOf.has(agentId));
-      return [inRoom === undefined ? this.primary : (this.clawAgentOf.get(inRoom[0]) ?? this.primary)];
+      const here = [...this.roomOf].filter(([, room]) => room === spaceId).map(([agentId]) => agentId);
+      return [this.takerFor(here.find((agentId) => agentId !== this.fallback) ?? here[0], spaceId)];
     }
     const ids = (named as unknown[]).filter((each): each is string => typeof each === "string");
-    const ours = (id: string): boolean => id === this.self.harnessId || id === this.fallback || this.clawAgentOf.has(id);
+    const ours = (id: string): boolean => id === this.self.harnessId || this.keyOf.has(id);
     if (!ids.every(ours)) this.learn(await this.chips.agents());
     const takers = ids.flatMap((id) => {
-      // The harness itself: a room asked of it from the +, which its claim gives to an agent.
-      if (id === this.self.harnessId) return [this.primary];
-      if (id === this.fallback) {
-        // Chips says it is for the default agent, so the default agent is in the room.
-        this.roomsOf.set(id, new Set([...(this.roomsOf.get(id) ?? []), spaceId]));
-        return [this.primary];
-      }
-      const claw = this.clawAgentOf.get(id);
-      return claw === undefined ? [] : [claw];
+      if (id === this.self.harnessId) return [this.takerFor(undefined, spaceId)];
+      return this.keyOf.has(id) ? [this.takerFor(id, spaceId)] : [];
     });
-    return [...new Set(takers)];
+    return [...new Map(takers.map((taker) => [taker.sessionKey, taker])).values()];
+  }
+
+  /**
+   * The Chips agent a turn is said as: the one it is for. For the default agent, the OpenClaw
+   * agent's own takes its place when it is in no room; one in a room already stays there (an
+   * agent is in one room at a time), and the default agent answers here.
+   */
+  private async speakerFor(room: string, taker: Taker): Promise<string | undefined> {
+    const fallback = this.fallback;
+    if (fallback === undefined || taker.agentId !== fallback) return taker.agentId;
+    const own = this.agentByKey.get(taker.clawAgent);
+    if (own === undefined || this.roomOf.get(own) !== null) return fallback;
+    try {
+      if (await this.chips.attach(own, room, fallback)) this.log(`chips: ${taker.clawAgent} is in ${room} now`);
+      this.roomOf.set(fallback, null);
+      this.roomOf.set(own, room);
+      return own;
+    } catch (error) {
+      this.log(`chips refused ${taker.clawAgent} in ${room}: ${String(error)}`);
+      return fallback;
+    }
+  }
+
+  /**
+   * Claim a room asked of this harness under the session's key. Chips puts that key's own agent in
+   * the harness's place (ADR 0087), which is read for, and the turn is said as it.
+   */
+  private async claim(spaceId: string, key: string, words: string): Promise<string | undefined> {
+    await this.chips.claim(spaceId, key, titleFrom(words));
+    this.learn(await this.chips.agents());
+    const agentId = this.agentByKey.get(key);
+    return agentId !== undefined && this.roomOf.get(agentId) === spaceId ? agentId : undefined;
+  }
+
+  /**
+   * OpenClaw names a turn by its idempotency key: one message, one turn per session. The primary
+   * agent's session in the room keeps the message's id; another OpenClaw agent's adds the agent,
+   * and a session that came with its agent from another room adds that agent.
+   */
+  private turnOf(messageId: string, spaceId: string, taker: Taker): string {
+    if (taker.sessionKey === this.keyFor(spaceId)) return messageId;
+    if (taker.sessionKey === this.keyFor(spaceId, taker.clawAgent)) return `${messageId}:${taker.clawAgent}`;
+    return `${messageId}:${taker.agentId ?? taker.clawAgent}`;
   }
 
   /** A room asked of this harness while the bridge was away (from `GET …/spaces`). */
@@ -412,14 +486,17 @@ export class Bridge {
   async onChips(event: ChipsEvent): Promise<void> {
     switch (event.type) {
       case "space.created":
-        if (event["asked_of"] === this.self.harnessId) this.asked.add(String(event["space_id"]));
+        if (this.asksMe(event)) this.asked.add(String(event["space_id"]));
         return;
       case "message.new":
         return this.heard(event);
-      case "membership.added":
-      case "membership.removed":
+      // Where our agents are, as Chips says it (ADR 0087): one room each, or none.
+      case "agent.attached":
+        return this.attached(event);
+      case "agent.released":
+        return this.released(event);
       case "membership.replaced":
-        return this.moved(event);
+        return this.replaced(event);
       // Said for somebody else (Chips ADR 0081): never a turn, and not kept. Its words come back
       // with the next message for OpenClaw in that room (ADR 0088).
       case "message.overheard":
@@ -453,32 +530,44 @@ export class Bridge {
     const text = String(event["text"] ?? "");
     const words = wordsOf(event);
     const messageId = String(event["message_id"] ?? event["id"]);
+    const seq = num(event["seq"]);
     const takers = await this.turnTakers(event, spaceId);
     const attachments = takers.length === 0 ? {} : await this.attachments(event);
-    for (const agent of takers) {
-      const key = this.keyFor(spaceId, agent);
-      await this.ensureSession(key, words, agent);
-      if (this.asked.delete(spaceId)) await this.chips.claim(spaceId, key, titleFrom(words));
-      await this.attachIn(spaceId, agent);
-      // OpenClaw names a turn by its idempotency key: one message, one turn per agent.
-      const turn = agent === this.primary ? messageId : `${messageId}:${agent}`;
-      this.goals.set(turn, words);
-      this.latest.set(key, words);
+    for (const taker of takers) {
+      await this.ensureSession(taker.sessionKey, words, taker.clawAgent);
+      const agentId = this.asked.delete(spaceId)
+        ? await this.claim(spaceId, taker.sessionKey, words)
+        : await this.speakerFor(spaceId, taker);
+      const turn = this.turnOf(messageId, spaceId, taker);
+      this.asks.set(turn, { words, spaceId, agentId });
+      this.latest.set(taker.sessionKey, words);
+      const caughtUp = agentId === undefined ? undefined : this.caughtUpIn(agentId, spaceId);
+      if (agentId !== undefined && seq !== undefined) this.lastHeard.set(agentId, { room: spaceId, seq });
       await this.claw.request("chat.send", {
-        sessionKey: key,
-        message: this.withOverheard(agentSaid ? fromAgent(from, text) : text, event["context"]),
+        sessionKey: taker.sessionKey,
+        message: this.withOverheard(agentSaid ? fromAgent(from, text) : text, event["context"], caughtUp),
         idempotencyKey: turn,
         ...attachments,
       });
     }
   }
 
+  /** What Chips handed with an agent when it was put in this room, once: for its first turn there. */
+  private caughtUpIn(agentId: string, room: string): unknown {
+    const kept = this.caughtUp.get(agentId);
+    if (kept?.room !== room) return undefined;
+    this.caughtUp.delete(agentId);
+    return { lines: kept.lines };
+  }
+
   /**
    * A turn's words, with what was said in the room since OpenClaw last spoke there ahead of them,
-   * as Chips handed it over (ADR 0088).
+   * as Chips handed it over (ADR 0088): for an agent new to the room, the room's last lines before
+   * it joined go first. Both read the same, as the SDK's `renderContext` writes them.
    */
-  private withOverheard(text: string, context: unknown): string {
-    const lines = heardIn(context, (id) => this.isOwn(id));
+  private withOverheard(text: string, context: unknown, caughtUp?: unknown): string {
+    const own = (id: string): boolean => this.isOwn(id);
+    const lines = [...heardIn(caughtUp, own), ...heardIn(context, own)];
     if (lines.length === 0) return text;
     return `Said in this room since you last spoke:\n${lines.join("\n")}\n\n${text}`;
   }
@@ -654,36 +743,53 @@ export class Bridge {
     });
   }
 
-  /** The Chips run a turn is, started the first time the turn is heard from in one of our rooms. */
+  /**
+   * The Chips run a turn is, started the first time the turn is heard from: in the room and as
+   * the agent the bridge asked it in, or, for a turn OpenClaw started on its own, where its
+   * session says.
+   */
   private runFor(clawRun: string, sessionKey: string): Run | undefined {
     const known = this.runs.get(clawRun);
     if (known !== undefined) return known;
-    const spaceId = this.spaceFor(sessionKey);
-    if (spaceId === undefined) return undefined;
+    const asked = this.asks.get(clawRun);
+    const where = asked ?? this.whereSaid(sessionKey);
+    if (where === undefined) return undefined;
     const run: Run = {
       chipsRun: chipsId("run", `openclaw-run:${clawRun}`),
-      spaceId,
+      spaceId: where.spaceId,
       sessionKey,
-      agentId: this.speakerIn(spaceId, this.agentFor(sessionKey)),
+      agentId: where.agentId,
       chain: Promise.resolve(),
       ended: false,
     };
     this.runs.set(clawRun, run);
     this.runByChips.set(run.chipsRun, run);
-    const own = this.goals.get(clawRun);
-    this.goals.delete(clawRun);
+    this.asks.delete(clawRun);
     const latest = this.latest.get(sessionKey);
-    const goal = own ?? (latest === undefined ? "Answer in the room." : `Following up: ${latest}`);
+    const goal = asked?.words ?? (latest === undefined ? "Answer in the room." : `Following up: ${latest}`);
     this.write(run, {
       type: "run.started",
       run_id: run.chipsRun,
-      space_id: spaceId,
+      space_id: where.spaceId,
       goal: goal.slice(0, 500),
       idempotency_key: `openclaw-run:${clawRun}:started`,
     });
     for (const early of this.early.get(clawRun) ?? []) this.stream(run, early);
     this.early.delete(clawRun);
     return run;
+  }
+
+  /**
+   * Where a turn OpenClaw started on its own is said, and as whom (ADR 0087). A session one of our
+   * agents is keyed by is that agent's: in the room Chips last said it is in, or in none, and
+   * Chips holds its words until it joins one. Any other session of ours is an OpenClaw agent's in
+   * one room, named from both.
+   */
+  private whereSaid(sessionKey: string): { spaceId: string | undefined; agentId: string | undefined } | undefined {
+    const agentId = this.agentByKey.get(sessionKey);
+    if (agentId !== undefined) return { spaceId: this.roomOf.get(agentId) ?? undefined, agentId };
+    const spaceId = this.spaceFor(sessionKey);
+    return spaceId === undefined ? undefined : { spaceId, agentId: this.speakerIn(spaceId, this.agentFor(sessionKey)) };
   }
 
   private clawRunOf(run: Run): string | undefined {
@@ -809,7 +915,8 @@ export class Bridge {
     const clawRun = str(request["runId"]);
     if (clawId === undefined || sessionKey === undefined) return;
     const run = clawRun === undefined ? this.latestRun(sessionKey) : this.runFor(clawRun, sessionKey);
-    if (run === undefined) return;
+    // A turn stopped or ended already has no card to ask on: Chips refuses one on a closed run.
+    if (run === undefined || run.ended) return;
     const command = str(plan["commandText"]) ?? str(request["command"]) ?? "a command";
     const cwd = str(plan["cwd"]) ?? str(request["cwd"]);
     const approvalId = chipsId("apr", `openclaw-approval:${clawId}`);
@@ -844,7 +951,8 @@ export class Bridge {
     const clawRun = str(request["runId"]);
     if (clawId === undefined || sessionKey === undefined) return;
     const run = clawRun === undefined ? this.latestRun(sessionKey) : this.runFor(clawRun, sessionKey);
-    if (run === undefined) return;
+    // A turn stopped or ended already has no card to ask on: Chips refuses one on a closed run.
+    if (run === undefined || run.ended) return;
     const title = str(request["title"]) ?? "Allow this?";
     const description = str(request["description"]) ?? "";
     const command = /^Command: (.+)$/m.exec(description)?.[1];
@@ -879,7 +987,8 @@ export class Bridge {
     const clawRun = str(p["runId"]);
     if (clawId === undefined || sessionKey === undefined) return;
     const run = clawRun === undefined ? this.latestRun(sessionKey) : this.runFor(clawRun, sessionKey);
-    if (run === undefined) return;
+    // A turn stopped or ended already has no card to ask on: Chips refuses one on a closed run.
+    if (run === undefined || run.ended) return;
     const askId = chipsId("qst", `openclaw-question:${clawId}`);
     this.questions.set(askId, { id: clawId, run });
     const questions = (Array.isArray(p["questions"]) ? (p["questions"] as Payload[]) : []).map((q) => ({
@@ -913,8 +1022,10 @@ export class Bridge {
 
   /** Write for a run, in order; a refusal is logged, never thrown into OpenClaw's event loop. */
   private write(run: Run, event: ChipsEvent): void {
+    const words = run.spaceId === undefined ? this.roomless(event) : event;
+    if (words === undefined) return;
     // Said as the agent the turn is by (Chips ADR 0087).
-    const said = run.agentId === undefined ? event : { ...event, actor: { kind: "agent", id: run.agentId } };
+    const said = run.agentId === undefined ? words : { ...words, actor: { kind: "agent", id: run.agentId } };
     run.chain = run.chain.then(async () => {
       try {
         await this.chips.send(said);
@@ -923,6 +1034,21 @@ export class Bridge {
         this.log(`chips refused ${event.type} for ${run.chipsRun}: ${why}`);
       }
     });
+  }
+
+  /**
+   * What goes of a turn by an agent in no room: it has no run in Chips, so only its words, as a
+   * post naming no room, which Chips holds and says in the next room the agent joins (ADR 0087).
+   */
+  private roomless(event: ChipsEvent): ChipsEvent | undefined {
+    if (event.type === "message.post") {
+      const { run_id: _run, ...words } = event;
+      return words as ChipsEvent;
+    }
+    if (event.type === "approval.request" || event.type === "question.ask") {
+      this.log(`chips: ${event.type} not asked: its agent is in no room`);
+    }
+    return undefined;
   }
 
   /** Every write queued so far, done; for the tests and for a clean stop. */
