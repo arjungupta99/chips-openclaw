@@ -19,8 +19,11 @@ export interface Config {
   readonly spaceId: string | undefined;
   readonly gatewayUrl: string;
   readonly gatewayToken: string;
-  /** The OpenClaw agent this Chips harness is. One agent, one harness (the plan's Phase 4). */
-  readonly agent: string;
+  /**
+   * The one OpenClaw agent to serve, when set (`OPENCLAW_AGENT`); unset, every agent the gateway
+   * lists is one of this harness's agents in Chips, all on the one token.
+   */
+  readonly agent: string | undefined;
   readonly stateDir: string;
 }
 
@@ -58,7 +61,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     spaceId: values["CHIPS_SPACE_ID"] || undefined,
     gatewayUrl: values["OPENCLAW_URL"] ?? "ws://127.0.0.1:18789",
     gatewayToken: required(values, "OPENCLAW_GATEWAY_TOKEN"),
-    agent: values["OPENCLAW_AGENT"] ?? "main",
+    agent: values["OPENCLAW_AGENT"] || undefined,
     stateDir,
   };
 }

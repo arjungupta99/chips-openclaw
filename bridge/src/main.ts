@@ -69,7 +69,7 @@ const claw = new OpenClaw({
   onUp: clawUp,
   onDown: clawDown,
 });
-bridge = new Bridge(chips, claw, { harnessId: config.harnessId, agent: config.agent }, log);
+bridge = new Bridge(chips, claw, { harnessId: config.harnessId, agent: config.agent ?? "main" }, log);
 
 /**
  * Rooms asked of this harness while the bridge was away: their first words are already in the log,
@@ -89,7 +89,7 @@ async function catchUp(active: Bridge): Promise<void> {
       const actor = event["actor"] as { kind?: string; id?: string } | undefined;
       if (event.type !== "message.post" || !waiting.has(spaceId) || actor?.kind !== "person") continue;
       const addressed = event["addressed_to"];
-      const forMe = !Array.isArray(addressed) || addressed.includes(config.harnessId);
+      const forMe = !Array.isArray(addressed) || (addressed as unknown[]).some((id) => active.isOwn(String(id)));
       // What was for somebody else is the room's context; the room waits for words that are ours.
       if (forMe) waiting.delete(spaceId);
       // DOCS: the log holds `message.post`; a harness hears `message.new`. The message id is the
@@ -107,12 +107,33 @@ async function catchUp(active: Bridge): Promise<void> {
   }
 }
 
+/**
+ * OpenClaw's agents as this harness's agents in Chips (ADR 0087), from the gateway's own list. A
+ * gateway that will not list them leaves the one agent the bridge served before.
+ */
+async function adopt(active: Bridge): Promise<void> {
+  let listed: { defaultId?: string; agents?: { id: string }[] } = {};
+  try {
+    listed = await claw.request("agents.list", {});
+  } catch (error) {
+    log(`openclaw: would not list its agents, so only "${config.agent ?? "main"}" is served: ${String(error)}`);
+  }
+  try {
+    await active.adoptAgents(listed, config.agent);
+  } catch (error) {
+    log(`chips: could not take OpenClaw's agents as its own: ${String(error)}`);
+  }
+}
+
 async function main(): Promise<void> {
   if (bridge === undefined) return;
   const active = bridge;
-  log(`bridge: harness ${config.harnessId} is OpenClaw agent "${config.agent}"`);
+  log(
+    `bridge: harness ${config.harnessId} is ${config.agent === undefined ? "every OpenClaw agent" : `OpenClaw agent "${config.agent}"`}`,
+  );
   await claw.start();
   await claw.request("sessions.subscribe", {});
+  await adopt(active);
   await catchUp(active);
   chips.stream((event) => active.onChips(event));
 }

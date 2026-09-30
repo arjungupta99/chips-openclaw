@@ -32,6 +32,17 @@ export class ChipsRefusal extends Error {
   }
 }
 
+/** One of this harness's agents in Chips (`connect/websocket#agents`): the key is ours for it. */
+export interface ChipsAgent {
+  readonly agent_id: string;
+  readonly key: string;
+  readonly name: string;
+  readonly lead: boolean;
+  readonly state: "active" | "archived";
+  /** The rooms it is in. */
+  readonly spaces: readonly string[];
+}
+
 export interface OwnSpaces {
   readonly spaces: readonly Record<string, unknown>[];
   readonly asked: readonly { space_id: string; asked_by?: string; title?: string | null }[];
@@ -114,6 +125,27 @@ export class Chips {
       `/v1/harnesses/${this.options.harnessId}/status`,
       trouble === undefined ? { state: "ok" } : { state: "trouble", reason: trouble },
     );
+  }
+
+  /** This harness's agents, with their rooms (`GET /v1/harnesses/:id/agents`). */
+  async agents(): Promise<ChipsAgent[]> {
+    const listed = (await this.call("GET", `/v1/harnesses/${this.options.harnessId}/agents`)) as {
+      agents?: ChipsAgent[];
+    };
+    return listed.agents ?? [];
+  }
+
+  /** One of this harness's agents by our key for it: made the first time, renamed when the name changed. */
+  async registerAgent(agent: { key: string; name: string }): Promise<ChipsAgent> {
+    return (await this.call("POST", `/v1/harnesses/${this.options.harnessId}/agents`, agent)) as ChipsAgent;
+  }
+
+  /** One of our agents in a room, in the place of `replacing` there. True when it moved in now. */
+  async attach(agentId: string, spaceId: string, replacing: string): Promise<boolean> {
+    const answer = (await this.call("POST", `/v1/agents/${agentId}/attach`, { space_id: spaceId, replacing })) as {
+      attached?: boolean;
+    };
+    return answer.attached === true;
   }
 
   /** Claim a room a person asked for, under this harness's own key for its session. */
