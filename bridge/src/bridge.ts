@@ -77,6 +77,54 @@ export function wordsOf(event: Record<string, unknown>): string {
   return files.length > 0 ? "A file" : "A message";
 }
 
+/** One of the room's lines Chips handed over with a message (Chips ADR 0088), as OpenClaw is told it. */
+function contextLineOf(line: Payload): string | undefined {
+  const name = str((line["from"] as Payload | undefined)?.["name"]) ?? "Someone";
+  const flat = (words: unknown): string => (str(words) ?? "").replace(/\s*\n\s*/g, " ").trim();
+  switch (line["kind"]) {
+    case "said": {
+      const files = Array.isArray(line["files"]) ? (line["files"] as unknown[]).filter((each) => typeof each === "string") : [];
+      const words = flat(line["text"]) || flat(line["transcript"]) || (files.length > 0 ? `(sent ${files.join(", ")})` : "");
+      return words === "" ? undefined : `${name}: ${words}`;
+    }
+    case "joined":
+      return `(${name} joined the room)`;
+    case "left":
+      return `(${name} left the room)`;
+    case "renamed": {
+      const title = str(line["title"]);
+      return title !== undefined
+        ? `(${name} renamed the room "${title}")`
+        : `(${str(line["previous"]) ?? name} is now called ${str(line["name"]) ?? name})`;
+    }
+    case "archived":
+      return `(${name} archived the room)`;
+    case "unarchived":
+      return `(${name} unarchived the room)`;
+    default:
+      return undefined;
+  }
+}
+
+/**
+ * What Chips handed over with a message (Chips ADR 0088): the room's lines since this harness last
+ * spoke there, read from Chips's log, so a restart of the bridge loses none. A message that was
+ * this harness's to answer is left out: it had a turn of its own. Nothing when the message carries
+ * no context, as from a Chips older than that; the bridge's own buffer answers then.
+ */
+export function heardIn(context: unknown, self: string): string[] | undefined {
+  const lines = (context as Payload | null | undefined)?.["lines"];
+  if (!Array.isArray(lines)) return undefined;
+  return lines.flatMap((each) => {
+    if (typeof each !== "object" || each === null) return [];
+    const line = each as Payload;
+    const addressed = line["addressed_to"];
+    const hadTurn = line["kind"] === "said" && (!Array.isArray(addressed) || addressed.includes(self));
+    const told = hadTurn ? undefined : contextLineOf(line);
+    return told === undefined ? [] : [told];
+  });
+}
+
 /** The text of an OpenClaw message, whether a string or content blocks. */
 export function textOf(message: unknown): string {
   if (typeof message === "string") return message;
@@ -230,7 +278,11 @@ export class Bridge {
     this.latest.set(key, words);
     await this.claw.request("chat.send", {
       sessionKey: key,
-      message: this.withOverheard(spaceId, from["kind"] === "harness" ? fromAgent(from, text) : text),
+      message: this.withOverheard(
+        spaceId,
+        from["kind"] === "harness" ? fromAgent(from, text) : text,
+        event["context"],
+      ),
       idempotencyKey: messageId,
       ...(await this.attachments(event)),
     });
@@ -255,10 +307,15 @@ export class Bridge {
     this.overheard.set(spaceId, lines);
   }
 
-  /** A turn's words, with what was said in the room since OpenClaw last spoke there ahead of them. */
-  private withOverheard(spaceId: string, text: string): string {
-    const lines = this.overheard.get(spaceId);
+  /**
+   * A turn's words, with what was said in the room since OpenClaw last spoke there ahead of them:
+   * as Chips handed it over (ADR 0088), else as the bridge overheard it. The buffer is taken either
+   * way, so it never holds lines already told.
+   */
+  private withOverheard(spaceId: string, text: string, context?: unknown): string {
+    const buffered = this.overheard.get(spaceId);
     this.overheard.delete(spaceId);
+    const lines = heardIn(context, this.self.harnessId) ?? buffered;
     if (lines === undefined || lines.length === 0) return text;
     return `Said in this room since you last spoke:\n${lines.join("\n")}\n\n${text}`;
   }

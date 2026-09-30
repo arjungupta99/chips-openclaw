@@ -5,7 +5,7 @@
 
 import assert from "node:assert/strict";
 import { beforeEach, describe, it } from "node:test";
-import { Bridge, type ChipsPort, type ClawPort, textOf, titleFrom, usageOf, wordsOf } from "../src/bridge.ts";
+import { Bridge, type ChipsPort, type ClawPort, heardIn, textOf, titleFrom, usageOf, wordsOf } from "../src/bridge.ts";
 import type { ChipsEvent } from "../src/chips.ts";
 
 const ME = "hrn_01K4ZQPX000000000000000004";
@@ -118,6 +118,67 @@ describe("rooms and sessions", () => {
     // Said once: the next turn starts clean.
     await bridge.onChips(said("Thanks", { message_id: "msg_01K4ZQPX0000000000000000A3" }));
     assert.equal(calls.filter(([method]) => method === "chat.send").at(-1)?.[1]["message"], "Thanks");
+  });
+
+  it("puts what Chips handed over ahead of the turn in place of its own buffer (Chips ADR 0088)", async () => {
+    // Overheard before a restart of the bridge, and lost with it; Chips hands the room over anyway.
+    await bridge.onChips({ ...said("an older line"), type: "message.overheard" });
+    await bridge.onChips(
+      said("@OpenClaw what did Jacobian say?", {
+        message_id: "msg_01K4ZQPX0000000000000000A2",
+        addressed_to: [ME],
+        context: {
+          lines: [
+            { seq: 10, kind: "said", from: { id: ARJUN.participant_id, kind: "person", name: "Arjun" }, text: "@Jacobian the notes?", addressed_to: ["hrn_01K4ZQPX000000000000000009"] },
+            { seq: 11, kind: "said", from: { id: "hrn_01K4ZQPX000000000000000009", kind: "harness", name: "Jacobian" }, text: "Drafted,\nin the doc.", addressed_to: [] },
+            { seq: 12, kind: "said", from: { id: ARJUN.participant_id, kind: "person", name: "Arjun" }, text: "@OpenClaw first question", addressed_to: [ME] },
+            { seq: 13, kind: "joined", from: { id: "usr_01K4ZQPX000000000000000008", kind: "person", name: "Dana" } },
+          ],
+          since_seq: 9,
+          truncated: false,
+          before: 10,
+        },
+      }),
+    );
+    const send = calls.find(([method]) => method === "chat.send")?.[1];
+    assert.equal(
+      send?.["message"],
+      "Said in this room since you last spoke:\nArjun: @Jacobian the notes?\nJacobian: Drafted, in the doc.\n(Dana joined the room)\n\n@OpenClaw what did Jacobian say?",
+    );
+    // The buffer went with it: a turn Chips hands nothing with is told nothing stale.
+    await bridge.onChips(said("Thanks", { message_id: "msg_01K4ZQPX0000000000000000A3" }));
+    assert.equal(calls.filter(([method]) => method === "chat.send").at(-1)?.[1]["message"], "Thanks");
+  });
+
+  it("reads Chips's context as lines, and nothing from a Chips that hands none over", () => {
+    assert.equal(heardIn(undefined, ME), undefined);
+    assert.deepEqual(heardIn({ lines: [] }, ME), []);
+    assert.deepEqual(
+      heardIn(
+        {
+          lines: [
+            { kind: "said", from: { name: "Dana" }, text: "", transcript: "Book it.", addressed_to: [] },
+            { kind: "said", from: { name: "Dana" }, text: "", files: ["map.png"], addressed_to: [] },
+            { kind: "said", from: { name: "Arjun" }, text: "From before Chips said who" },
+            { kind: "renamed", from: { name: "Arjun" }, title: "Kyoto" },
+            { kind: "renamed", from: { name: "Dana K" }, name: "Dana K", previous: "Dana" },
+            { kind: "archived", from: { name: "Arjun" } },
+            { kind: "unarchived", from: { name: "Arjun" } },
+            { kind: "left", from: { name: "Dana K" } },
+          ],
+        },
+        ME,
+      ),
+      [
+        "Dana: Book it.",
+        "Dana: (sent map.png)",
+        '(Arjun renamed the room "Kyoto")',
+        "(Dana is now called Dana K)",
+        "(Arjun archived the room)",
+        "(Arjun unarchived the room)",
+        "(Dana K left the room)",
+      ],
+    );
   });
 
   it("keeps only the last twenty lines it overheard", async () => {
