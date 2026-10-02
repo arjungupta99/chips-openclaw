@@ -509,6 +509,23 @@ export class Bridge {
     else this.caughtUp.delete(agentId);
   }
 
+  /**
+   * One of ours deleted by a person in Chips (Chips ADR 0095): forgotten, so nothing more is said
+   * as it, and Chips refuses its key from here — a restart's `agents.list` asks for `main` again,
+   * and is told no. Its OpenClaw sessions stay: OpenClaw keeps its own copy of what was said.
+   */
+  private deleted(event: ChipsEvent): void {
+    const agentId = str(event["agent_id"]);
+    const key = agentId === undefined ? undefined : this.keyOf.get(agentId);
+    if (agentId === undefined || key === undefined) return;
+    this.keyOf.delete(agentId);
+    if (this.agentByKey.get(key) === agentId) this.agentByKey.delete(key);
+    this.roomOf.delete(agentId);
+    this.caughtUp.delete(agentId);
+    this.lastHeard.delete(agentId);
+    this.log(`chips: ${key} was deleted`);
+  }
+
   /** One of ours taken out of its room: free, until Chips puts it in another. Its OpenClaw sessions stay. */
   private released(event: ChipsEvent): void {
     const agentId = str(event["agent_id"]);
@@ -653,6 +670,9 @@ export class Bridge {
         return this.attached(event);
       case "agent.released":
         return this.released(event);
+      // One of ours deleted by a person (Chips ADR 0095): forgotten here.
+      case "agent.deleted":
+        return this.deleted(event);
       case "membership.replaced":
         return this.replaced(event);
       // Said for somebody else (Chips ADR 0081): never a turn, and not kept. Its words come back

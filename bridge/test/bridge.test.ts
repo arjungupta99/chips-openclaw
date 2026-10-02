@@ -781,6 +781,19 @@ describe("OpenClaw's agents as agents in Chips (Chips ADR 0087)", () => {
     for (const event of sent) assert.deepEqual(event["actor"], { kind: "agent", id: "agt_carried" });
   });
 
+  it("forgets an agent a person deleted in Chips, and says nothing more as it (Chips ADR 0095)", async () => {
+    agents = [agentIn("agt_fallback", ME, OTHER_ROOM), agentIn("agt_main", "main", ROOM)];
+    await bridge.adoptAgents({ defaultId: "main", agents: [{ id: "main" }] });
+    await bridge.onChips({ type: "agent.released", agent_id: "agt_main", space_id: ROOM, reason: "agent_deleted" });
+    await bridge.onChips({ type: "agent.deleted", agent_id: "agt_main", harness_id: ME, key: "main", name: "OpenClaw", by: ARJUN.participant_id });
+    assert.equal(bridge.isOwn("agt_main"), false);
+    // What OpenClaw starts on its own in that agent's session is no longer said as it.
+    const carried = "agent:main:chips-spc_01k4zqpx000000000000000077";
+    bridge.onClaw({ event: "chat", payload: { runId: "cron-3", sessionKey: carried, seq: 1, state: "final", message: "Reminder." } });
+    await bridge.settled();
+    for (const event of sent) assert.notDeepEqual(event["actor"], { kind: "agent", id: "agt_main" });
+  });
+
   it("forgets an agent's room when Chips releases it, and says what it starts then with no room, for Chips to hold", async () => {
     const carried = "agent:main:chips-spc_01k4zqpx000000000000000077";
     agents = [FALLBACK, agentIn("agt_carried", carried, ROOM)];
