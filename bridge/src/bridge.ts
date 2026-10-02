@@ -9,14 +9,18 @@
  *   (`agent.attached`, `agent.released`), so the bridge moves nobody at start. One takes the
  *   default agent's place in a room only when a message there is for the default agent and the
  *   OpenClaw agent is in no room.
- * - A session key is made from the OpenClaw agent and a room's id, so the bridge keeps no map of
- *   its own. A room asked from the + is claimed under such a key, and Chips puts that key's own
- *   agent in it: the session is the agent's wherever it is moved, so it keeps its conversation.
- *   An OpenClaw agent, or the harness's default agent, has one session per room instead.
+ * - Each of our agents in Chips is one OpenClaw session, and no two share one. A session key is
+ *   made from the OpenClaw agent and a room's id, so the bridge keeps no map of its own. A room
+ *   asked from the + is claimed under a key of the claim's own (`…:asked`), and Chips puts that
+ *   key's own agent in it: the session is the agent's wherever it is moved, so it keeps its
+ *   conversation. An OpenClaw agent, or the harness's default agent, has one session per room
+ *   instead, named from both, and named for whose it is (`…:own`, `…:default`) where that name
+ *   is another of our agents' already.
  * - A message says which of our agents it is for (`for`), once the harness declares `agents`;
  *   each takes a turn in its own session. Before that, it is the room's agent's.
- * - A room a person asks for from the +, of this harness or of it beside another, is claimed
- *   under that key, named from the first words.
+ * - A room a person asks for from the +, of this harness or of it beside another, is claimed on
+ *   the first message for the harness itself, named from its words. A message for one of our
+ *   agents there is that agent's, and claims nothing.
  * - A person's words go to the session with `chat.send`, keyed by the message's id.
  * - OpenClaw's `chat` events for a turn become a run: started on the first, answered and completed
  *   on `final`, failed on `error` or `aborted`. Its tool events become steps.
@@ -196,8 +200,15 @@ export function usageOf(usage: unknown, fallbackModel: string): Payload | undefi
   };
 }
 
-/** A session key the bridge made: the OpenClaw agent, and the room it is that agent's session in. */
-const SESSION = /^agent:([^:]+):chips-(.+)$/;
+/**
+ * A session key the bridge made: the OpenClaw agent, the room it is a session in, and, where the
+ * plain name would be another of our agents' session, whose it is: `asked` for a room's claim,
+ * `own` for the OpenClaw agent's own, `default` for the harness's default agent.
+ */
+const SESSION = /^agent:([^:]+):chips-([^:]+)(?::(asked|own|default))?$/;
+
+/** Whose a session is, where its name says (`SESSION`'s last part). */
+type Whose = "asked" | "own" | "default";
 
 /** What Chips calls a sender that is an agent: `harness` before a harness declares `agents`, `agent` after. */
 const isAgentKind = (kind: unknown): boolean => kind === "harness" || kind === "agent";
@@ -276,6 +287,17 @@ export class Bridge {
     return `agent:${agent}:chips-${spaceId.toLowerCase()}`;
   }
 
+  /**
+   * The key a room asked of this harness from the + is claimed under, and so the session of the
+   * agent Chips makes for it. Its own shape, so that it is never an OpenClaw agent's session in a
+   * room: a claim used to take the room's session, and the OpenClaw agent's own agent, added to
+   * that room, was then the same OpenClaw conversation as the claim's. Every message there got
+   * one turn, as whichever of the two came last.
+   */
+  claimKeyFor(spaceId: string): string {
+    return `${this.keyFor(spaceId)}:asked`;
+  }
+
   /** The room a session is, when it is one of this bridge's. */
   spaceFor(sessionKey: string): string | undefined {
     const rest = SESSION.exec(sessionKey)?.[2];
@@ -287,6 +309,11 @@ export class Bridge {
   /** The OpenClaw agent a session is, when it is one of this bridge's. */
   agentFor(sessionKey: string): string | undefined {
     return SESSION.exec(sessionKey)?.[1];
+  }
+
+  /** Whose a session is, when its name says. */
+  private whoseFor(sessionKey: string): Whose | undefined {
+    return SESSION.exec(sessionKey)?.[3] as Whose | undefined;
   }
 
   /** Whether somebody in Chips is this harness: itself, or one of its agents. */
@@ -400,30 +427,57 @@ export class Bridge {
   /**
    * The OpenClaw agent and session one of our Chips agents speaks with in a room. An agent keyed
    * by a session (a room asked from the +) has that session wherever Chips moves it, so it keeps
-   * its conversation. An agent keyed by an OpenClaw agent has that agent's session in each room;
-   * the default agent, and the harness itself, the primary agent's.
+   * its conversation. The harness itself, in a room asked of it, speaks in the session it claims
+   * the room under, so the agent the claim makes goes on with the conversation it began. An agent
+   * keyed by an OpenClaw agent has that agent's session in each room; the default agent, and the
+   * harness itself in a room it is in from before agents, the primary agent's.
    */
   private takerFor(agentId: string | undefined, room: string): Taker {
     const key = agentId === undefined ? undefined : this.keyOf.get(agentId);
     const clawAgent = key === undefined ? undefined : this.agentFor(key);
     if (key !== undefined && clawAgent !== undefined) return { agentId, clawAgent, sessionKey: key };
-    const agent = key === undefined || key === this.self.harnessId ? this.primary : key;
-    return { agentId, clawAgent: agent, sessionKey: this.keyFor(room, agent) };
+    if (agentId === undefined && this.asked.has(room)) {
+      return { agentId, clawAgent: this.primary, sessionKey: this.claimKeyFor(room) };
+    }
+    const fallback = key === undefined || key === this.self.harnessId;
+    const agent = fallback ? this.primary : key;
+    return { agentId, clawAgent: agent, sessionKey: this.sessionIn(room, agent, fallback ? "default" : "own", agentId) };
+  }
+
+  /**
+   * The session an OpenClaw agent, or the default agent, has in a room: named from both, unless
+   * that name is another of our agents' session — a room claimed before claims had keys of their
+   * own was claimed under it — or, for the default agent, unless the primary agent's own agent is
+   * in the room too, whose session it is then. Named for whose it is instead, so that no two of
+   * our agents in Chips are one OpenClaw conversation.
+   */
+  private sessionIn(room: string, agent: string, whose: Whose, agentId: string | undefined): string {
+    const plain = this.keyFor(room, agent);
+    const holder = this.agentByKey.get(plain);
+    const taken = holder !== undefined && holder !== agentId;
+    const beside = whose === "default" && this.speakerIn(room, agent) !== undefined;
+    return taken || beside ? `${plain}:${whose}` : plain;
   }
 
   /**
    * Who of ours takes a turn on a message. `for`, from a Chips that knows our agents: each of ours
    * it names, the harness itself as the primary agent (a room asked of it from the +, which its
-   * claim gives to an agent). Without it, the room's own: whichever of ours Chips has there, else
-   * the primary agent. One turn per session.
+   * claim gives to an agent). Chips named the harness itself in `addressed_to` alone before the
+   * agents review (its finding 31), with `for` empty, and the first words in a room asked from the
+   * + went unanswered: it is read from there too. Without `for`, the room's own: the harness in a
+   * room asked of it, else whichever of ours Chips has there, else the primary agent. One turn per
+   * session, and no two of our agents share one.
    */
   private async turnTakers(event: ChipsEvent, spaceId: string): Promise<Taker[]> {
     const named = event["for"];
     if (!Array.isArray(named)) {
+      if (this.asked.has(spaceId)) return [this.takerFor(undefined, spaceId)];
       const here = [...this.roomOf].filter(([, room]) => room === spaceId).map(([agentId]) => agentId);
       return [this.takerFor(here.find((agentId) => agentId !== this.fallback) ?? here[0], spaceId)];
     }
     const ids = (named as unknown[]).filter((each): each is string => typeof each === "string");
+    const addressed = Array.isArray(event["addressed_to"]) ? (event["addressed_to"] as unknown[]) : [];
+    if (addressed.includes(this.self.harnessId) && !ids.includes(this.self.harnessId)) ids.unshift(this.self.harnessId);
     const ours = (id: string): boolean => id === this.self.harnessId || this.keyOf.has(id);
     if (!ids.every(ours)) this.learn(await this.chips.agents());
     const takers = ids.flatMap((id) => {
@@ -455,8 +509,9 @@ export class Bridge {
   }
 
   /**
-   * Claim a room asked of this harness under the session's key. Chips puts that key's own agent in
-   * the harness's place (ADR 0087), which is read for, and the turn is said as it.
+   * Claim a room asked of this harness under the claim's key, which is the harness's session there.
+   * Chips puts that key's own agent in the harness's place (ADR 0087), which is read for, and the
+   * turn is said as it.
    */
   private async claim(spaceId: string, key: string, words: string): Promise<string | undefined> {
     await this.chips.claim(spaceId, key, titleFrom(words));
@@ -535,9 +590,11 @@ export class Bridge {
     const attachments = takers.length === 0 ? {} : await this.attachments(event);
     for (const taker of takers) {
       await this.ensureSession(taker.sessionKey, words, taker.clawAgent);
-      const agentId = this.asked.delete(spaceId)
-        ? await this.claim(spaceId, taker.sessionKey, words)
-        : await this.speakerFor(spaceId, taker);
+      // The harness itself claims the room it was asked for; one of our agents a message there is
+      // for answers as itself, in its own session, and claims nothing.
+      const claiming = taker.agentId === undefined && this.asked.has(spaceId);
+      if (claiming) this.asked.delete(spaceId);
+      const agentId = claiming ? await this.claim(spaceId, taker.sessionKey, words) : await this.speakerFor(spaceId, taker);
       const turn = this.turnOf(messageId, spaceId, taker);
       this.asks.set(turn, { words, spaceId, agentId });
       this.latest.set(taker.sessionKey, words);
@@ -783,13 +840,22 @@ export class Bridge {
    * Where a turn OpenClaw started on its own is said, and as whom (ADR 0087). A session one of our
    * agents is keyed by is that agent's: in the room Chips last said it is in, or in none, and
    * Chips holds its words until it joins one. Any other session of ours is an OpenClaw agent's in
-   * one room, named from both.
+   * one room, named from both: its own agent's there, or the default agent's where its name says.
+   * A claim's session that no agent is keyed by yet is the harness's own, in the room it was
+   * asked for.
    */
   private whereSaid(sessionKey: string): { spaceId: string | undefined; agentId: string | undefined } | undefined {
     const agentId = this.agentByKey.get(sessionKey);
     if (agentId !== undefined) return { spaceId: this.roomOf.get(agentId) ?? undefined, agentId };
     const spaceId = this.spaceFor(sessionKey);
-    return spaceId === undefined ? undefined : { spaceId, agentId: this.speakerIn(spaceId, this.agentFor(sessionKey)) };
+    if (spaceId === undefined) return undefined;
+    const whose = this.whoseFor(sessionKey);
+    if (whose === "asked") return { spaceId, agentId: undefined };
+    const fallback = this.fallback;
+    if (whose === "default" && fallback !== undefined && this.roomOf.get(fallback) === spaceId) {
+      return { spaceId, agentId: fallback };
+    }
+    return { spaceId, agentId: this.speakerIn(spaceId, this.agentFor(sessionKey)) };
   }
 
   private clawRunOf(run: Run): string | undefined {
