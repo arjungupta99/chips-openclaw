@@ -11,6 +11,8 @@ import type { ChipsAgent, ChipsEvent } from "../src/chips.ts";
 const ME = "hrn_01K4ZQPX000000000000000004";
 const ROOM = "spc_01K4ZQPX000000000000000002";
 const ARJUN = { participant_id: "usr_01K4ZQPX000000000000000003", kind: "person", display_name: "Arjun", role: "owner" };
+/** Arjun as a line of the room names him. */
+const ARJUN_FROM = { id: ARJUN.participant_id, name: "Arjun" };
 
 let sent: ChipsEvent[] = [];
 let claims: [string, string, string | undefined][] = [];
@@ -18,6 +20,9 @@ let calls: [string, Record<string, unknown>][] = [];
 /** This harness's agents as Chips keeps them, one room each (ADR 0087), and what attaching did. */
 let agents: ChipsAgent[] = [];
 let attached: [string, string, string][] = [];
+/** A room's lines as Chips's pull route reads them (ADR 0088), and what the bridge asked of it. */
+let roomLines: Record<string, unknown>[] = [];
+let pulls: [string, number, number][] = [];
 let bridge: Bridge;
 
 /** One of our agents as Chips lists it, in one room or in none. */
@@ -51,6 +56,11 @@ const chips: ChipsPort = {
     );
     return true;
   },
+  roomContext: async (spaceId, before, limit) => {
+    pulls.push([spaceId, before, limit]);
+    const lines = roomLines.filter((line) => Number(line["seq"]) < before).slice(-limit);
+    return { lines, since_seq: 0, truncated: false, before: Number(lines[0]?.["seq"] ?? before) };
+  },
 };
 const claw: ClawPort = {
   request: async <T>(method: string, params: Record<string, unknown>) => {
@@ -65,6 +75,8 @@ beforeEach(() => {
   calls = [];
   agents = [];
   attached = [];
+  roomLines = [];
+  pulls = [];
   bridge = new Bridge(chips, claw, { harnessId: ME, agent: "main" }, () => undefined);
 });
 
@@ -845,6 +857,89 @@ describe("OpenClaw's agents as agents in Chips (Chips ADR 0087)", () => {
     bridge.onClaw({ event: "chat", payload: { runId: "follow-2", sessionKey: `${key()}:default`, seq: 1, state: "final", message: "Here." } });
     await bridge.settled();
     for (const event of sent) assert.deepEqual(event["actor"], { kind: "agent", id: "agt_fallback" });
+  });
+
+  /** A line of the room, as Chips reads one. */
+  function line(seq: number, from: { id: string; name: string; kind?: string }, text: string, addressed: string[] = []) {
+    return { seq, kind: "said", from: { kind: "person", ...from }, text, addressed_to: addressed };
+  }
+
+  it("hands an agent's first turn in a room the room's recent lines, which its conversation may not have", async () => {
+    // As for OpenClaw's own agent in Arjun's room after its conversation was named afresh: Chips's
+    // context starts after its own last message there, and the conversation never saw what came
+    // before it.
+    agents = [agentIn("agt_fallback", ME, OTHER_ROOM), agentIn("agt_main", "main", ROOM), agentIn("agt_claimed", bridge.keyFor(ROOM), ROOM)];
+    await bridge.adoptAgents({ defaultId: "main", agents: [{ id: "main" }] });
+    roomLines = [
+      line(3, ARJUN_FROM, "Hey both, build an ASCII gallery", ["agt_claimed", "agt_main"]),
+      line(4, { id: "agt_claimed", name: "OpenClaw", kind: "agent" }, "I made A to J."),
+      line(5, { id: "agt_main", name: "OpenClaw", kind: "agent" }, "No browser for a screenshot."),
+    ];
+    calls = [];
+    await bridge.onChips(
+      said("What did each of you do?", {
+        seq: 7,
+        addressed_to: ["agt_main"],
+        for: ["agt_main"],
+        context: { lines: [line(6, ARJUN_FROM, "Thanks both")], since_seq: 5, truncated: false, before: 6 },
+      }),
+    );
+    assert.deepEqual(pulls, [[ROOM, 6, 20]]);
+    assert.equal(
+      calls.find(([method]) => method === "chat.send")?.[1]["message"],
+      // Every line, the request it took no turn on in this conversation among them, and its own words as its own.
+      "Said in this room lately:\nArjun: Hey both, build an ASCII gallery\nOpenClaw: I made A to J.\nYou: No browser for a screenshot.\nArjun: Thanks both\n\nWhat did each of you do?",
+    );
+    // Once: its next turn there is handed what Chips carries, and what it missed while it went.
+    pulls = [];
+    await bridge.onChips(
+      said("And now?", { seq: 9, message_id: "msg_01K4ZQPX0000000000000000A2", addressed_to: ["agt_main"], for: ["agt_main"], context: { lines: [], since_seq: 7, truncated: false, before: 9 } }),
+    );
+    assert.deepEqual(pulls, []);
+  });
+
+  it("hands an agent next time what was said while its last turn was going: another agent's answer to the same message", async () => {
+    agents = [agentIn("agt_fallback", ME, OTHER_ROOM), agentIn("agt_main", "main", ROOM), agentIn("agt_claimed", bridge.keyFor(ROOM), ROOM)];
+    await bridge.adoptAgents({ defaultId: "main", agents: [{ id: "main" }] });
+    const both = { addressed_to: ["agt_claimed", "agt_main"], for: ["agt_claimed", "agt_main"] };
+    await bridge.onChips(said("Hey both", { seq: 10, ...both, context: { lines: [], since_seq: 9, truncated: false, before: 10 } }));
+    // The two answer side by side; the room's own agent lands first.
+    roomLines = [
+      line(10, ARJUN_FROM, "Hey both", ["agt_claimed", "agt_main"]),
+      line(11, { id: "agt_claimed", name: "OpenClaw", kind: "agent" }, "I'll do the letters."),
+      line(12, { id: "agt_main", name: "OpenClaw", kind: "agent" }, "I'll do the numbers."),
+    ];
+    calls = [];
+    pulls = [];
+    // Chips's context for OpenClaw's own agent starts after its own answer, 12.
+    await bridge.onChips(
+      said("@OpenClaw go on", { seq: 13, message_id: "msg_01K4ZQPX0000000000000000A2", addressed_to: ["agt_main"], for: ["agt_main"], context: { lines: [], since_seq: 12, truncated: false, before: 13 } }),
+    );
+    assert.deepEqual(pulls, [[ROOM, 13, 20]]);
+    // The other's answer, and not its own, which it said in this conversation.
+    assert.equal(calls.find(([method]) => method === "chat.send")?.[1]["message"], "Said in this room since you last spoke:\nOpenClaw: I'll do the letters.\n\n@OpenClaw go on");
+  });
+
+  it("keeps a line meant for another of its agents in an agent's catch-up: that was a turn in another conversation", async () => {
+    agents = [agentIn("agt_fallback", ME, OTHER_ROOM), agentIn("agt_main", "main", ROOM), agentIn("agt_claimed", bridge.keyFor(ROOM), ROOM)];
+    await bridge.adoptAgents({ defaultId: "main", agents: [{ id: "main" }] });
+    const context = { lines: [line(20, ARJUN_FROM, "@claimed only you", ["agt_claimed"])], since_seq: 19, truncated: false, before: 20 };
+    await bridge.onChips(said("Over to you", { seq: 21, addressed_to: ["agt_main"], for: ["agt_main"], context }));
+    assert.equal(
+      calls.find(([method]) => method === "chat.send")?.[1]["message"],
+      "Said in this room since you last spoke:\nArjun: @claimed only you\n\nOver to you",
+    );
+    calls = [];
+    // The agent it was for had a turn on it, in its own conversation.
+    await bridge.onChips(said("And you?", { seq: 22, message_id: "msg_01K4ZQPX0000000000000000A2", addressed_to: ["agt_claimed"], for: ["agt_claimed"], context }));
+    assert.equal(calls.find(([method]) => method === "chat.send")?.[1]["message"], "And you?");
+  });
+
+  it("reads nothing more of the room when Chips's pull route will not answer", async () => {
+    const failing = { ...chips, roomContext: async () => Promise.reject(new Error("no")) };
+    const quiet = new Bridge(failing, claw, { harnessId: ME, agent: "main" }, () => undefined);
+    await quiet.onChips(said("Hi", { addressed_to: [ME], context: { lines: [], since_seq: 4, truncated: false, before: 5 } }));
+    assert.equal(calls.find(([method]) => method === "chat.send")?.[1]["message"], "Hi");
   });
 
   it("before the harness declares agents, answers in the room as the agent Chips has there", async () => {

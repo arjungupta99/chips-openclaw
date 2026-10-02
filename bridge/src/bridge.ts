@@ -21,7 +21,11 @@
  * - A room a person asks for from the +, of this harness or of it beside another, is claimed on
  *   the first message for the harness itself, named from its words. A message for one of our
  *   agents there is that agent's, and claims nothing.
- * - A person's words go to the session with `chat.send`, keyed by the message's id.
+ * - A person's words go to the session with `chat.send`, keyed by the message's id, with what the
+ *   turn's conversation has not been told of the room ahead of them: what Chips carries with the
+ *   message (since the agent last spoke), the catch-up it handed on joining, and what the
+ *   conversation missed, read from Chips's pull route — the room's recent lines the first time
+ *   the bridge hands the agent a turn there, the lines said while its last turn there went.
  * - OpenClaw's `chat` events for a turn become a run: started on the first, answered and completed
  *   on `final`, failed on `error` or `aborted`. Its tool events become steps.
  * - An exec approval becomes an approval card, and the person's answer goes back as allow-once,
@@ -44,6 +48,7 @@ export interface ChipsPort {
   agents(): Promise<ChipsAgent[]>;
   registerAgent(agent: { key: string; name: string }): Promise<ChipsAgent>;
   attach(agentId: string, spaceId: string, replacing: string): Promise<boolean>;
+  roomContext(spaceId: string, before: number, limit: number): Promise<unknown>;
 }
 
 /** One agent as the gateway lists it (`agents.list`). */
@@ -119,9 +124,17 @@ export function wordsOf(event: Record<string, unknown>): string {
   return files.length > 0 ? "A file" : "A message";
 }
 
+/**
+ * How much of a room a catch-up the bridge reads for itself carries: what Chips hands with a
+ * message by default (ADR 0088), lines and characters.
+ */
+const CATCH_UP = { lines: 20, chars: 4000 } as const;
+
 /** One of the room's lines Chips handed over with a message (Chips ADR 0088), as OpenClaw is told it. */
-function contextLineOf(line: Payload): string | undefined {
-  const name = str((line["from"] as Payload | undefined)?.["name"]) ?? "Someone";
+function contextLineOf(line: Payload, self?: string): string | undefined {
+  const from = line["from"] as Payload | undefined;
+  // Its own words are its own: two of our agents in one room may go by one name.
+  const name = self !== undefined && str(from?.["id"]) === self ? "You" : (str(from?.["name"]) ?? "Someone");
   const flat = (words: unknown): string => (str(words) ?? "").replace(/\s*\n\s*/g, " ").trim();
   switch (line["kind"]) {
     case "said": {
@@ -150,22 +163,69 @@ function contextLineOf(line: Payload): string | undefined {
 
 /**
  * What Chips handed over with a message (Chips ADR 0088): the room's lines since this harness last
- * spoke there, read from Chips's log, so a restart of the bridge loses none. A message that was
- * this harness's to answer — its own, or any of its agents' — is left out: it had a turn of its
- * own. Nothing when the message carries no context.
+ * spoke there, read from Chips's log, so a restart of the bridge loses none. A message the turn's
+ * conversation had a turn of its own on is left out: `own` says which those were. Lines `self`
+ * said read as its own. Nothing when the message carries no context.
  */
-export function heardIn(context: unknown, own: (participantId: string) => boolean): string[] {
+export function heardIn(context: unknown, own: (participantId: string) => boolean, self?: string): string[] {
   const lines = (context as Payload | null | undefined)?.["lines"];
   if (!Array.isArray(lines)) return [];
   return lines.flatMap((each) => {
     if (typeof each !== "object" || each === null) return [];
-    const line = each as Payload;
-    const addressed = line["addressed_to"];
-    const hadTurn =
-      line["kind"] === "said" && (!Array.isArray(addressed) || (addressed as unknown[]).some((id) => typeof id === "string" && own(id)));
-    const told = hadTurn ? undefined : contextLineOf(line);
+    const told = tookTurn(each, own) ? undefined : contextLineOf(each as Payload, self);
     return told === undefined ? [] : [told];
   });
+}
+
+/**
+ * Whether a line is a message a conversation had a turn of its own on: one for somebody `own` says
+ * is it, or one from before Chips said who a message was for, which every harness took.
+ */
+function tookTurn(each: unknown, own: (participantId: string) => boolean): boolean {
+  if (typeof each !== "object" || each === null) return false;
+  const line = each as Payload;
+  const addressed = line["addressed_to"];
+  return (
+    line["kind"] === "said" &&
+    (!Array.isArray(addressed) || (addressed as unknown[]).some((id) => typeof id === "string" && own(id)))
+  );
+}
+
+/** A context's lines, or none. */
+function linesIn(context: unknown): unknown[] {
+  const lines = (context as Payload | null | undefined)?.["lines"];
+  return Array.isArray(lines) ? lines : [];
+}
+
+/** Lines from more than one read of a room, each once, oldest first. */
+function mergedLines(lines: readonly unknown[]): Payload[] {
+  const seen = new Set<number>();
+  const kept: Payload[] = [];
+  for (const each of lines) {
+    if (typeof each !== "object" || each === null) continue;
+    const line = each as Payload;
+    const at = num(line["seq"]);
+    if (at !== undefined) {
+      if (seen.has(at)) continue;
+      seen.add(at);
+    }
+    kept.push(line);
+  }
+  return kept.every((line) => num(line["seq"]) !== undefined)
+    ? kept.sort((a, b) => Number(a["seq"]) - Number(b["seq"]))
+    : kept;
+}
+
+/** The newest lines whose words fit in `chars`, oldest first; the newest always. */
+function newestWithin(lines: readonly Payload[], chars: number): Payload[] {
+  const kept: Payload[] = [];
+  let used = 0;
+  for (const line of [...lines].reverse()) {
+    used += (str(line["text"])?.length ?? 0) + (str(line["transcript"])?.length ?? 0) + 40;
+    if (used > chars && kept.length > 0) break;
+    kept.unshift(line);
+  }
+  return kept;
 }
 
 /** The text of an OpenClaw message, whether a string or content blocks. */
@@ -599,10 +659,19 @@ export class Bridge {
       this.asks.set(turn, { words, spaceId, agentId });
       this.latest.set(taker.sessionKey, words);
       const caughtUp = agentId === undefined ? undefined : this.caughtUpIn(agentId, spaceId);
+      const heard = agentId === undefined ? undefined : this.lastHeard.get(agentId);
+      const missed = await this.missedIn(spaceId, event["context"], heard, agentId);
+      const fresh = heard?.room !== spaceId;
       if (agentId !== undefined && seq !== undefined) this.lastHeard.set(agentId, { room: spaceId, seq });
       await this.claw.request("chat.send", {
         sessionKey: taker.sessionKey,
-        message: this.withOverheard(agentSaid ? fromAgent(from, text) : text, event["context"], caughtUp),
+        message: this.withOverheard(agentSaid ? fromAgent(from, text) : text, event["context"], {
+          caughtUp,
+          missed,
+          fresh,
+          speaker: agentId,
+          harnessTurns: this.keyOf.get(taker.agentId ?? "") !== taker.clawAgent,
+        }),
         idempotencyKey: turn,
         ...attachments,
       });
@@ -618,15 +687,85 @@ export class Bridge {
   }
 
   /**
-   * A turn's words, with what was said in the room since OpenClaw last spoke there ahead of them,
-   * as Chips handed it over (ADR 0088): for an agent new to the room, the room's last lines before
-   * it joined go first. Both read the same, as the SDK's `renderContext` writes them.
+   * A turn's words, with what was said in the room that its conversation has not been told ahead of
+   * them (ADR 0088): for an agent new to the room, the room's last lines before it joined; the
+   * lines its conversation missed (`missedIn`); and what Chips handed over with the message. Each
+   * line once, oldest first, as the SDK's `renderContext` writes them.
+   *
+   * A line is left out when this conversation had a turn of its own on it: one for the agent the
+   * turn is said as, and one for the harness itself where the conversation goes on from the
+   * harness's — a claim's, the default agent's — but not one for another of our agents, which was a
+   * turn in a conversation of its own. A first turn's catch-up keeps every line: whether this
+   * conversation had a turn on one is what it cannot know. The speaker's own words read as its own.
    */
-  private withOverheard(text: string, context: unknown, caughtUp?: unknown): string {
-    const own = (id: string): boolean => this.isOwn(id);
-    const lines = [...heardIn(caughtUp, own), ...heardIn(context, own)];
+  private withOverheard(
+    text: string,
+    context: unknown,
+    with_: {
+      caughtUp?: unknown;
+      missed?: readonly Payload[];
+      /** Whether `missed` is a first turn's catch-up rather than what went by during the last turn. */
+      fresh?: boolean;
+      speaker?: string | undefined;
+      harnessTurns: boolean;
+    },
+  ): string {
+    const own = (id: string): boolean =>
+      id === with_.speaker || (with_.harnessTurns && id === this.self.harnessId);
+    const told = (lines: readonly unknown[]): unknown[] => lines.filter((each) => !tookTurn(each, own));
+    const missed = with_.missed ?? [];
+    const recent = with_.fresh === true && missed.length > 0;
+    const all = mergedLines([
+      ...told(linesIn(with_.caughtUp)),
+      ...(recent ? missed : told(missed)),
+      ...told(linesIn(context)),
+    ]);
+    const lines = heardIn({ lines: all }, () => false, with_.speaker);
     if (lines.length === 0) return text;
-    return `Said in this room since you last spoke:\n${lines.join("\n")}\n\n${text}`;
+    const heading = recent ? "Said in this room lately:" : "Said in this room since you last spoke:";
+    return `${heading}\n${lines.join("\n")}\n\n${text}`;
+  }
+
+  /**
+   * The room's lines a turn's conversation has not had, which the message does not carry. Chips's
+   * context starts after the agent's own last message in the room (`since_seq`), and a
+   * conversation can be behind that:
+   *
+   * - The first time this bridge hands an agent a turn in a room, its conversation may be new — a
+   *   session named afresh, or one OpenClaw does not have — or the catch-up it was handed on joining
+   *   may have gone with a restart. It is given the room's recent lines up to that point; a
+   *   conversation that had them is told them again, which ADR 0088 allows.
+   * - After that, the lines said while its last turn there was going: another agent's answer to
+   *   the same message lands before its own, and Chips's next context starts after its own.
+   *
+   * Read from Chips's pull route, within what Chips hands with a message.
+   */
+  private async missedIn(
+    spaceId: string,
+    context: unknown,
+    heard: { readonly room: string; readonly seq: number } | undefined,
+    speaker: string | undefined,
+  ): Promise<Payload[]> {
+    const since = num((context as Payload | null | undefined)?.["since_seq"]);
+    if (since === undefined) return [];
+    const from = heard?.room === spaceId ? heard.seq : 0;
+    if (from >= since) return [];
+    let page: unknown;
+    try {
+      page = await this.chips.roomContext(spaceId, since + 1, CATCH_UP.lines);
+    } catch (error) {
+      this.log(`chips: could not read ${spaceId}'s lines: ${String(error)}`);
+      return [];
+    }
+    const missed = linesIn(page).filter((each): each is Payload => {
+      if (typeof each !== "object" || each === null) return false;
+      const line = each as Payload;
+      const at = num(line["seq"]);
+      // Its own words in the conversation it said them in are its already.
+      const mine = from > 0 && str((line["from"] as Payload | undefined)?.["id"]) === speaker;
+      return at !== undefined && at > from && at <= since && !mine;
+    });
+    return newestWithin(missed, CATCH_UP.chars);
   }
 
   /**

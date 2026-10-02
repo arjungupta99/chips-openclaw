@@ -164,6 +164,14 @@ export class Chips {
     });
   }
 
+  /**
+   * A room's lines before a cursor (`GET /v1/spaces/:id/context`, Chips ADR 0088): the newest that
+   * fit, oldest first, from a room this harness is in now, itself or as one of its agents.
+   */
+  async roomContext(spaceId: string, before: number, limit: number): Promise<unknown> {
+    return this.call("GET", `/v1/spaces/${spaceId}/context?before=${before}&limit=${limit}`);
+  }
+
   /** The log from a cursor, a page at a time (`GET /v1/events`), for a room's history at start. */
   async history(since: number): Promise<{ events: ChipsEvent[]; next_cursor: number }> {
     return (await this.call("GET", `/v1/events?since=${since}&limit=500`)) as {
