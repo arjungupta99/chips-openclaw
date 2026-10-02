@@ -24,6 +24,8 @@ export interface Config {
    * lists is one of this harness's agents in Chips, all on the one token.
    */
   readonly agent: string | undefined;
+  /** Everything OpenClaw and the bridge keep (`$CHIPS_OPENCLAW_DIR`): OpenClaw's state is under it. */
+  readonly sandbox: string;
   readonly stateDir: string;
 }
 
@@ -62,6 +64,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     gatewayUrl: values["OPENCLAW_URL"] ?? "ws://127.0.0.1:18789",
     gatewayToken: required(values, "OPENCLAW_GATEWAY_TOKEN"),
     agent: values["OPENCLAW_AGENT"] || undefined,
+    sandbox,
     stateDir,
   };
 }

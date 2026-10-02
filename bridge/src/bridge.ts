@@ -28,6 +28,10 @@
  *   the bridge hands the agent a turn there, the lines said while its last turn there went.
  * - OpenClaw's `chat` events for a turn become a run: started on the first, answered and completed
  *   on `final`, failed on `error` or `aborted`. Its tool events become steps.
+ * - A file the answer sends (a `MEDIA:` line of its own, which the gateway takes out of the words
+ *   and reports on the turn's `assistant` stream) is read where OpenClaw keeps it, uploaded, and
+ *   posted with the answer's words as one message (`media.ts`). One that cannot go is said in the
+ *   message instead.
  * - An exec approval becomes an approval card, and the person's answer goes back as allow-once,
  *   allow-always or deny. An `ask_user` question becomes a question card. An ask answered in
  *   OpenClaw's own tools instead is settled in Chips, once, so its card cools (Chips ADR 0079).
@@ -38,6 +42,7 @@
 
 import { type ChipsAgent, type ChipsEvent, ChipsRefusal } from "./chips.ts";
 import { chipsId } from "./ids.ts";
+import type { Media } from "./media.ts";
 import type { ClawEvent } from "./openclaw.ts";
 
 /** What the bridge needs of Chips; the `Chips` client, or a stand-in in the tests. */
@@ -45,6 +50,8 @@ export interface ChipsPort {
   send(event: ChipsEvent): Promise<void>;
   claim(spaceId: string, key: string, title: string | undefined): Promise<void>;
   fetchAttachment(url: string): Promise<Buffer>;
+  /** A file's bytes, uploaded; the upload's id, for a post's `upload_ids`. */
+  upload(filename: string, bytes: Buffer): Promise<string>;
   agents(): Promise<ChipsAgent[]>;
   registerAgent(agent: { key: string; name: string }): Promise<ChipsAgent>;
   attach(agentId: string, spaceId: string, replacing: string): Promise<boolean>;
@@ -64,6 +71,18 @@ export interface ClawPort {
   request<T = Record<string, unknown>>(method: string, params: Record<string, unknown>): Promise<T>;
 }
 
+/** The files an OpenClaw turn names with `MEDIA:` lines, read where the gateway keeps them (`media.ts`). */
+export interface FilesPort {
+  read(reference: string): Promise<Media>;
+}
+
+const NO_FILES: FilesPort = {
+  read: async (reference) => ({ kind: "refused", name: reference, why: "the bridge reads no files" }),
+};
+
+/** As many files as one Chips post takes. */
+const MAX_FILES = 20;
+
 interface Run {
   readonly chipsRun: string;
   /**
@@ -77,6 +96,12 @@ interface Run {
   /** Writes for one run go in order. */
   chain: Promise<void>;
   ended: boolean;
+  /** What the turn's answer named to send (`MEDIA:` lines), as its `assistant` stream reported them. */
+  readonly media: string[];
+  /** The answer as it was posted, files' notes and links included, for the run's summary. */
+  reply?: string;
+  /** The names of the files the answer carried. */
+  sent?: string[];
   /** From the turn's `lifecycle` model phase and its `usage` stream, reported when it ends. */
   model?: string;
   inputTokens?: number;
@@ -338,6 +363,7 @@ export class Bridge {
     private readonly claw: ClawPort,
     private readonly self: { readonly harnessId: string; readonly agent: string },
     private readonly log: (message: string) => void,
+    private readonly files: FilesPort = NO_FILES,
   ) {
     this.primary = self.agent;
   }
@@ -957,6 +983,7 @@ export class Bridge {
       agentId: where.agentId,
       chain: Promise.resolve(),
       ended: false,
+      media: [],
     };
     this.runs.set(clawRun, run);
     this.runByChips.set(run.chipsRun, run);
@@ -1023,12 +1050,20 @@ export class Bridge {
     // No `to`, even for an answer to another harness: it acts on the words only when they @ it.
     // Sending it back by itself kept Jacobian and OpenClaw trading thanks until Chips's guard
     // held the fifth (the live test, 27 September 2026).
-    if (text !== "") {
-      this.write(run, {
-        type: "message.post",
-        run_id: run.chipsRun,
-        text,
-        idempotency_key: `openclaw-run:${clawRun}:reply`,
+    // The files the answer named go with its words, as one post, once they are uploaded.
+    if (text !== "" || run.media.length > 0) {
+      this.write(run, async () => {
+        const files = await this.upload(run);
+        run.reply = [text, ...files.notes].filter((part) => part !== "").join("\n\n");
+        run.sent = files.names;
+        if (run.reply === "" && files.ids.length === 0) return undefined;
+        return {
+          type: "message.post",
+          run_id: run.chipsRun,
+          text: run.reply,
+          ...(files.ids.length === 0 ? {} : { upload_ids: files.ids }),
+          idempotency_key: `openclaw-run:${clawRun}:reply`,
+        };
       });
     }
     const model = run.model ?? str(p["model"]) ?? "openai";
@@ -1048,14 +1083,60 @@ export class Bridge {
         idempotency_key: `openclaw-run:${clawRun}:context`,
       });
     }
-    // The whole reply, so Chips draws the answer and the summary as one card rather than two.
-    this.write(run, {
-      type: "run.completed",
-      run_id: run.chipsRun,
-      // A queued message's own turn can end empty, its answer given in a follow-up turn.
-      summary: text === "" ? "No reply of its own; answered in the next turn." : text.slice(0, 20_000),
-      idempotency_key: `openclaw-run:${clawRun}:completed`,
+    // The whole reply as it was posted, so Chips draws the answer and the summary as one card
+    // rather than two.
+    this.write(run, () => {
+      const reply = run.reply ?? text;
+      const sent = run.sent ?? [];
+      return {
+        type: "run.completed",
+        run_id: run.chipsRun,
+        // A queued message's own turn can end empty, its answer given in a follow-up turn.
+        summary:
+          reply !== ""
+            ? reply.slice(0, 20_000)
+            : sent.length > 0
+              ? `Sent ${sent.join(", ")}.`
+              : "No reply of its own; answered in the next turn.",
+        idempotency_key: `openclaw-run:${clawRun}:completed`,
+      };
     });
+  }
+
+  /**
+   * The files an answer named, uploaded for its post, as many as a post takes. What could not go
+   * is said in the post instead, so the room knows it was meant to; a web address goes back into
+   * the words it was taken from, since the bridge fetches nothing from the web.
+   */
+  private async upload(run: Run): Promise<{ ids: string[]; names: string[]; notes: string[] }> {
+    const ids: string[] = [];
+    const names: string[] = [];
+    const notes: string[] = [];
+    for (const reference of run.media) {
+      const media = await this.files.read(reference);
+      if (media.kind === "link") {
+        notes.push(media.url);
+        continue;
+      }
+      if (media.kind === "refused") {
+        this.log(`bridge: ${reference} not attached for ${run.chipsRun}: ${media.why}`);
+        notes.push(`(${media.name} was not attached: ${media.why}.)`);
+        continue;
+      }
+      if (ids.length >= MAX_FILES) {
+        notes.push(`(${media.filename} was not attached: a message takes ${MAX_FILES} files.)`);
+        continue;
+      }
+      try {
+        ids.push(await this.chips.upload(media.filename, media.bytes));
+        names.push(media.filename);
+      } catch (error) {
+        const why = error instanceof ChipsRefusal ? error.message : String(error);
+        this.log(`chips refused the upload of ${media.filename} for ${run.chipsRun}: ${why}`);
+        notes.push(`(${media.filename} was not attached: Chips refused it: ${why})`);
+      }
+    }
+    return { ids, names, notes };
   }
 
   /**
@@ -1088,8 +1169,21 @@ export class Bridge {
         return;
       case "tool":
         return this.tool(run, p);
+      case "assistant":
+        return this.named(run, data);
       default:
         return;
+    }
+  }
+
+  /**
+   * The files the answer names. OpenClaw takes each `MEDIA:` line out of the words and reports
+   * the lot on the `assistant` stream, the last time with the final answer.
+   */
+  private named(run: Run, data: Payload): void {
+    const urls = Array.isArray(data["mediaUrls"]) ? (data["mediaUrls"] as unknown[]) : [data["mediaUrl"]];
+    for (const url of urls) {
+      if (typeof url === "string" && url.trim() !== "" && !run.media.includes(url.trim())) run.media.push(url.trim());
     }
   }
 
@@ -1225,18 +1319,25 @@ export class Bridge {
     return latest;
   }
 
-  /** Write for a run, in order; a refusal is logged, never thrown into OpenClaw's event loop. */
-  private write(run: Run, event: ChipsEvent): void {
-    const words = run.spaceId === undefined ? this.roomless(event) : event;
-    if (words === undefined) return;
-    // Said as the agent the turn is by (Chips ADR 0087).
-    const said = run.agentId === undefined ? words : { ...words, actor: { kind: "agent", id: run.agentId } };
+  /**
+   * Write for a run, in order; a refusal is logged, never thrown into OpenClaw's event loop. A
+   * write that is made when its turn comes (a post that waits for its files) is given as a function.
+   */
+  private write(run: Run, next: ChipsEvent | (() => ChipsEvent | undefined | Promise<ChipsEvent | undefined>)): void {
     run.chain = run.chain.then(async () => {
+      let type = typeof next === "function" ? "a write" : next.type;
       try {
+        const event = typeof next === "function" ? await next() : next;
+        if (event === undefined) return;
+        type = event.type;
+        const words = run.spaceId === undefined ? this.roomless(event) : event;
+        if (words === undefined) return;
+        // Said as the agent the turn is by (Chips ADR 0087).
+        const said = run.agentId === undefined ? words : { ...words, actor: { kind: "agent", id: run.agentId } };
         await this.chips.send(said);
       } catch (error) {
         const why = error instanceof ChipsRefusal ? `${error.status} ${error.code}: ${error.message}` : String(error);
-        this.log(`chips refused ${event.type} for ${run.chipsRun}: ${why}`);
+        this.log(`chips refused ${type} for ${run.chipsRun}: ${why}`);
       }
     });
   }

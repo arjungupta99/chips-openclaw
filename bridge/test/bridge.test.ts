@@ -5,8 +5,18 @@
 
 import assert from "node:assert/strict";
 import { beforeEach, describe, it } from "node:test";
-import { Bridge, type ChipsPort, type ClawPort, heardIn, textOf, titleFrom, usageOf, wordsOf } from "../src/bridge.ts";
-import type { ChipsAgent, ChipsEvent } from "../src/chips.ts";
+import {
+  Bridge,
+  type ChipsPort,
+  type ClawPort,
+  type FilesPort,
+  heardIn,
+  textOf,
+  titleFrom,
+  usageOf,
+  wordsOf,
+} from "../src/bridge.ts";
+import { type ChipsAgent, type ChipsEvent, ChipsRefusal } from "../src/chips.ts";
 
 const ME = "hrn_01K4ZQPX000000000000000004";
 const ROOM = "spc_01K4ZQPX000000000000000002";
@@ -23,6 +33,8 @@ let attached: [string, string, string][] = [];
 /** A room's lines as Chips's pull route reads them (ADR 0088), and what the bridge asked of it. */
 let roomLines: Record<string, unknown>[] = [];
 let pulls: [string, number, number][] = [];
+/** The files uploaded, by name and bytes; one called `big.mov` is refused, as an oversized one is. */
+let uploads: [string, string][] = [];
 let bridge: Bridge;
 
 /** One of our agents as Chips lists it, in one room or in none. */
@@ -38,6 +50,11 @@ const chips: ChipsPort = {
     agents = [...agents.filter((each) => each.key !== key), agentIn(`agt_${key}`, key, spaceId)];
   },
   fetchAttachment: async () => Buffer.from("png-bytes"),
+  upload: async (filename, bytes) => {
+    if (filename === "big.mov") throw new ChipsRefusal(413, "too_large", "The file is larger than this workspace takes.");
+    uploads.push([filename, bytes.toString()]);
+    return `att_01K4ZQPX00000000000000000${uploads.length}`;
+  },
   agents: async () => agents.map((each) => ({ ...each, spaces: [...each.spaces] })),
   registerAgent: async ({ key, name }) => {
     const had = agents.find((each) => each.key === key);
@@ -77,6 +94,7 @@ beforeEach(() => {
   attached = [];
   roomLines = [];
   pulls = [];
+  uploads = [];
   bridge = new Bridge(chips, claw, { harnessId: ME, agent: "main" }, () => undefined);
 });
 
@@ -320,6 +338,108 @@ describe("a turn as a run", () => {
     await bridge.settled();
     await bridge.onChips({ type: "run.cancel", run_id: sent[0]?.["run_id"], by: ARJUN.participant_id });
     assert.deepEqual(calls, [["chat.abort", { sessionKey: key(), runId: "r5" }]]);
+  });
+});
+
+describe("an answer's files", () => {
+  const WORKSPACE = "/home/node/.openclaw/workspace";
+  /** OpenClaw's files as the bridge reads them: a web address is a link, `missing.html` is not there. */
+  const files: FilesPort = {
+    read: async (reference) => {
+      if (reference.startsWith("https://")) return { kind: "link", url: reference };
+      const name = reference.split("/").at(-1) ?? reference;
+      if (name === "missing.html") return { kind: "refused", name, why: "it is not there" };
+      return { kind: "file", filename: name, bytes: Buffer.from(`bytes of ${name}`) };
+    },
+  };
+  const R1 = "msg_01K4ZQPX0000000000000000A1";
+
+  beforeEach(() => {
+    bridge = new Bridge(chips, claw, { harnessId: ME, agent: "main" }, () => undefined, files);
+  });
+
+  /** The final answer's stream event names its files, and the final `chat` carries its words only. */
+  function answers(text: string, mediaUrls: string[]): void {
+    bridge.onClaw({ event: "chat", payload: { runId: R1, sessionKey: key(), seq: 1, state: "status" } });
+    const stream = { runId: R1, sessionKey: key(), stream: "assistant" };
+    bridge.onClaw({ event: "agent", payload: { ...stream, seq: 2, data: { text, delta: text, phase: "final_answer" } } });
+    bridge.onClaw({ event: "agent", payload: { ...stream, seq: 3, data: { text, delta: "", mediaUrls, phase: "final_answer" } } });
+    bridge.onClaw({
+      event: "chat",
+      payload: {
+        runId: R1,
+        sessionKey: key(),
+        seq: 4,
+        state: "final",
+        // As OpenClaw's own web chat answers a page it cannot draw (the live run, 1 October 2026).
+        message: {
+          role: "assistant",
+          content: [
+            { type: "text", text },
+            { type: "attachment_error", attachment: { code: "unsupported-format", kind: "document", label: "x" } },
+          ],
+        },
+      },
+    });
+  }
+
+  it("posts the files an answer names with its words, as one message", async () => {
+    await bridge.onChips(said("Add F–J"));
+    answers("@Hello, added F–J. Updated HTML attached.", [`${WORKSPACE}/ascii-alphabet.html`]);
+    await bridge.settled();
+    assert.deepEqual(sent.map((event) => event.type), ["run.started", "message.post", "run.completed"]);
+    assert.deepEqual(uploads, [["ascii-alphabet.html", "bytes of ascii-alphabet.html"]]);
+    const post = sent[1];
+    assert.equal(post?.["text"], "@Hello, added F–J. Updated HTML attached.");
+    assert.deepEqual(post?.["upload_ids"], ["att_01K4ZQPX000000000000000001"]);
+    assert.equal(post?.["idempotency_key"], `openclaw-run:${R1}:reply`);
+    assert.equal(sent[2]?.["summary"], "@Hello, added F–J. Updated HTML attached.");
+  });
+
+  it("uploads a file named twice in the turn's stream once", async () => {
+    await bridge.onChips(said("Draw a cat"));
+    bridge.onClaw({ event: "agent", payload: { runId: R1, sessionKey: key(), stream: "assistant", seq: 1, data: { mediaUrls: ["cat.png"] } } });
+    answers("Here.", ["cat.png", `${WORKSPACE}/dog.png`]);
+    await bridge.settled();
+    assert.deepEqual(uploads.map(([name]) => name), ["cat.png", "dog.png"]);
+    assert.equal((sent.find((event) => event.type === "message.post")?.["upload_ids"] as unknown[]).length, 2);
+  });
+
+  it("says in the message what could not go, and gives a web address back to the words", async () => {
+    await bridge.onChips(said("Send the lot"));
+    answers("Three files.", [`${WORKSPACE}/missing.html`, "https://example.com/cat.png", `${WORKSPACE}/big.mov`]);
+    await bridge.settled();
+    const post = sent.find((event) => event.type === "message.post");
+    assert.equal(
+      post?.["text"],
+      [
+        "Three files.",
+        "(missing.html was not attached: it is not there.)",
+        "https://example.com/cat.png",
+        "(big.mov was not attached: Chips refused it: The file is larger than this workspace takes.)",
+      ].join("\n\n"),
+    );
+    assert.equal(post?.["upload_ids"], undefined);
+    // The summary is the message as posted, so Chips still draws one card.
+    assert.equal(sent.at(-1)?.["summary"], post?.["text"]);
+  });
+
+  it("posts a file sent with no words, and says what was sent in the run's summary", async () => {
+    await bridge.onChips(said("Just the file"));
+    answers("", [`${WORKSPACE}/ascii-alphabet.html`]);
+    await bridge.settled();
+    const post = sent.find((event) => event.type === "message.post");
+    assert.equal(post?.["text"], "");
+    assert.deepEqual(post?.["upload_ids"], ["att_01K4ZQPX000000000000000001"]);
+    assert.equal(sent.at(-1)?.["summary"], "Sent ascii-alphabet.html.");
+  });
+
+  it("posts the words alone when the answer names no file", async () => {
+    await bridge.onChips(said("Hi"));
+    answers("Hello.", []);
+    await bridge.settled();
+    assert.equal(uploads.length, 0);
+    assert.equal(sent.find((event) => event.type === "message.post")?.["upload_ids"], undefined);
   });
 });
 

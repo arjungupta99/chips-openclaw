@@ -13,6 +13,9 @@ import WebSocket from "ws";
 
 export type ChipsEvent = Record<string, unknown> & { readonly type: string };
 
+/** The size Chips's own apps send an upload's pieces in. */
+const PIECE_BYTES = 4 * 1024 * 1024;
+
 export interface ChipsOptions {
   readonly url: string;
   readonly harnessId: string;
@@ -178,6 +181,42 @@ export class Chips {
       events: ChipsEvent[];
       next_cursor: number;
     };
+  }
+
+  /**
+   * A file for a post (`reference/http`, "Uploads and attachments"): a slot, then its bytes, whole
+   * or, for a large one, in pieces at the offset the server holds. The post names the upload's id
+   * in `upload_ids`, and Chips fills in what the bytes turned out to be.
+   */
+  async upload(filename: string, bytes: Buffer): Promise<string> {
+    const slot = (await this.call("POST", "/v1/uploads", { filename, byte_size: bytes.length })) as {
+      attachment_id: string;
+      upload_url?: string;
+      pieces?: boolean;
+    };
+    const path = slot.upload_url ?? `/v1/uploads/${slot.attachment_id}`;
+    // A server from before pieces would keep the first piece as the whole file.
+    if (slot.pieces !== true || bytes.length <= PIECE_BYTES) {
+      await this.put(path, bytes);
+      return slot.attachment_id;
+    }
+    for (let offset = 0; offset < bytes.length; offset += PIECE_BYTES) {
+      await this.put(`${path}?offset=${offset}`, bytes.subarray(offset, offset + PIECE_BYTES));
+    }
+    return slot.attachment_id;
+  }
+
+  private async put(path: string, body: Buffer): Promise<void> {
+    const response = await fetch(`${this.options.url}${path}`, {
+      method: "PUT",
+      headers: { authorization: `Bearer ${this.options.token}`, "content-type": "application/octet-stream" },
+      body: new Uint8Array(body),
+    });
+    if (response.ok) return;
+    const text = await response.text();
+    const parsed = text === "" ? {} : (JSON.parse(text) as Record<string, unknown>);
+    const error = (parsed["error"] ?? parsed) as { code?: string; message?: string };
+    throw new ChipsRefusal(response.status, error.code ?? String(response.status), error.message ?? text);
   }
 
   /** A file a person sent, from the signed URL `message.new` carried (good for ten minutes). */

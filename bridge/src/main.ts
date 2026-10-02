@@ -9,6 +9,7 @@ import { Bridge } from "./bridge.ts";
 import { Chips, type ChipsEvent } from "./chips.ts";
 import { loadConfig } from "./config.ts";
 import { health } from "./health.ts";
+import { readMedia, rootsFor } from "./media.ts";
 import { OpenClaw } from "./openclaw.ts";
 
 const log = (message: string): void => console.log(`${new Date().toISOString()} ${message}`);
@@ -49,7 +50,10 @@ const claw = new OpenClaw({
   onUp: openClaw.up,
   onDown: openClaw.down,
 });
-bridge = new Bridge(chips, claw, { harnessId: config.harnessId, agent: config.agent ?? "main" }, log);
+const roots = rootsFor(config.sandbox);
+bridge = new Bridge(chips, claw, { harnessId: config.harnessId, agent: config.agent ?? "main" }, log, {
+  read: (reference) => readMedia(reference, roots),
+});
 
 /**
  * Rooms asked of this harness while the bridge was away: their first words are already in the log,
