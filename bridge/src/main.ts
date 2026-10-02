@@ -3,14 +3,17 @@
  * Run by hand (`npm start`), stopped by the PID it leaves in ~/chips-openclaw/bridge/bridge.pid.
  */
 
+import { spawn } from "node:child_process";
 import { rmSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { Bridge } from "./bridge.ts";
 import { Chips, type ChipsEvent } from "./chips.ts";
 import { loadConfig } from "./config.ts";
 import { health } from "./health.ts";
 import { readMedia, rootsFor } from "./media.ts";
 import { OpenClaw } from "./openclaw.ts";
+import { type Restarter, restarter } from "./restart.ts";
 
 const log = (message: string): void => console.log(`${new Date().toISOString()} ${message}`);
 
@@ -18,14 +21,19 @@ const config = loadConfig();
 const pidFile = join(config.stateDir, "bridge.pid");
 writeFileSync(pidFile, String(process.pid));
 
+let restart: Restarter | undefined;
 const chips = new Chips({
   url: config.chipsUrl,
   harnessId: config.harnessId,
   token: config.harnessToken,
   stateDir: config.stateDir,
   log,
+  onRestart: (ask) => void restart?.restart(ask),
 });
 let bridge: Bridge | undefined;
+
+/** Whoever waits for the gateway's next hello: a restart, to say it is up. */
+const upWaiters: (() => void)[] = [];
 
 /** How OpenClaw is, as Chips is told it (Chips ADR 0083): fine at the first hello, then as it goes. */
 const openClaw = health(
@@ -47,9 +55,60 @@ const claw = new OpenClaw({
     }
     bridge?.onClaw(event);
   },
-  onUp: openClaw.up,
+  onUp: () => {
+    openClaw.up();
+    for (const wake of upWaiters.splice(0)) wake();
+  },
   onDown: openClaw.down,
 });
+/** The script Restart runs, beside this repo's others; at most six minutes, Colima's start included. */
+const RESTART_SCRIPT = join(dirname(fileURLToPath(import.meta.url)), "../../scripts/restart.sh");
+const RESTART_LIMIT_MS = 6 * 60_000;
+
+/** Run scripts/restart.sh, its output into the bridge's log, keeping the last of it for a failure. */
+function runRestartScript(): Promise<{ code: number | null; tail: string }> {
+  return new Promise((resolve) => {
+    const child = spawn("bash", [RESTART_SCRIPT], { stdio: ["ignore", "pipe", "pipe"] });
+    let tail = "";
+    const keep = (data: Buffer): void => {
+      const text = String(data);
+      for (const each of text.split("\n")) if (each.trim() !== "") log(`restart.sh: ${each}`);
+      tail = (tail + text).slice(-2000);
+    };
+    child.stdout.on("data", keep);
+    child.stderr.on("data", keep);
+    const limit = setTimeout(() => {
+      log("bridge: restart.sh ran past six minutes; stopping it");
+      child.kill("SIGTERM");
+    }, RESTART_LIMIT_MS);
+    child.on("error", (error) => {
+      clearTimeout(limit);
+      resolve({ code: 1, tail: error.message });
+    });
+    child.on("close", (code) => {
+      clearTimeout(limit);
+      resolve({ code, tail });
+    });
+  });
+}
+
+restart = restarter({
+  run: runRestartScript,
+  up: (withinMs) =>
+    claw.up
+      ? Promise.resolve(true)
+      : new Promise((resolve) => {
+          const timer = setTimeout(() => resolve(false), withinMs);
+          upWaiters.push(() => {
+            clearTimeout(timer);
+            resolve(true);
+          });
+        }),
+  say: (trouble) => chips.status(trouble),
+  hold: openClaw.hold,
+  log,
+});
+
 const roots = rootsFor(config.sandbox);
 bridge = new Bridge(chips, claw, { harnessId: config.harnessId, agent: config.agent ?? "main" }, log, {
   read: (reference) => readMedia(reference, roots),

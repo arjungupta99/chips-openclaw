@@ -110,6 +110,11 @@ export class OpenClaw {
     });
   }
 
+  /** Whether the gateway has said hello on the current socket. */
+  get up(): boolean {
+    return this.connected;
+  }
+
   /** Until the gateway has said hello on a live socket; at once when it has. */
   private async ready(): Promise<void> {
     if (this.connected) return;

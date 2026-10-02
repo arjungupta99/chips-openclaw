@@ -17,6 +17,12 @@ export interface Health {
   readonly up: () => void;
   /** The gateway's socket closed, or a connect failed. */
   readonly down: () => void;
+  /**
+   * Hold what it would tell Chips, while a restart asked from Chips runs (Chips ADR 0094): Chips
+   * shows "Restarting" until the bridge's next word, and the restart says that word itself. It
+   * keeps watching meanwhile, so what it says after is about the gateway as it is then.
+   */
+  readonly hold: (held: boolean) => void;
 }
 
 export function health(
@@ -27,15 +33,20 @@ export function health(
   let timer: ReturnType<typeof setTimeout> | undefined;
   let troubled = false;
   let told = false;
+  let held = false;
+  const tell = (trouble: string | undefined, words: string): void => {
+    log(held ? `${words.replace(/; telling Chips$/, "")} (a restart is running, so Chips is not told)` : words);
+    if (!held) say(trouble);
+  };
   return {
     up: () => {
       if (timer !== undefined) clearTimeout(timer);
       timer = undefined;
       if (told && !troubled) return;
-      log(troubled ? "bridge: OpenClaw is back; telling Chips" : "bridge: OpenClaw is up; telling Chips");
+      const words = troubled ? "bridge: OpenClaw is back; telling Chips" : "bridge: OpenClaw is up; telling Chips";
       troubled = false;
       told = true;
-      say(undefined);
+      tell(undefined, words);
     },
     down: () => {
       if (timer !== undefined || troubled) return;
@@ -43,10 +54,12 @@ export function health(
         timer = undefined;
         troubled = true;
         told = true;
-        log(`bridge: OpenClaw's gateway has been unreachable for ${wait / 1000} s; telling Chips`);
-        say("Can't reach its gateway");
+        tell("Can't reach its gateway", `bridge: OpenClaw's gateway has been unreachable for ${wait / 1000} s; telling Chips`);
       }, wait);
       timer.unref?.();
+    },
+    hold: (on) => {
+      held = on;
     },
   };
 }

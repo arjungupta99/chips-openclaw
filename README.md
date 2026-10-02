@@ -17,6 +17,7 @@ and Chips's own guard fails if anything of OpenClaw appears in Chips.
 | `scripts/cli.sh` | OpenClaw's own CLI inside the container, e.g. `scripts/cli.sh doctor` |
 | `scripts/scratch-chips.sh` | a scratch Chips on 4436, apart from the live one (Phase 3) |
 | `scripts/bridge.sh` | start the bridge against the scratch Chips or the live one on 4431, stop it by its PID |
+| `scripts/restart.sh` | restart it: Colima's VM started again when it is dead, then the gateway's container, waited on. What Restart on OpenClaw's page in Chips runs, through the bridge (Chips ADR 0094) |
 | `scripts/check.sh` | what is running; `--gone` proves it has all gone, against the baseline taken before the install |
 | `scripts/down.sh` | stop it, keeping everything |
 | `scripts/uninstall.sh` | take it all away and prove it |

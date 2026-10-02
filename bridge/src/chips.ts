@@ -22,6 +22,11 @@ export interface ChipsOptions {
   readonly token: string;
   readonly stateDir: string;
   readonly log: (message: string) => void;
+  /**
+   * A person asked OpenClaw to restart, from its page in Chips (Chips ADR 0094). Given, the
+   * bridge's socket says `restart` in its hello, so Chips may ask it.
+   */
+  readonly onRestart?: (ask: { readonly askedBy: string; readonly askedAt: string }) => void;
 }
 
 /** What a refused write said, so the bridge can tell a duplicate or a closed run from a fault. */
@@ -250,7 +255,7 @@ export class Chips {
           frame: "hello",
           protocol: { min: 1, max: 1 },
           client: { name: "chips-openclaw-bridge", version: "0.1.0" },
-          accepts: ["events"],
+          accepts: this.options.onRestart === undefined ? ["events"] : ["events", "restart"],
         }),
       );
     });
@@ -272,6 +277,10 @@ export class Chips {
         return;
       case "ping":
         socket.send(JSON.stringify({ frame: "pong", ts: frame["ts"] }));
+        return;
+      case "restart":
+        // Now or never: not an event, so it is not remembered with the cursor (Chips ADR 0094).
+        this.options.onRestart?.({ askedBy: String(frame["asked_by"]), askedAt: String(frame["asked_at"]) });
         return;
       case "error":
         this.options.log(`chips: error frame ${JSON.stringify(frame)}`);
