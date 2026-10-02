@@ -25,7 +25,9 @@
  *   turn's conversation has not been told of the room ahead of them: what Chips carries with the
  *   message (since the agent last spoke), the catch-up it handed on joining, and what the
  *   conversation missed, read from Chips's pull route — the room's recent lines the first time
- *   the bridge hands the agent a turn there, the lines said while its last turn there went.
+ *   the bridge hands the agent a turn there, the lines said while its last turn there went. Ahead
+ *   of all of it, Chips's note on the room for the agent taking the turn (Chips ADR 0092): who is
+ *   there, with the @ that reaches each, and that only those @-mentioned act.
  * - OpenClaw's `chat` events for a turn become a run: started on the first, answered and completed
  *   on `final`, failed on `error` or `aborted`. Its tool events become steps.
  * - A file the answer sends (a `MEDIA:` line of its own, which the gateway takes out of the words
@@ -299,13 +301,28 @@ type Whose = "asked" | "own" | "default";
 const isAgentKind = (kind: unknown): boolean => kind === "harness" || kind === "agent";
 
 /**
- * Another harness's words, as OpenClaw is given them: whose they are, and that it acts on the
- * answer only when OpenClaw addresses it by the handle Chips answers it to (Chips ADR 0081).
+ * Another harness's words, as OpenClaw is given them: whose they are, and, from a Chips that sends
+ * no room note, that it acts on the answer only when OpenClaw addresses it by the handle Chips
+ * answers it to (Chips ADR 0081). With the note, the note says so for everybody in the room (Chips
+ * ADR 0092), and saying it twice is saying two things.
  */
-function fromAgent(from: Payload, text: string): string {
+function fromAgent(from: Payload, text: string, noted: boolean): string {
   const name = str(from["display_name"]) ?? "Another agent";
+  if (noted) return `${name} (an agent in this room) said this to you:\n${text}`;
   const handle = `@${name.replace(/\s+/g, "")}`;
   return `${name} (an agent in this room) said this to you. Everyone here reads your answer; ${name} acts on it only if you address it as ${handle}:\n${text}`;
+}
+
+/**
+ * What Chips tells one who takes the turn of the room (Chips ADR 0092): who is in it, with the @
+ * that reaches each, and that only those @-mentioned act. Keyed by the id `for` names it by: one of
+ * our agents, or the harness itself where it takes the turn. Nothing from a Chips that sends none.
+ */
+function noteFor(event: ChipsEvent, takerId: string): string | undefined {
+  const room = event["room"] as Payload | undefined;
+  const notes = room?.["notes"] as Payload | undefined;
+  const note = str(notes?.[takerId])?.trim();
+  return note === undefined || note === "" ? undefined : note;
 }
 
 export class Bridge {
@@ -689,15 +706,18 @@ export class Bridge {
       const missed = await this.missedIn(spaceId, event["context"], heard, agentId);
       const fresh = heard?.room !== spaceId;
       if (agentId !== undefined && seq !== undefined) this.lastHeard.set(agentId, { room: spaceId, seq });
+      // Chips's note on the room comes first, ahead of what was said and the words (ADR 0092).
+      const note = noteFor(event, taker.agentId ?? this.self.harnessId);
+      const message = this.withOverheard(agentSaid ? fromAgent(from, text, note !== undefined) : text, event["context"], {
+        caughtUp,
+        missed,
+        fresh,
+        speaker: agentId,
+        harnessTurns: this.keyOf.get(taker.agentId ?? "") !== taker.clawAgent,
+      });
       await this.claw.request("chat.send", {
         sessionKey: taker.sessionKey,
-        message: this.withOverheard(agentSaid ? fromAgent(from, text) : text, event["context"], {
-          caughtUp,
-          missed,
-          fresh,
-          speaker: agentId,
-          harnessTurns: this.keyOf.get(taker.agentId ?? "") !== taker.clawAgent,
-        }),
+        message: note === undefined ? message : `${note}\n\n${message}`,
         idempotencyKey: turn,
         ...attachments,
       });

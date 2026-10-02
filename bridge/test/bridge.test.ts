@@ -860,6 +860,54 @@ describe("OpenClaw's agents as agents in Chips (Chips ADR 0087)", () => {
     assert.equal(calls.find(([method]) => method === "chat.send")?.[1]["message"], "And a blanket");
   });
 
+  it("puts Chips's room note first, and says the @ rule once (Chips ADR 0092)", async () => {
+    await bridge.adoptAgents({ defaultId: "main", agents: [{ id: "main" }] });
+    calls = [];
+    const hello = { participant_id: "agt_hello", kind: "agent", display_name: "Hello", role: "member" };
+    const note =
+      "In this room: Arjun (person, @Arjun), Hello (agent, @Hello), and you, OpenClaw (@OpenClaw). Everyone here reads what you write; only those you @-mention act on it.";
+    await bridge.onChips(
+      said("@OpenClaw F–J are yours.", {
+        from: hello,
+        seq: 12,
+        addressed_to: ["agt_main"],
+        for: ["agt_main"],
+        context: {
+          lines: [{ seq: 11, kind: "said", from: { id: ARJUN.participant_id, kind: "person", name: "Arjun" }, text: "Five letters each.", addressed_to: [] }],
+          since_seq: 10,
+          truncated: false,
+          before: 12,
+        },
+        room: { members: [], notes: { agt_main: note, agt_other: "Not this one." } },
+      }),
+    );
+    const message = String(calls.find(([method]) => method === "chat.send")?.[1]["message"]);
+    assert.equal(
+      message,
+      `${note}\n\nSaid in this room since you last spoke:\nArjun: Five letters each.\n\nHello (an agent in this room) said this to you:\n@OpenClaw F–J are yours.`,
+    );
+  });
+
+  it("gives each of our agents taking the turn its own note", async () => {
+    await bridge.adoptAgents({ defaultId: "main", agents: [{ id: "main" }, { id: "kit" }] });
+    calls = [];
+    await bridge.onChips(
+      said("@all which of you?", {
+        addressed_to: ["agt_main", "agt_kit"],
+        for: ["agt_main", "agt_kit"],
+        room: { members: [], notes: { agt_main: "Note for main.", agt_kit: "Note for kit." } },
+      }),
+    );
+    const sends = calls.filter(([method]) => method === "chat.send").map(([, params]) => String(params["message"]));
+    assert.deepEqual(sends.sort(), ["Note for kit.\n\n@all which of you?", "Note for main.\n\n@all which of you?"]);
+  });
+
+  it("gives the harness its own note where it takes the turn itself, as in a room it was asked for", async () => {
+    await bridge.onChips({ type: "space.created", space_id: ROOM, asked_of: ME, kind: "direct" });
+    await bridge.onChips(said("Plan a picnic", { for: [ME], addressed_to: [ME], room: { members: [], notes: { [ME]: "In this room: …" } } }));
+    assert.equal(calls.find(([method]) => method === "chat.send")?.[1]["message"], "In this room: …\n\nPlan a picnic");
+  });
+
   it("takes an agent's words when Chips names it kind agent, and never its own agents' words", async () => {
     await bridge.adoptAgents({ defaultId: "main", agents: [{ id: "main" }] });
     calls = [];
