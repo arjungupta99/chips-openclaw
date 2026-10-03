@@ -1166,6 +1166,9 @@ export class Bridge {
       run_id: run.chipsRun,
       space_id: where.spaceId,
       goal: goal.slice(0, 500),
+      // A turn asked by a message is that message, already in the room, so Chips does not say it
+      // again beside it; a turn OpenClaw started on its own has a goal nobody typed.
+      ...(asked === undefined ? {} : { goal_from: "chips" }),
       idempotency_key: `openclaw-run:${clawRun}:started`,
     });
     for (const early of this.early.get(clawRun) ?? []) this.stream(run, early);

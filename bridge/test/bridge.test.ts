@@ -289,6 +289,8 @@ describe("a turn as a run", () => {
     const run = sent[0]?.["run_id"];
     assert.match(String(run), /^run_[0-7][0-9A-HJKMNP-TV-Z]{25}$/);
     assert.equal(sent[0]?.["goal"], "What can you do?");
+    // The goal is the message, already in the room: Chips does not say it twice (its goal_from).
+    assert.equal(sent[0]?.["goal_from"], "chips");
     assert.equal(sent[0]?.["space_id"], ROOM);
     assert.deepEqual(sent[2], {
       type: "usage",
@@ -308,6 +310,7 @@ describe("a turn as a run", () => {
     bridge.onClaw({ event: "chat", payload: { runId: "0c5f-follow-up", sessionKey: key(), seq: 2, state: "final", message: "" } });
     await bridge.settled();
     assert.equal(sent[0]?.["goal"], "Following up: Name a snack.");
+    assert.equal(sent[0]?.["goal_from"], undefined);
     assert.equal(sent.at(-1)?.["summary"], "No reply of its own; answered in the next turn.");
   });
 
