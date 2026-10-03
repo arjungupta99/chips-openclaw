@@ -396,10 +396,15 @@ function isDocument(file: RoomFile): boolean {
   return !/^(image|video|audio)\//.test(file.mimeType);
 }
 
-/** A file as OpenClaw takes one with a message: inline, as base64. */
+/**
+ * A file as OpenClaw takes one with a message: inline, as base64. A picture goes as an image for
+ * the model to look at. An SVG goes as a file, whose text the model reads: no model takes one as a
+ * picture. ASCII Art's design preview reached O2 as an image, and O2 said it had not loaded
+ * (3 October 2026).
+ */
 function inlined(fileName: string, mimeType: string, bytes: Buffer): Payload {
   return {
-    type: mimeType.startsWith("image/") ? "image" : "file",
+    type: mimeType.startsWith("image/") && mimeType !== "image/svg+xml" ? "image" : "file",
     mimeType,
     fileName,
     content: bytes.toString("base64"),

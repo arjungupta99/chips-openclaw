@@ -265,6 +265,16 @@ describe("rooms and sessions", () => {
       { type: "image", mimeType: "image/png", fileName: "cat.png", content: Buffer.from("png-bytes").toString("base64"), sizeBytes: 9 },
     ]);
   });
+
+  it("sends an SVG as a file, whose text the model reads, not as a picture it cannot open", async () => {
+    await bridge.onChips(
+      said("A mock", { attachments: [{ url: "https://chips/a", mime_type: "image/svg+xml", filename: "preview.svg" }] }),
+    );
+    const send = calls.find(([method]) => method === "chat.send")?.[1];
+    assert.deepEqual(send?.["attachments"], [
+      { type: "file", mimeType: "image/svg+xml", fileName: "preview.svg", content: Buffer.from("png-bytes").toString("base64"), sizeBytes: 9 },
+    ]);
+  });
 });
 
 describe("a turn as a run", () => {
