@@ -13,6 +13,18 @@ import WebSocket from "ws";
 
 export type ChipsEvent = Record<string, unknown> & { readonly type: string };
 
+/** What Chips answers an event it took with, as far as the bridge reads it. */
+export interface Taken {
+  /**
+   * A message Chips took but handed to none of the agents it named: the agents in the room have
+   * sent each other too many since a person last acted, or a person paused them. Absent from a
+   * Chips that never holds.
+   */
+  readonly held?: boolean;
+  /** How the agents' talk in the room stands, with a held message. */
+  readonly exchange?: { readonly count?: number; readonly allowance?: number };
+}
+
 /** The size Chips's own apps send an upload's pieces in. */
 const PIECE_BYTES = 4 * 1024 * 1024;
 
@@ -106,9 +118,10 @@ export class Chips {
 
   /**
    * One event, on the run's route when it names a run and the harness's route otherwise. A retry
-   * with the same key is answered as a duplicate, so a network failure is retried here.
+   * with the same key is answered as a duplicate, so a network failure is retried here. Chips's
+   * answer comes back, for whether it held a message.
    */
-  async send(event: ChipsEvent): Promise<void> {
+  async send(event: ChipsEvent): Promise<Taken> {
     const runId = event["run_id"];
     const path =
       typeof runId === "string" && event.type !== "run.started"
@@ -116,8 +129,7 @@ export class Chips {
         : `/v1/harnesses/${this.options.harnessId}/events`;
     for (let attempt = 1; ; attempt += 1) {
       try {
-        await this.call("POST", path, event);
-        return;
+        return (await this.call("POST", path, event)) as Taken;
       } catch (error) {
         if (error instanceof ChipsRefusal || attempt >= 5) throw error;
         await new Promise((resolve) => setTimeout(resolve, 500 * attempt));

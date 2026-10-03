@@ -27,7 +27,10 @@
  *   conversation missed, read from Chips's pull route — the room's recent lines the first time
  *   the bridge hands the agent a turn there, the lines said while its last turn there went. Ahead
  *   of all of it, Chips's note on the room for the agent taking the turn (Chips ADR 0092): who is
- *   there, with the @ that reaches each, and that only those @-mentioned act.
+ *   there, with the @ that reaches each, and that only those @-mentioned act. And ahead of that,
+ *   Chips's own word to the agent (the referee): that it held what the agent last said there, and
+ *   how the agents' talk in the room stands. Every send steers (`queueMode: "steer"`): words that
+ *   arrive while the session's turn runs join it, and words between turns start one.
  * - OpenClaw's `chat` events for a turn become a run: started on the first, answered and completed
  *   on `final`, failed on `error` or `aborted`. Its tool events become steps.
  * - A file the answer sends (a `MEDIA:` line of its own, which the gateway takes out of the words
@@ -42,14 +45,15 @@
  * same event and Chips answers it as a duplicate.
  */
 
-import { type ChipsAgent, type ChipsEvent, ChipsRefusal } from "./chips.ts";
+import { type ChipsAgent, type ChipsEvent, ChipsRefusal, type Taken } from "./chips.ts";
 import { chipsId } from "./ids.ts";
 import type { Media } from "./media.ts";
 import type { ClawEvent } from "./openclaw.ts";
 
 /** What the bridge needs of Chips; the `Chips` client, or a stand-in in the tests. */
 export interface ChipsPort {
-  send(event: ChipsEvent): Promise<void>;
+  /** One event; Chips's answer, when it gives one the bridge reads (a held message). */
+  send(event: ChipsEvent): Promise<Taken | undefined>;
   claim(spaceId: string, key: string, title: string | undefined): Promise<void>;
   fetchAttachment(url: string): Promise<Buffer>;
   /** A file's bytes, uploaded; the upload's id, for a post's `upload_ids`. */
@@ -325,6 +329,33 @@ function noteFor(event: ChipsEvent, takerId: string): string | undefined {
   return note === undefined || note === "" ? undefined : note;
 }
 
+/**
+ * What Chips says of the agents' talk in a room, once it is worth a word (the referee): how many
+ * messages they have sent each other since a person last acted, what was made and what repeats,
+ * and, when the talk is going nowhere, the way out. Chips writes it; nothing from a Chips that
+ * sends none.
+ */
+function exchangeNoteOf(event: ChipsEvent): string | undefined {
+  const exchange = event["exchange"] as Payload | undefined;
+  const note = str(exchange?.["note"])?.trim();
+  return note === undefined || note === "" ? undefined : note;
+}
+
+/**
+ * What an agent is told when Chips held what it said rather than hand it to the agents it named:
+ * that they do not have it, why, and what to do instead, so it neither waits on them nor reports
+ * a hand-over that did not happen. Nothing when Chips held nothing. The same words as Jacobian's.
+ */
+export function heldNoteOf(taken: Taken | undefined): string | undefined {
+  if (taken?.held !== true) return undefined;
+  const count = taken.exchange?.count;
+  const since = typeof count === "number" && count > 0 ? ` (they have sent each other ${count} since a person last acted)` : "";
+  return (
+    `Your last message here was held, so the agents it named do not have it yet: messages between the agents in this room are held${since} until a person acts. ` +
+    "Until then, tell the person what is done and what is blocked, rather than asking the agents again."
+  );
+}
+
 export class Bridge {
   /** Rooms asked of this harness from the +, waiting for their first words to be claimed. */
   private readonly asked = new Set<string>();
@@ -339,6 +370,11 @@ export class Bridge {
    */
   private readonly asks = new Map<string, { readonly words: string; readonly spaceId: string; readonly agentId: string | undefined }>();
   private readonly latest = new Map<string, string>();
+  /**
+   * What a session's next turn in a room is to be told, by session and room: that Chips held what
+   * its last turn there said (`heldNoteOf`).
+   */
+  private readonly held = new Map<string, string>();
   /** Tool events that came before the turn's first `chat` event said which room it is in. */
   private readonly early = new Map<string, Payload[]>();
   /** Chips's approval id → OpenClaw's, and whether OpenClaw takes allow-always for it. */
@@ -726,7 +762,8 @@ export class Bridge {
       const missed = await this.missedIn(spaceId, event["context"], heard, agentId);
       const fresh = heard?.room !== spaceId;
       if (agentId !== undefined && seq !== undefined) this.lastHeard.set(agentId, { room: spaceId, seq });
-      // Chips's note on the room comes first, ahead of what was said and the words (ADR 0092).
+      // Chips's note on the room comes first, ahead of what was said and the words (ADR 0092), and
+      // Chips's own word to the agent ahead of that (the referee).
       const note = noteFor(event, taker.agentId ?? this.self.harnessId);
       const message = this.withOverheard(agentSaid ? fromAgent(from, text, note !== undefined) : text, event["context"], {
         caughtUp,
@@ -735,10 +772,16 @@ export class Bridge {
         speaker: agentId,
         harnessTurns: this.keyOf.get(taker.agentId ?? "") !== taker.clawAgent,
       });
+      const chips = [this.takeHeld(taker.sessionKey, spaceId), exchangeNoteOf(event)]
+        .filter((line): line is string => line !== undefined)
+        .map((line) => `Chips: ${line}`);
+      // Steered: into the session's turn while one runs, a turn of its own when none does. Said, not
+      // left to OpenClaw's stored queue mode, which could make it wait for a turn after.
       await this.claw.request("chat.send", {
         sessionKey: taker.sessionKey,
-        message: note === undefined ? message : `${note}\n\n${message}`,
+        message: [...chips, ...(note === undefined ? [] : [note]), message].join("\n\n"),
         idempotencyKey: turn,
+        queueMode: "steer",
         ...attachments,
       });
     }
@@ -1374,12 +1417,34 @@ export class Bridge {
         if (words === undefined) return;
         // Said as the agent the turn is by (Chips ADR 0087).
         const said = run.agentId === undefined ? words : { ...words, actor: { kind: "agent", id: run.agentId } };
-        await this.chips.send(said);
+        const taken = await this.chips.send(said);
+        if (said.type === "message.post") this.onHeld(run, taken);
       } catch (error) {
         const why = error instanceof ChipsRefusal ? `${error.status} ${error.code}: ${error.message}` : String(error);
         this.log(`chips refused ${type} for ${run.chipsRun}: ${why}`);
       }
     });
+  }
+
+  /**
+   * What Chips held of a turn's answer, rather than hand it to the agents it named (the referee's
+   * ceiling, or a person pausing the agents): the session's next turn in the room is told. Not the
+   * turn that said it, which is over once its answer is posted, and never a turn of its own — a
+   * steer to an idle session starts one, and what a turn on a hold said could be held again.
+   */
+  private onHeld(run: Run, taken: Taken | undefined): void {
+    const note = heldNoteOf(taken);
+    if (note === undefined || run.spaceId === undefined) return;
+    this.held.set(`${run.sessionKey} ${run.spaceId}`, note);
+    this.log(`chips held ${run.chipsRun}'s answer; the session's next turn in ${run.spaceId} is told`);
+  }
+
+  /** What a session's turn in a room is to be told of its words Chips held there, once. */
+  private takeHeld(sessionKey: string, spaceId: string): string | undefined {
+    const key = `${sessionKey} ${spaceId}`;
+    const note = this.held.get(key);
+    this.held.delete(key);
+    return note;
   }
 
   /**
