@@ -107,6 +107,8 @@ interface Run {
   readonly sessionKey: string;
   /** The Chips agent the turn is by, whose name every write on it carries (Chips ADR 0087). */
   readonly agentId: string | undefined;
+  /** Whether a message in the room asked for this turn, or OpenClaw started it on its own. */
+  readonly asked: boolean;
   /** Writes for one run go in order. */
   chain: Promise<void>;
   ended: boolean;
@@ -1186,6 +1188,7 @@ export class Bridge {
       spaceId: where.spaceId,
       sessionKey,
       agentId: where.agentId,
+      asked: asked !== undefined,
       chain: Promise.resolve(),
       ended: false,
       media: [],
@@ -1302,13 +1305,17 @@ export class Bridge {
       return {
         type: "run.completed",
         run_id: run.chipsRun,
-        // A queued message's own turn can end empty, its answer given in a follow-up turn.
+        // A message's own turn ends empty when OpenClaw takes its words into another turn of the
+        // session's, the one going or a follow-up, and answers them there with the rest; a turn
+        // OpenClaw started on its own can simply end with nothing to say.
         summary:
           reply !== ""
             ? reply.slice(0, 20_000)
             : sent.length > 0
               ? `Sent ${sent.join(", ")}.`
-              : "No reply of its own; answered in the next turn.",
+              : run.asked
+                ? "Answered together with other words, in one reply."
+                : "Ended without a reply.",
         idempotency_key: `openclaw-run:${clawRun}:completed`,
       };
     });

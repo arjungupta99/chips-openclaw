@@ -311,7 +311,19 @@ describe("a turn as a run", () => {
     await bridge.settled();
     assert.equal(sent[0]?.["goal"], "Following up: Name a snack.");
     assert.equal(sent[0]?.["goal_from"], undefined);
-    assert.equal(sent.at(-1)?.["summary"], "No reply of its own; answered in the next turn.");
+    assert.equal(sent.at(-1)?.["summary"], "Ended without a reply.");
+  });
+
+  it("says a message's turn that ends empty had its words answered with others, in one reply", async () => {
+    // Live, 3 Oct 2026: O2's words reached O1 while O1 answered the brief; OpenClaw took them into
+    // that turn, and the turn for O2's message ended empty 8 ms after it began.
+    await bridge.onChips(said("@O1 can add D–F"));
+    const r1 = "msg_01K4ZQPX0000000000000000A1";
+    bridge.onClaw({ event: "chat", payload: { runId: r1, sessionKey: key(), seq: 1, state: "status" } });
+    bridge.onClaw({ event: "chat", payload: { runId: r1, sessionKey: key(), seq: 2, state: "final", message: "" } });
+    await bridge.settled();
+    assert.equal(sent[0]?.["goal_from"], "chips");
+    assert.equal(sent.at(-1)?.["summary"], "Answered together with other words, in one reply.");
   });
 
   it("names the same run after a restart, so Chips takes the retry as a duplicate", async () => {
