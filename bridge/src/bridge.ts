@@ -17,7 +17,8 @@
  *   instead, named from both, and named for whose it is (`…:own`, `…:default`) where that name
  *   is another of our agents' already.
  * - A message says which of our agents it is for (`for`), once the harness declares `agents`;
- *   each takes a turn in its own session. Before that, it is the room's agent's.
+ *   each takes a turn in its own session. Before that, it is the room's agent's. One of our
+ *   agents' words for another of them is that one's turn, never the sayer's (Chips ADR 0101).
  * - A room a person asks for from the +, of this harness or of it beside another, is claimed on
  *   the first message for the harness itself, named from its words. A message for one of our
  *   agents there is that agent's, and claims nothing.
@@ -38,7 +39,8 @@
  *   posted with the answer's words as one message (`media.ts`). One that cannot go is said in the
  *   message instead.
  * - The room's files (Chips ADR 0099): a turn is handed, inline, the current version of each file
- *   of the room its words name, where Chips lists the room's files with the message; and a file its
+ *   of the room its words name, where Chips lists the room's files with the message, and is told
+ *   of a room's file the message carries as of one it was handed; and a file its
  *   answer sends back under one of those names is posted as the next version, naming the version
  *   it was made from (`room-files.ts`). One Chips refuses as made from a stale version is left out
  *   of the post, which says why, and the session's next turn there is told.
@@ -371,6 +373,27 @@ function attachmentsOf(event: ChipsEvent): Payload[] {
   return Array.isArray(event["attachments"]) ? (event["attachments"] as Payload[]) : [];
 }
 
+/**
+ * Whether a message carries a room's file at its current version: that version's attachment, or
+ * the same name and bytes posted again, which is the same version.
+ */
+function carries(onMessage: readonly Payload[], file: RoomFile): boolean {
+  return onMessage.some(
+    (each) =>
+      str(each["attachment_id"]) === file.attachmentId ||
+      (file.sha256 !== undefined && str(each["filename"]) === file.name && str(each["sha256"]) === file.sha256),
+  );
+}
+
+/**
+ * Whether a file is one a turn is told about when it comes on a message: not a photo, a video or a
+ * voice note, which come with nearly every message a person sends from a phone, where a line
+ * saying `image.png (v9)` would be noise. A turn that names one is still told.
+ */
+function isDocument(file: RoomFile): boolean {
+  return !/^(image|video|audio)\//.test(file.mimeType);
+}
+
 /** A file as OpenClaw takes one with a message: inline, as base64. */
 function inlined(fileName: string, mimeType: string, bytes: Buffer): Payload {
   return {
@@ -675,6 +698,12 @@ export class Bridge {
     return [...new Map(takers.map((taker) => [taker.sessionKey, taker])).values()];
   }
 
+  /** The takers that are not the one of ours who said it, nor its conversation in the room. */
+  private othersThan(sayer: string, room: string, takers: readonly Taker[]): Taker[] {
+    const its = this.takerFor(sayer === this.self.harnessId ? undefined : sayer, room).sessionKey;
+    return takers.filter((taker) => taker.agentId !== sayer && taker.sessionKey !== its);
+  }
+
   /**
    * The Chips agent a turn is said as: the one it is for. For the default agent, the OpenClaw
    * agent's own takes its place when it is in no room; one in a room already stays there (an
@@ -764,8 +793,12 @@ export class Bridge {
     const spaceId = str(event["space_id"]);
     const from = event["from"] as Payload | undefined;
     if (spaceId === undefined || from === undefined) return;
-    // Its own words, as the harness or as any of its agents, are never a turn.
-    if (this.isOwn(String(from["participant_id"]))) return;
+    // Its own words are never a turn for the one who said them. One of its agents' words for
+    // another of them are that one's turn, and Chips names it in `for` (Chips ADR 0101); a Chips
+    // that names nobody hands no turn on them.
+    const sayer = String(from["participant_id"]);
+    const own = this.isOwn(sayer);
+    if (own && !Array.isArray(event["for"])) return;
     // Chips says who a message is for (ADR 0081), and a `message.new` that says is this
     // harness's. A Chips from before then says nothing, and hands every harness everything:
     // there another harness's words are this one's only when they name it (ADR 0077's rule).
@@ -777,7 +810,7 @@ export class Bridge {
     const words = wordsOf(event);
     const messageId = String(event["message_id"] ?? event["id"]);
     const seq = num(event["seq"]);
-    const takers = await this.turnTakers(event, spaceId);
+    const takers = own ? this.othersThan(sayer, spaceId, await this.turnTakers(event, spaceId)) : await this.turnTakers(event, spaceId);
     const attachments = takers.length === 0 ? [] : await this.attachments(event);
     for (const taker of takers) {
       await this.ensureSession(taker.sessionKey, words, taker.clawAgent);
@@ -839,10 +872,10 @@ export class Bridge {
     const files = roomFilesIn(event["context"]);
     if (files.length === 0) return { sent: [], line: undefined, took: () => undefined };
     const has = this.versionsOf(sessionKey, spaceId);
-    const onMessage = new Set(attachmentsOf(event).map((file) => str(file["attachment_id"])));
-    const carried = files.filter((file) => onMessage.has(file.attachmentId));
+    const onMessage = attachmentsOf(event);
+    const carried = files.filter((file) => carries(onMessage, file));
     const wanted = namedIn(files, words).filter(
-      (file) => !onMessage.has(file.attachmentId) && has.get(file.name) !== file.attachmentId,
+      (file) => !carried.includes(file) && has.get(file.name) !== file.attachmentId,
     );
     const sent: Payload[] = [];
     const handed: RoomFile[] = [];
@@ -866,9 +899,11 @@ export class Bridge {
         left.push({ file, why: "since it could not be fetched" });
       }
     }
+    // A room file attached to the message is told as one handed by name is, so what goes back
+    // under its name is its next version (Chips ADR 0101): O2 had K–O posted as a new file.
     return {
       sent,
-      line: filesLine(handed, left),
+      line: filesLine([...carried.filter(isDocument), ...handed], left),
       took: () => {
         for (const file of [...carried, ...handed]) has.set(file.name, file.attachmentId);
       },

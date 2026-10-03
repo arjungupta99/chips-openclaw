@@ -562,12 +562,33 @@ describe("an answer's files", () => {
       const own = { attachment_id: GALLERY["attachment_id"], url: "https://chips/a", filename: "ascii-alphabet.html", mime_type: "text/html" };
       await bridge.onChips(said("Here is ascii-alphabet.html v2", { attachments: [own], ...listing([GALLERY]) }));
       assert.deepEqual(fetched, ["https://chips/a"]);
-      assert.equal(sends()[0]?.["message"], "Here is ascii-alphabet.html v2");
+      // Told as a file handed by name is, so it goes back under the same name (Chips ADR 0101).
+      assert.equal(sends()[0]?.["message"], `${HANDED}\n\nHere is ascii-alphabet.html v2`);
       answers("Took it further.", [`${WORKSPACE}/ascii-alphabet.html`]);
       await bridge.settled();
       assert.deepEqual(sent.find((event) => event.type === "message.post")?.["replaces"], {
         att_01K4ZQPX000000000000000001: GALLERY["attachment_id"],
       });
+    });
+
+    it("takes the same bytes posted again under the name as the version they are, and says so", async () => {
+      // ASCII Art attaching v2 again for O2, who had not been handed it: a new attachment, the same version.
+      const again = { attachment_id: "att_01K4ZQPX0000000000000AGAIN", url: "https://chips/again", filename: "ascii-alphabet.html", mime_type: "text/html", sha256: GALLERY["sha256"] };
+      await bridge.onChips(said("@OpenClaw here it is", { attachments: [again], ...listing([GALLERY]) }));
+      assert.deepEqual(fetched, ["https://chips/again"]);
+      assert.equal(sends()[0]?.["message"], `${HANDED}\n\n@OpenClaw here it is`);
+      answers("Added K–O.", [`${WORKSPACE}/ascii-alphabet.html`]);
+      await bridge.settled();
+      assert.deepEqual(sent.find((event) => event.type === "message.post")?.["replaces"], {
+        att_01K4ZQPX000000000000000001: GALLERY["attachment_id"],
+      });
+    });
+
+    it("says nothing of a photo on the message, which a phone sends with every other message", async () => {
+      const shot = roomFile("image.png", 9, { mime_type: "image/png" });
+      const own = { attachment_id: shot["attachment_id"], url: "https://chips/shot", filename: "image.png", mime_type: "image/png" };
+      await bridge.onChips(said("What is this?", { attachments: [own], ...listing([shot]) }));
+      assert.equal(sends()[0]?.["message"], "What is this?");
     });
 
     it("posts the words again without a file Chips refused as stale, and tells the session's next turn, which is handed the new one", async () => {
@@ -1161,6 +1182,27 @@ describe("OpenClaw's agents as agents in Chips (Chips ADR 0087)", () => {
     const mine = { participant_id: "agt_main", kind: "agent", display_name: "OpenClaw", role: "member" };
     await bridge.onChips(said("Ten.", { from: mine, addressed_to: ["agt_main"], for: ["agt_main"] }));
     assert.equal(calls.length, 0);
+  });
+
+  /**
+   * O1 handing the page to O2 in the ASCII Art room, 3 October 2026: both ours, and the hand-off
+   * was nobody's turn. Chips names the one it is for (Chips ADR 0101).
+   */
+  it("takes one of its agents' words for another of them as that one's turn, and never as the sayer's", async () => {
+    agents = [agentIn("agt_fallback", ME, OTHER_ROOM), agentIn("agt_main", "main", ROOM), agentIn("agt_scout", "scout", ROOM, "Scout")];
+    await bridge.adoptAgents({ defaultId: "main", agents: [{ id: "main" }, { id: "scout", name: "Scout" }] });
+    calls = [];
+    const scout = { participant_id: "agt_scout", kind: "agent", display_name: "Scout", role: "member" };
+    await bridge.onChips(said("@OpenClaw add K–O.", { from: scout, addressed_to: ["agt_main", "agt_scout"], for: ["agt_main", "agt_scout"] }));
+    const sends = calls.filter(([method]) => method === "chat.send").map(([, params]) => [params["sessionKey"], params["message"]]);
+    assert.equal(sends.length, 1);
+    assert.equal(sends[0]?.[0], bridge.keyFor(ROOM, "main"));
+    assert.match(String(sends[0]?.[1]), /^Scout \(an agent in this room\) said this to you\b[^]*\n@OpenClaw add K–O\.$/);
+    // Its own words to itself, and from a Chips that names nobody, are nobody's turn.
+    calls = [];
+    await bridge.onChips(said("Noted.", { from: scout, message_id: "msg_01K4ZQPX0000000000000000A2", addressed_to: ["agt_scout"], for: ["agt_scout"] }));
+    await bridge.onChips(said("@OpenClaw again.", { from: scout, message_id: "msg_01K4ZQPX0000000000000000A3", addressed_to: ["agt_main"] }));
+    assert.equal(calls.filter(([method]) => method === "chat.send").length, 0);
   });
 
   /**

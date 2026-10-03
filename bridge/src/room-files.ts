@@ -19,6 +19,7 @@ export interface RoomFile {
   readonly name: string;
   readonly version: number | undefined;
   readonly attachmentId: string;
+  readonly sha256: string | undefined;
   readonly byteSize: number | undefined;
   readonly mimeType: string;
   /** Who posted this version, by name. */
@@ -61,6 +62,7 @@ export function roomFilesIn(context: unknown): RoomFile[] {
       name,
       version: num(file["version"]),
       attachmentId,
+      sha256: str(file["sha256"]),
       byteSize: num(file["byte_size"]),
       mimeType: str(file["mime_type"]) ?? "application/octet-stream",
       by: byOf(file["by"]),
