@@ -37,6 +37,11 @@
  *   and reports on the turn's `assistant` stream) is read where OpenClaw keeps it, uploaded, and
  *   posted with the answer's words as one message (`media.ts`). One that cannot go is said in the
  *   message instead.
+ * - The room's files (Chips ADR 0099): a turn is handed, inline, the current version of each file
+ *   of the room its words name, where Chips lists the room's files with the message; and a file its
+ *   answer sends back under one of those names is posted as the next version, naming the version
+ *   it was made from (`room-files.ts`). One Chips refuses as made from a stale version is left out
+ *   of the post, which says why, and the session's next turn there is told.
  * - An exec approval becomes an approval card, and the person's answer goes back as allow-once,
  *   allow-always or deny. An `ask_user` question becomes a question card. An ask answered in
  *   OpenClaw's own tools instead is settled in Chips, once, so its card cools (Chips ADR 0079).
@@ -49,6 +54,7 @@ import { type ChipsAgent, type ChipsEvent, ChipsRefusal, type Taken } from "./ch
 import { chipsId } from "./ids.ts";
 import type { Media } from "./media.ts";
 import type { ClawEvent } from "./openclaw.ts";
+import { filesLine, namedIn, ROOM_FILES, type RoomFile, roomFilesIn, STALE_FILE, staleIn } from "./room-files.ts";
 
 /** What the bridge needs of Chips; the `Chips` client, or a stand-in in the tests. */
 export interface ChipsPort {
@@ -104,6 +110,8 @@ interface Run {
   ended: boolean;
   /** What the turn's answer named to send (`MEDIA:` lines), as its `assistant` stream reported them. */
   readonly media: string[];
+  /** The files its answer uploaded, by upload id: each one's name. */
+  readonly uploaded: Map<string, string>;
   /** The answer as it was posted, files' notes and links included, for the run's summary. */
   reply?: string;
   /** The names of the files the answer carried. */
@@ -169,8 +177,10 @@ function contextLineOf(line: Payload, self?: string): string | undefined {
   const flat = (words: unknown): string => (str(words) ?? "").replace(/\s*\n\s*/g, " ").trim();
   switch (line["kind"]) {
     case "said": {
+      // What it sent, by name, after its words: a file the room keeps is fetched by the name a line says (Chips ADR 0099).
       const files = Array.isArray(line["files"]) ? (line["files"] as unknown[]).filter((each) => typeof each === "string") : [];
-      const words = flat(line["text"]) || flat(line["transcript"]) || (files.length > 0 ? `(sent ${files.join(", ")})` : "");
+      const sent = files.length > 0 ? `(sent ${files.join(", ")})` : "";
+      const words = [flat(line["text"]) || flat(line["transcript"]), sent].filter((part) => part !== "").join(" ");
       return words === "" ? undefined : `${name}: ${words}`;
     }
     case "joined":
@@ -356,6 +366,22 @@ export function heldNoteOf(taken: Taken | undefined): string | undefined {
   );
 }
 
+/** The files a message carries, as Chips describes them. */
+function attachmentsOf(event: ChipsEvent): Payload[] {
+  return Array.isArray(event["attachments"]) ? (event["attachments"] as Payload[]) : [];
+}
+
+/** A file as OpenClaw takes one with a message: inline, as base64. */
+function inlined(fileName: string, mimeType: string, bytes: Buffer): Payload {
+  return {
+    type: mimeType.startsWith("image/") ? "image" : "file",
+    mimeType,
+    fileName,
+    content: bytes.toString("base64"),
+    sizeBytes: bytes.length,
+  };
+}
+
 export class Bridge {
   /** Rooms asked of this harness from the +, waiting for their first words to be claimed. */
   private readonly asked = new Set<string>();
@@ -372,9 +398,15 @@ export class Bridge {
   private readonly latest = new Map<string, string>();
   /**
    * What a session's next turn in a room is to be told, by session and room: that Chips held what
-   * its last turn there said (`heldNoteOf`).
+   * its last turn there said (`heldNoteOf`), or would not take a file it sent as made from a
+   * version that is no longer current (Chips ADR 0099).
    */
-  private readonly held = new Map<string, string>();
+  private readonly told = new Map<string, string[]>();
+  /**
+   * The version of each of a room's files a session has, by session and room, then by name: the one
+   * it was handed, or the one its answer posted. What it sends back under that name replaces it.
+   */
+  private readonly versions = new Map<string, Map<string, string>>();
   /** Tool events that came before the turn's first `chat` event said which room it is in. */
   private readonly early = new Map<string, Payload[]>();
   /** Chips's approval id → OpenClaw's, and whether OpenClaw takes allow-always for it. */
@@ -746,7 +778,7 @@ export class Bridge {
     const messageId = String(event["message_id"] ?? event["id"]);
     const seq = num(event["seq"]);
     const takers = await this.turnTakers(event, spaceId);
-    const attachments = takers.length === 0 ? {} : await this.attachments(event);
+    const attachments = takers.length === 0 ? [] : await this.attachments(event);
     for (const taker of takers) {
       await this.ensureSession(taker.sessionKey, words, taker.clawAgent);
       // The harness itself claims the room it was asked for; one of our agents a message there is
@@ -772,19 +804,83 @@ export class Bridge {
         speaker: agentId,
         harnessTurns: this.keyOf.get(taker.agentId ?? "") !== taker.clawAgent,
       });
-      const chips = [this.takeHeld(taker.sessionKey, spaceId), exchangeNoteOf(event)]
+      const chips = [...this.takeTold(taker.sessionKey, spaceId), exchangeNoteOf(event)]
         .filter((line): line is string => line !== undefined)
         .map((line) => `Chips: ${line}`);
+      // The room's files the turn's words name, at their current version (Chips ADR 0099).
+      const files = await this.roomFiles(taker.sessionKey, spaceId, event, [...chips, message].join("\n"));
+      const sent = [...attachments, ...files.sent];
       // Steered: into the session's turn while one runs, a turn of its own when none does. Said, not
       // left to OpenClaw's stored queue mode, which could make it wait for a turn after.
       await this.claw.request("chat.send", {
         sessionKey: taker.sessionKey,
-        message: [...chips, ...(note === undefined ? [] : [note]), message].join("\n\n"),
+        message: [...chips, note, files.line, message].filter((part) => part !== undefined).join("\n\n"),
         idempotencyKey: turn,
         queueMode: "steer",
-        ...attachments,
+        ...(sent.length === 0 ? {} : { attachments: sent }),
       });
+      files.took();
     }
+  }
+
+  /**
+   * The room's files a turn's words name, fetched at their current version for its session (Chips
+   * ADR 0099): those the session does not have already, five at most, of five MB each; the line
+   * that tells it what it was handed and what not. A room file on the message itself is the
+   * session's with it. What it is handed is its version once the send is made (`took`), and what
+   * it sends back under that name replaces it.
+   */
+  private async roomFiles(
+    sessionKey: string,
+    spaceId: string,
+    event: ChipsEvent,
+    words: string,
+  ): Promise<{ sent: Payload[]; line: string | undefined; took: () => void }> {
+    const files = roomFilesIn(event["context"]);
+    if (files.length === 0) return { sent: [], line: undefined, took: () => undefined };
+    const has = this.versionsOf(sessionKey, spaceId);
+    const onMessage = new Set(attachmentsOf(event).map((file) => str(file["attachment_id"])));
+    const carried = files.filter((file) => onMessage.has(file.attachmentId));
+    const wanted = namedIn(files, words).filter(
+      (file) => !onMessage.has(file.attachmentId) && has.get(file.name) !== file.attachmentId,
+    );
+    const sent: Payload[] = [];
+    const handed: RoomFile[] = [];
+    const left: { file: RoomFile; why: string }[] = [];
+    for (const file of wanted) {
+      const why =
+        handed.length >= ROOM_FILES.most
+          ? `since a turn is handed ${ROOM_FILES.most} files at most`
+          : (file.byteSize ?? 0) > ROOM_FILES.bytes
+            ? `since it is larger than ${ROOM_FILES.bytes / 1024 / 1024} MB`
+            : undefined;
+      if (why !== undefined) {
+        left.push({ file, why });
+        continue;
+      }
+      try {
+        sent.push(inlined(file.name, file.mimeType, await this.chips.fetchAttachment(file.url)));
+        handed.push(file);
+      } catch (error) {
+        this.log(`chips: could not fetch ${file.name} for ${sessionKey}: ${String(error)}`);
+        left.push({ file, why: "since it could not be fetched" });
+      }
+    }
+    return {
+      sent,
+      line: filesLine(handed, left),
+      took: () => {
+        for (const file of [...carried, ...handed]) has.set(file.name, file.attachmentId);
+      },
+    };
+  }
+
+  /** The version of each of a room's files a session has there, by name. */
+  private versionsOf(sessionKey: string, spaceId: string): Map<string, string> {
+    const key = `${sessionKey} ${spaceId}`;
+    const has = this.versions.get(key) ?? new Map<string, string>();
+    this.versions.set(key, has);
+    return has;
   }
 
   /** What Chips handed with an agent when it was put in this room, once: for its first turn there. */
@@ -892,25 +988,16 @@ export class Bridge {
     this.sessions.add(key);
   }
 
-  /** A person's photos and files, fetched from their signed URLs and sent inline. */
-  private async attachments(event: ChipsEvent): Promise<Payload> {
-    const files = Array.isArray(event["attachments"]) ? (event["attachments"] as Payload[]) : [];
-    if (files.length === 0) return {};
+  /** A message's photos and files, fetched from their signed URLs and sent inline. */
+  private async attachments(event: ChipsEvent): Promise<Payload[]> {
     const sent: Payload[] = [];
-    for (const file of files) {
+    for (const file of attachmentsOf(event)) {
       const url = str(file["url"]);
       if (url === undefined) continue;
       const bytes = await this.chips.fetchAttachment(url);
-      const mimeType = str(file["mime_type"]) ?? "application/octet-stream";
-      sent.push({
-        type: mimeType.startsWith("image/") ? "image" : "file",
-        mimeType,
-        fileName: str(file["filename"]) ?? "attachment",
-        content: bytes.toString("base64"),
-        sizeBytes: bytes.length,
-      });
+      sent.push(inlined(str(file["filename"]) ?? "attachment", str(file["mime_type"]) ?? "application/octet-stream", bytes));
     }
-    return sent.length === 0 ? {} : { attachments: sent };
+    return sent;
   }
 
   private async cancel(event: ChipsEvent): Promise<void> {
@@ -1067,6 +1154,7 @@ export class Bridge {
       chain: Promise.resolve(),
       ended: false,
       media: [],
+      uploaded: new Map(),
     };
     this.runs.set(clawRun, run);
     this.runByChips.set(run.chipsRun, run);
@@ -1145,6 +1233,8 @@ export class Bridge {
           run_id: run.chipsRun,
           text: run.reply,
           ...(files.ids.length === 0 ? {} : { upload_ids: files.ids }),
+          // Each file sent back under the name of a room file the session has: the version it was made from.
+          ...(Object.keys(files.replaces).length === 0 ? {} : { replaces: files.replaces }),
           idempotency_key: `openclaw-run:${clawRun}:reply`,
         };
       });
@@ -1189,12 +1279,18 @@ export class Bridge {
   /**
    * The files an answer named, uploaded for its post, as many as a post takes. What could not go
    * is said in the post instead, so the room knows it was meant to; a web address goes back into
-   * the words it was taken from, since the bridge fetches nothing from the web.
+   * the words it was taken from, since the bridge fetches nothing from the web. A file under the
+   * name of a room file the session has is the next version of it, made from the one it has
+   * (`replaces`, Chips ADR 0099).
    */
-  private async upload(run: Run): Promise<{ ids: string[]; names: string[]; notes: string[] }> {
+  private async upload(
+    run: Run,
+  ): Promise<{ ids: string[]; names: string[]; notes: string[]; replaces: Record<string, string> }> {
     const ids: string[] = [];
     const names: string[] = [];
     const notes: string[] = [];
+    const replaces: Record<string, string> = {};
+    const has = run.spaceId === undefined ? undefined : this.versions.get(`${run.sessionKey} ${run.spaceId}`);
     for (const reference of run.media) {
       const media = await this.files.read(reference);
       if (media.kind === "link") {
@@ -1211,15 +1307,19 @@ export class Bridge {
         continue;
       }
       try {
-        ids.push(await this.chips.upload(media.filename, media.bytes));
+        const id = await this.chips.upload(media.filename, media.bytes);
+        ids.push(id);
         names.push(media.filename);
+        run.uploaded.set(id, media.filename);
+        const made = has?.get(media.filename);
+        if (made !== undefined) replaces[id] = made;
       } catch (error) {
         const why = error instanceof ChipsRefusal ? error.message : String(error);
         this.log(`chips refused the upload of ${media.filename} for ${run.chipsRun}: ${why}`);
         notes.push(`(${media.filename} was not attached: Chips refused it: ${why})`);
       }
     }
-    return { ids, names, notes };
+    return { ids, names, notes, replaces };
   }
 
   /**
@@ -1417,13 +1517,74 @@ export class Bridge {
         if (words === undefined) return;
         // Said as the agent the turn is by (Chips ADR 0087).
         const said = run.agentId === undefined ? words : { ...words, actor: { kind: "agent", id: run.agentId } };
-        const taken = await this.chips.send(said);
-        if (said.type === "message.post") this.onHeld(run, taken);
+        await this.say(run, said);
       } catch (error) {
         const why = error instanceof ChipsRefusal ? `${error.status} ${error.code}: ${error.message}` : String(error);
         this.log(`chips refused ${type} for ${run.chipsRun}: ${why}`);
       }
     });
+  }
+
+  /**
+   * One event said. A post Chips refused because a file in it was made from a version of the room's
+   * file that is no longer current (Chips ADR 0099) is said again without that file, saying why in
+   * its words, so the answer is not lost; and the session's next turn in the room is told, so it
+   * fetches the current version and redoes. Never a turn of its own for it, as for a hold.
+   */
+  private async say(run: Run, said: ChipsEvent): Promise<void> {
+    let post = said;
+    let taken: Taken | undefined;
+    try {
+      taken = await this.chips.send(said);
+    } catch (error) {
+      const again =
+        error instanceof ChipsRefusal && error.code === STALE_FILE ? this.withoutStale(run, said, error.message) : undefined;
+      if (again === undefined) throw error;
+      this.log(`chips refused a stale file in ${run.chipsRun}'s answer: ${error instanceof Error ? error.message : ""}`);
+      post = again;
+      taken = await this.chips.send(again);
+    }
+    if (post.type === "message.post") this.posted(run, post, taken);
+  }
+
+  /** A refused post again, without the files it sent as new versions of stale ones, saying so. */
+  private withoutStale(run: Run, said: ChipsEvent, why: string): ChipsEvent | undefined {
+    const replaces = (said["replaces"] ?? {}) as Record<string, string>;
+    const ids = Array.isArray(said["upload_ids"]) ? (said["upload_ids"] as string[]) : [];
+    const versions = ids.filter((id) => replaces[id] !== undefined).map((id) => ({ id, name: run.uploaded.get(id) ?? id }));
+    if (said.type !== "message.post" || versions.length === 0) return undefined;
+    const stale = new Set(staleIn(why, versions));
+    const kept = ids.filter((id) => !stale.has(id));
+    const still = Object.fromEntries(Object.entries(replaces).filter(([id]) => !stale.has(id)));
+    const notes = versions.filter((each) => stale.has(each.id)).map((each) => `(${each.name} was not posted: ${why})`);
+    const { upload_ids: _ids, replaces: _replaces, ...words } = said;
+    const text = [str(said["text"]) ?? "", ...notes].filter((part) => part !== "").join("\n\n");
+    run.reply = text;
+    run.sent = kept.map((id) => run.uploaded.get(id) ?? id);
+    if (run.spaceId !== undefined) {
+      this.tell(run.sessionKey, run.spaceId, `Your last answer here sent a file Chips did not take as its next version: ${why}`);
+    }
+    return {
+      ...words,
+      type: "message.post",
+      text,
+      ...(kept.length === 0 ? {} : { upload_ids: kept }),
+      ...(Object.keys(still).length === 0 ? {} : { replaces: still }),
+    };
+  }
+
+  /**
+   * What Chips said of a turn's post: whether it held it, and the files it took, each now the
+   * session's version of its name in the room.
+   */
+  private posted(run: Run, post: ChipsEvent, taken: Taken | undefined): void {
+    this.onHeld(run, taken);
+    if (run.spaceId === undefined) return;
+    const has = this.versionsOf(run.sessionKey, run.spaceId);
+    for (const id of Array.isArray(post["upload_ids"]) ? (post["upload_ids"] as string[]) : []) {
+      const name = run.uploaded.get(id);
+      if (name !== undefined) has.set(name, id);
+    }
   }
 
   /**
@@ -1435,16 +1596,22 @@ export class Bridge {
   private onHeld(run: Run, taken: Taken | undefined): void {
     const note = heldNoteOf(taken);
     if (note === undefined || run.spaceId === undefined) return;
-    this.held.set(`${run.sessionKey} ${run.spaceId}`, note);
+    this.tell(run.sessionKey, run.spaceId, note);
     this.log(`chips held ${run.chipsRun}'s answer; the session's next turn in ${run.spaceId} is told`);
   }
 
-  /** What a session's turn in a room is to be told of its words Chips held there, once. */
-  private takeHeld(sessionKey: string, spaceId: string): string | undefined {
+  /** Something for a session's next turn in a room to be told, first, as Chips's. */
+  private tell(sessionKey: string, spaceId: string, note: string): void {
     const key = `${sessionKey} ${spaceId}`;
-    const note = this.held.get(key);
-    this.held.delete(key);
-    return note;
+    this.told.set(key, [...(this.told.get(key) ?? []), note]);
+  }
+
+  /** What a session's turn in a room is to be told, once. */
+  private takeTold(sessionKey: string, spaceId: string): string[] {
+    const key = `${sessionKey} ${spaceId}`;
+    const notes = this.told.get(key) ?? [];
+    this.told.delete(key);
+    return notes;
   }
 
   /**

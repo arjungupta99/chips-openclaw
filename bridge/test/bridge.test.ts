@@ -37,6 +37,9 @@ let pulls: [string, number, number][] = [];
 let uploads: [string, string][] = [];
 /** What Chips answers each `message.post` with: held from the agents it named, or nothing to say. */
 let holdPosts: Taken | undefined;
+/** What Chips refuses a `message.post` with, if anything; and the signed URLs the bridge fetched. */
+let refusePost: ((event: ChipsEvent) => ChipsRefusal | undefined) | undefined;
+let fetched: string[] = [];
 let bridge: Bridge;
 
 /** One of our agents as Chips lists it, in one room or in none. */
@@ -46,6 +49,8 @@ function agentIn(agentId: string, key: string, room: string | null, name = "Open
 
 const chips: ChipsPort = {
   send: async (event) => {
+    const refusal = event.type === "message.post" ? refusePost?.(event) : undefined;
+    if (refusal !== undefined) throw refusal;
     sent.push(event);
     return event.type === "message.post" ? holdPosts : undefined;
   },
@@ -54,7 +59,10 @@ const chips: ChipsPort = {
     claims.push([spaceId, key, title]);
     agents = [...agents.filter((each) => each.key !== key), agentIn(`agt_${key}`, key, spaceId)];
   },
-  fetchAttachment: async () => Buffer.from("png-bytes"),
+  fetchAttachment: async (url) => {
+    fetched.push(url);
+    return Buffer.from("png-bytes");
+  },
   upload: async (filename, bytes) => {
     if (filename === "big.mov") throw new ChipsRefusal(413, "too_large", "The file is larger than this workspace takes.");
     uploads.push([filename, bytes.toString()]);
@@ -101,6 +109,8 @@ beforeEach(() => {
   pulls = [];
   uploads = [];
   holdPosts = undefined;
+  refusePost = undefined;
+  fetched = [];
   bridge = new Bridge(chips, claw, { harnessId: ME, agent: "main" }, () => undefined);
 });
 
@@ -365,7 +375,7 @@ describe("an answer's files", () => {
   });
 
   /** The final answer's stream event names its files, and the final `chat` carries its words only. */
-  function answers(text: string, mediaUrls: string[]): void {
+  function answers(text: string, mediaUrls: string[], R1 = "msg_01K4ZQPX0000000000000000A1"): void {
     bridge.onClaw({ event: "chat", payload: { runId: R1, sessionKey: key(), seq: 1, state: "status" } });
     const stream = { runId: R1, sessionKey: key(), stream: "assistant" };
     bridge.onClaw({ event: "agent", payload: { ...stream, seq: 2, data: { text, delta: text, phase: "final_answer" } } });
@@ -446,6 +456,150 @@ describe("an answer's files", () => {
     await bridge.settled();
     assert.equal(uploads.length, 0);
     assert.equal(sent.find((event) => event.type === "message.post")?.["upload_ids"], undefined);
+  });
+
+  describe("the room's files (Chips ADR 0099)", () => {
+    const OC3 = { id: "agt_01K4ZQPX00000000000000OC3", kind: "agent", name: "Oc3" };
+    /** A file of the room at its current version, as Chips lists it with a message. */
+    function roomFile(name: string, version: number, extra: Record<string, unknown> = {}): Record<string, unknown> {
+      return {
+        name,
+        version,
+        attachment_id: `att_${name.replace(/\W/g, "").toUpperCase().padEnd(24, "0").slice(0, 24)}V${version}`,
+        sha256: "a".repeat(64),
+        byte_size: 2048,
+        mime_type: "text/html",
+        at: "2026-10-02T18:00:00.000Z",
+        url: `https://chips/files/${name}/v${version}`,
+        url_expires_at: "2026-10-02T18:10:00.000Z",
+        ...extra,
+      };
+    }
+    const GALLERY = roomFile("ascii-alphabet.html", 2, { by: OC3 });
+    const listing = (files: unknown[], lines: unknown[] = []): Record<string, unknown> => ({
+      context: { lines, since_seq: 0, truncated: false, before: 1, files },
+    });
+    const sends = (): Record<string, unknown>[] => calls.filter(([method]) => method === "chat.send").map(([, params]) => params);
+    const inline = (fileName: string) => ({
+      type: "file",
+      mimeType: "text/html",
+      fileName,
+      content: Buffer.from("png-bytes").toString("base64"),
+      sizeBytes: 9,
+    });
+    const HANDED =
+      "Files in this room, attached at their current version: ascii-alphabet.html (v2, by Oc3). To change one, send it back under the same name: Chips takes it as the next version.";
+
+    it("hands a turn the room's files its words name, at their current version, and says so", async () => {
+      await bridge.onChips(said("Add F–J to ascii-alphabet.html", listing([GALLERY, roomFile("notes.md", 1)])));
+      assert.deepEqual(fetched, ["https://chips/files/ascii-alphabet.html/v2"]);
+      assert.deepEqual(sends()[0]?.["attachments"], [inline("ascii-alphabet.html")]);
+      assert.equal(sends()[0]?.["message"], `${HANDED}\n\nAdd F–J to ascii-alphabet.html`);
+    });
+
+    it("takes a file a line of the room sent as named, and hands a session each version once", async () => {
+      const line = { seq: 10, kind: "said", from: OC3, text: "Started it", files: ["ascii-alphabet.html"], addressed_to: [] };
+      await bridge.onChips(said("@OpenClaw carry on", listing([GALLERY], [line])));
+      assert.equal(
+        sends()[0]?.["message"],
+        `${HANDED}\n\nSaid in this room since you last spoke:\nOc3: Started it (sent ascii-alphabet.html)\n\n@OpenClaw carry on`,
+      );
+      await bridge.onChips(said("Still on ascii-alphabet.html?", { message_id: "msg_01K4ZQPX0000000000000000A2", ...listing([GALLERY]) }));
+      assert.equal(sends()[1]?.["message"], "Still on ascii-alphabet.html?");
+      assert.equal(sends()[1]?.["attachments"], undefined);
+      const v3 = roomFile("ascii-alphabet.html", 3, { by: OC3 });
+      await bridge.onChips(said("And now ascii-alphabet.html?", { message_id: "msg_01K4ZQPX0000000000000000A3", ...listing([v3]) }));
+      assert.deepEqual(fetched, ["https://chips/files/ascii-alphabet.html/v2", "https://chips/files/ascii-alphabet.html/v3"]);
+    });
+
+    it("hands five files at most, none over five MB, and says which it left out and why", async () => {
+      const names = ["big.mov", "a1.txt", "a2.txt", "a3.txt", "a4.txt", "a5.txt", "a6.txt"];
+      const files = names.map((name) => roomFile(name, 1, name === "big.mov" ? { byte_size: 6 * 1024 * 1024 } : {}));
+      await bridge.onChips(said(`Look at ${names.join(", ")}`, listing(files)));
+      assert.equal((sends()[0]?.["attachments"] as unknown[]).length, 5);
+      assert.equal(
+        sends()[0]?.["message"],
+        [
+          "Files in this room, attached at their current version: a1.txt (v1), a2.txt (v1), a3.txt (v1), a4.txt (v1), a5.txt (v1). To change one, send it back under the same name: Chips takes it as the next version.",
+          "Not attached: big.mov (v1), since it is larger than 5 MB.",
+          "Not attached: a6.txt (v1), since a turn is handed 5 files at most.",
+          "",
+          `Look at ${names.join(", ")}`,
+        ].join("\n"),
+      );
+    });
+
+    it("names a file by its whole name, not one with it inside", async () => {
+      await bridge.onChips(said("See myascii-alphabet.html and ascii-alphabet.html5", listing([GALLERY])));
+      assert.deepEqual(fetched, []);
+      await bridge.onChips(said("See /tmp/ascii-alphabet.html.", { message_id: "msg_01K4ZQPX0000000000000000A2", ...listing([GALLERY]) }));
+      assert.equal(fetched.length, 1);
+    });
+
+    it("sends back a file under a room file's name as its next version, naming the version it was made from", async () => {
+      await bridge.onChips(said("Add F–J to ascii-alphabet.html", listing([GALLERY])));
+      answers("Added F–J.", [`${WORKSPACE}/ascii-alphabet.html`, `${WORKSPACE}/notes.md`]);
+      await bridge.settled();
+      const first = sent.find((event) => event.type === "message.post");
+      assert.deepEqual(first?.["upload_ids"], ["att_01K4ZQPX000000000000000001", "att_01K4ZQPX000000000000000002"]);
+      // Only the room's file it was handed: notes.md is new to it.
+      assert.deepEqual(first?.["replaces"], { att_01K4ZQPX000000000000000001: GALLERY["attachment_id"] });
+      // Its next edit is made from what it posted, which Chips now lists as current: nothing to fetch.
+      const R2 = "msg_01K4ZQPX0000000000000000A2";
+      const v3 = roomFile("ascii-alphabet.html", 3, { attachment_id: "att_01K4ZQPX000000000000000001", by: { name: "OpenClaw" } });
+      await bridge.onChips(said("Now K–O in ascii-alphabet.html", { message_id: R2, ...listing([v3]) }));
+      assert.equal(fetched.length, 1);
+      answers("Added K–O.", [`${WORKSPACE}/ascii-alphabet.html`], R2);
+      await bridge.settled();
+      const second = sent.filter((event) => event.type === "message.post")[1];
+      assert.deepEqual(second?.["replaces"], { att_01K4ZQPX000000000000000003: "att_01K4ZQPX000000000000000001" });
+    });
+
+    it("takes a room file on the message as the session's, without fetching it again", async () => {
+      const own = { attachment_id: GALLERY["attachment_id"], url: "https://chips/a", filename: "ascii-alphabet.html", mime_type: "text/html" };
+      await bridge.onChips(said("Here is ascii-alphabet.html v2", { attachments: [own], ...listing([GALLERY]) }));
+      assert.deepEqual(fetched, ["https://chips/a"]);
+      assert.equal(sends()[0]?.["message"], "Here is ascii-alphabet.html v2");
+      answers("Took it further.", [`${WORKSPACE}/ascii-alphabet.html`]);
+      await bridge.settled();
+      assert.deepEqual(sent.find((event) => event.type === "message.post")?.["replaces"], {
+        att_01K4ZQPX000000000000000001: GALLERY["attachment_id"],
+      });
+    });
+
+    it("posts the words again without a file Chips refused as stale, and tells the session's next turn, which is handed the new one", async () => {
+      const why = "ascii-alphabet.html is now v3, by Oc2. Fetch it and redo.";
+      refusePost = (event) => (event["replaces"] === undefined ? undefined : new ChipsRefusal(409, "stale_file", why));
+      await bridge.onChips(said("Add F–J to ascii-alphabet.html", listing([GALLERY])));
+      answers("Added F–J.", [`${WORKSPACE}/ascii-alphabet.html`, `${WORKSPACE}/notes.md`]);
+      await bridge.settled();
+      const post = sent.find((event) => event.type === "message.post");
+      assert.equal(post?.["text"], `Added F–J.\n\n(ascii-alphabet.html was not posted: ${why})`);
+      assert.deepEqual(post?.["upload_ids"], ["att_01K4ZQPX000000000000000002"]);
+      assert.equal(post?.["replaces"], undefined);
+      assert.equal(sent.at(-1)?.["summary"], post?.["text"]);
+      // Nothing went to OpenClaw on the refusal; its next turn in the room is told, and handed v3.
+      assert.equal(sends().length, 1);
+      const v3 = roomFile("ascii-alphabet.html", 3, { by: { name: "Oc2" } });
+      await bridge.onChips(said("How is it going?", { message_id: "msg_01K4ZQPX0000000000000000A2", ...listing([v3]) }));
+      assert.equal(
+        sends()[1]?.["message"],
+        [
+          `Chips: Your last answer here sent a file Chips did not take as its next version: ${why}`,
+          "Files in this room, attached at their current version: ascii-alphabet.html (v3, by Oc2). To change one, send it back under the same name: Chips takes it as the next version.",
+          "How is it going?",
+        ].join("\n\n"),
+      );
+      assert.equal(fetched.at(-1), "https://chips/files/ascii-alphabet.html/v3");
+    });
+
+    it("from a Chips that lists no files, hands a turn none and sends back nothing as a version", async () => {
+      await bridge.onChips(said("Add F–J to ascii-alphabet.html"));
+      answers("Added.", [`${WORKSPACE}/ascii-alphabet.html`]);
+      await bridge.settled();
+      assert.deepEqual(fetched, []);
+      assert.equal(sent.find((event) => event.type === "message.post")?.["replaces"], undefined);
+    });
   });
 });
 
