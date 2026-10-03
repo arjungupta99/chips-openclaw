@@ -1250,6 +1250,14 @@ export class Bridge {
     const clawRun = str(p["runId"]);
     const sessionKey = str(p["sessionKey"]);
     if (clawRun === undefined || sessionKey === undefined) return;
+    // A turn whose first word is its end, with nothing in it, did nothing. OpenClaw took its
+    // message into another turn of the session's and answered it there, so it starts no run,
+    // which would end on a line of its own. The ASCII Art room had four of them on 3 October 2026,
+    // each "Answered together with other words, in one reply.", and Arjun asked for them gone.
+    if (!this.runs.has(clawRun) && !this.early.has(clawRun) && p["state"] === "final" && textOf(p["message"]).trim() === "") {
+      this.asks.delete(clawRun);
+      return;
+    }
     const run = this.runFor(clawRun, sessionKey);
     if (run === undefined || run.ended) return;
     const state = str(p["state"]);

@@ -336,6 +336,19 @@ describe("a turn as a run", () => {
     assert.equal(sent.at(-1)?.["summary"], "Answered together with other words, in one reply.");
   });
 
+  it("starts no run for a message's turn whose only word is an empty end: OpenClaw answered it in another turn", async () => {
+    // Live, 3 Oct 2026: four of these in the ASCII Art room, each a line of its own in the room.
+    await bridge.onChips(said("@O1 can add D–F"));
+    const r1 = "msg_01K4ZQPX0000000000000000A1";
+    bridge.onClaw({ event: "chat", payload: { runId: r1, sessionKey: key(), seq: 1, state: "final" } });
+    await bridge.settled();
+    assert.deepEqual(sent, []);
+    // A later turn of the room still starts as any does.
+    bridge.onClaw({ event: "chat", payload: { runId: "r2", sessionKey: key(), seq: 1, state: "status" } });
+    await bridge.settled();
+    assert.deepEqual(sent.map((event) => event["type"]), ["run.started"]);
+  });
+
   it("names the same run after a restart, so Chips takes the retry as a duplicate", async () => {
     bridge.onClaw({ event: "chat", payload: { runId: "r1", sessionKey: key(), seq: 1, state: "status" } });
     const again = new Bridge(chips, claw, { harnessId: ME, agent: "main" }, () => undefined);
