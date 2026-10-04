@@ -53,6 +53,23 @@ export class ChipsRefusal extends Error {
 }
 
 /** One of this harness's agents in Chips (`connect/websocket#agents`): the key is ours for it. */
+/**
+ * One of our agents to register: its key and name, and for a new agent a person asked for in a
+ * room (Chips ADR 0108) the ask it answers and the room, which Chips puts it in while it waits.
+ */
+export interface NewAgent {
+  readonly key: string;
+  readonly name: string;
+  readonly made_for?: string;
+  readonly space_id?: string;
+}
+
+/** For an agent registered for a room: whether Chips put it there, and why not when it didn't. */
+export interface Placed {
+  readonly attached?: boolean;
+  readonly why?: string;
+}
+
 export interface ChipsAgent {
   readonly agent_id: string;
   readonly key: string;
@@ -163,8 +180,8 @@ export class Chips {
   }
 
   /** One of this harness's agents by our key for it: made the first time, renamed when the name changed. */
-  async registerAgent(agent: { key: string; name: string }): Promise<ChipsAgent> {
-    return (await this.call("POST", `/v1/harnesses/${this.options.harnessId}/agents`, agent)) as ChipsAgent;
+  async registerAgent(agent: NewAgent): Promise<ChipsAgent & Placed> {
+    return (await this.call("POST", `/v1/harnesses/${this.options.harnessId}/agents`, agent)) as ChipsAgent & Placed;
   }
 
   /** One of our agents in a room, in the place of `replacing` there. True when it moved in now. */

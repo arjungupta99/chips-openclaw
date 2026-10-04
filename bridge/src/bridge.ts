@@ -52,7 +52,7 @@
  * same event and Chips answers it as a duplicate.
  */
 
-import { type ChipsAgent, type ChipsEvent, ChipsRefusal, type Taken } from "./chips.ts";
+import { type ChipsAgent, type ChipsEvent, ChipsRefusal, type NewAgent, type Placed, type Taken } from "./chips.ts";
 import { chipsId } from "./ids.ts";
 import type { Media } from "./media.ts";
 import type { ClawEvent } from "./openclaw.ts";
@@ -67,7 +67,7 @@ export interface ChipsPort {
   /** A file's bytes, uploaded; the upload's id, for a post's `upload_ids`. */
   upload(filename: string, bytes: Buffer): Promise<string>;
   agents(): Promise<ChipsAgent[]>;
-  registerAgent(agent: { key: string; name: string }): Promise<ChipsAgent>;
+  registerAgent(agent: NewAgent): Promise<ChipsAgent & Placed>;
   attach(agentId: string, spaceId: string, replacing: string): Promise<boolean>;
   roomContext(spaceId: string, before: number, limit: number): Promise<unknown>;
 }
@@ -310,10 +310,13 @@ export function usageOf(usage: unknown, fallbackModel: string): Payload | undefi
  * plain name would be another of our agents' session, whose it is: `asked` for a room's claim,
  * `own` for the OpenClaw agent's own, `default` for the harness's default agent.
  */
-const SESSION = /^agent:([^:]+):chips-([^:]+)(?::(asked|own|default))?$/;
+const SESSION = /^agent:([^:]+):chips-([^:]+)(?::(asked|own|default|made-[0-9a-z]+))?$/;
 
-/** Whose a session is, where its name says (`SESSION`'s last part). */
-type Whose = "asked" | "own" | "default";
+/** Whose a session is, where its name says (`SESSION`'s last part): `made` for a new agent's. */
+type Whose = "asked" | "own" | "default" | "made";
+
+/** How long a room in Chips waits for a new agent asked for (Chips ADR 0108): a minute. */
+const NEW_AGENT_WAIT_MS = 60_000;
 
 /** What Chips calls a sender that is an agent: `harness` before a harness declares `agents`, `agent` after. */
 const isAgentKind = (kind: unknown): boolean => kind === "harness" || kind === "agent";
@@ -499,6 +502,15 @@ export class Bridge {
     return `${this.keyFor(spaceId)}:asked`;
   }
 
+  /**
+   * The key a new agent a person asked for in a room is registered under (Chips ADR 0108), and so
+   * its session: a conversation of its own on the primary agent, named for the ask, wherever
+   * Chips moves it, as a + room's claim is.
+   */
+  madeKeyFor(spaceId: string, askId: string): string {
+    return `${this.keyFor(spaceId)}:made-${askId.replace(/^evt_/, "").toLowerCase()}`;
+  }
+
   /** The room a session is, when it is one of this bridge's. */
   spaceFor(sessionKey: string): string | undefined {
     const rest = SESSION.exec(sessionKey)?.[2];
@@ -514,7 +526,8 @@ export class Bridge {
 
   /** Whose a session is, when its name says. */
   private whoseFor(sessionKey: string): Whose | undefined {
-    return SESSION.exec(sessionKey)?.[3] as Whose | undefined;
+    const whose = SESSION.exec(sessionKey)?.[3];
+    return whose?.startsWith("made-") === true ? "made" : (whose as Whose | undefined);
   }
 
   /** Whether somebody in Chips is this harness: itself, or one of its agents. */
@@ -579,6 +592,35 @@ export class Bridge {
       this.keyOf.set(agent.agent_id, agent.key);
       this.agentByKey.set(agent.key, agent.agent_id);
       this.roomOf.set(agent.agent_id, agent.room !== undefined ? agent.room : (agent.spaces[0] ?? null));
+    }
+  }
+
+  /**
+   * A person asked Chips for a new agent of this harness's in a room (Chips ADR 0108): one more
+   * Chips agent on the primary OpenClaw agent, keyed by a session of its own (`madeKeyFor`), called
+   * what the ask says, and registered `made_for` the ask with the room, which Chips puts it in
+   * while the room waits. Only Chips's people who may ask can, so the bridge asks nothing more of
+   * who it was; an ask of another harness, or one a replay hands over after the minute, makes
+   * nothing. The same ask heard again registers the same key, which Chips answers as done.
+   */
+  private async makeAgent(event: ChipsEvent): Promise<void> {
+    if (str(event["harness_id"]) !== this.self.harnessId) return;
+    const room = str(event["space_id"]);
+    const askId = str(event["id"]);
+    const name = str(event["name"]);
+    if (room === undefined || askId === undefined || name === undefined) return;
+    if (!(Date.now() - Date.parse(str(event["ts"]) ?? "") < NEW_AGENT_WAIT_MS)) {
+      this.log(`chips: not making ${name} for ${room}: the room stopped waiting for it`);
+      return;
+    }
+    const key = this.madeKeyFor(room, askId);
+    try {
+      const made = await this.chips.registerAgent({ key, name, made_for: askId, space_id: room });
+      this.learn([made]);
+      const placed = made.attached === false && made.why !== undefined ? `, not in it: ${made.why}` : "";
+      this.log(`chips: made ${made.name} for ${room}${placed}`);
+    } catch (error) {
+      this.log(`chips refused the new agent ${name}: ${String(error)}`);
     }
   }
 
@@ -772,6 +814,9 @@ export class Bridge {
       // Where our agents are, as Chips says it (ADR 0087): one room each, or none.
       case "agent.attached":
         return this.attached(event);
+      // A new agent a person asked for in a room (Chips ADR 0108).
+      case "agent.asked":
+        return this.makeAgent(event);
       case "agent.released":
         return this.released(event);
       // One of ours deleted by a person (Chips ADR 0095): forgotten here.
