@@ -279,13 +279,15 @@ describe("rooms and sessions", () => {
     ]);
   });
 
-  it("sends an SVG as a file, whose text the model reads, not as a picture it cannot open", async () => {
+  it("sends an SVG as text the model reads, not as a picture it cannot open", async () => {
+    // Live, 3 Oct 2026: sent as a `file` but typed `image/svg+xml`, OpenClaw still took it for a
+    // picture, and OC1 and OC2 each asked the room to send it again.
     await bridge.onChips(
       said("A mock", { attachments: [{ url: "https://chips/a", mime_type: "image/svg+xml", filename: "preview.svg" }] }),
     );
     const send = calls.find(([method]) => method === "chat.send")?.[1];
     assert.deepEqual(send?.["attachments"], [
-      { type: "file", mimeType: "image/svg+xml", fileName: "preview.svg", content: Buffer.from("png-bytes").toString("base64"), sizeBytes: 9 },
+      { type: "file", mimeType: "text/plain", fileName: "preview.svg", content: Buffer.from("png-bytes").toString("base64"), sizeBytes: 9 },
     ]);
   });
 });
@@ -347,6 +349,20 @@ describe("a turn as a run", () => {
     await bridge.settled();
     assert.equal(sent[0]?.["goal_from"], "chips");
     assert.equal(sent.at(-1)?.["summary"], "Answered together with other words, in one reply.");
+  });
+
+  it("says NO_REPLY for a turn that answered it, which OpenClaw leaves out of its chat (Chips ADR 0105)", async () => {
+    // Chips makes the post the turn's pass, which the room never shows.
+    await bridge.onChips(said("@O2 then @O1 for P–T, once O2 is done"));
+    const r1 = "msg_01K4ZQPX0000000000000000A1";
+    const stream = { runId: r1, sessionKey: key(), stream: "assistant" };
+    bridge.onClaw({ event: "agent", payload: { ...stream, seq: 1, data: { text: "Waiting", phase: "commentary" } } });
+    bridge.onClaw({ event: "agent", payload: { ...stream, seq: 2, data: { text: "NO_REPLY", phase: "final_answer" } } });
+    bridge.onClaw({ event: "chat", payload: { runId: r1, sessionKey: key(), seq: 3, state: "final", message: "" } });
+    await bridge.settled();
+    assert.deepEqual(sent.map((event) => event["type"]), ["run.started", "message.post", "run.completed"]);
+    assert.equal(sent[1]?.["text"], "NO_REPLY");
+    assert.equal(sent.at(-1)?.["summary"], "NO_REPLY");
   });
 
   it("starts no run for a message's turn whose only word is an empty end: OpenClaw answered it in another turn", async () => {

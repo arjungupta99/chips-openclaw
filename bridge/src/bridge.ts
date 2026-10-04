@@ -118,6 +118,11 @@ interface Run {
   readonly uploaded: Map<string, string>;
   /** The answer as it was posted, files' notes and links included, for the run's summary. */
   reply?: string;
+  /**
+   * The answer's words as the model wrote them, from its `assistant` stream. OpenClaw leaves a
+   * `NO_REPLY` out of the chat it sends, so the turn ends with no words; this says it passed.
+   */
+  said?: string;
   /** The names of the files the answer carried. */
   sent?: string[];
   /** From the turn's `lifecycle` model phase and its `usage` stream, reported when it ends. */
@@ -399,16 +404,27 @@ function isDocument(file: RoomFile): boolean {
   return !/^(image|video|audio)\//.test(file.mimeType);
 }
 
+/** How an agent says it has nothing to say (Chips ADR 0105); Chips makes a post of only it a pass. */
+const NO_REPLY = "NO_REPLY";
+
+/** `NO_REPLY` alone, as a model writes it: in backticks, bold or quotes, or with a full stop. */
+function isNoReply(text: string): boolean {
+  return /^[\s`*_"'“”]*NO_REPLY[\s`*_"'“”.!]*$/.test(text);
+}
+
 /**
  * A file as OpenClaw takes one with a message: inline, as base64. A picture goes as an image for
- * the model to look at. An SVG goes as a file, whose text the model reads: no model takes one as a
+ * the model to look at. An SVG goes as text, which the model reads: no model takes one as a
  * picture. ASCII Art's design preview reached O2 as an image, and O2 said it had not loaded
- * (3 October 2026).
+ * (3 October 2026). Sent as a `file` it still did, since OpenClaw tells what a file is from its
+ * type alone and looks at anything `image/` as a picture: so its type says text, and its name
+ * still says SVG.
  */
 function inlined(fileName: string, mimeType: string, bytes: Buffer): Payload {
+  const svg = mimeType === "image/svg+xml";
   return {
-    type: mimeType.startsWith("image/") && mimeType !== "image/svg+xml" ? "image" : "file",
-    mimeType,
+    type: mimeType.startsWith("image/") && !svg ? "image" : "file",
+    mimeType: svg ? "text/plain" : mimeType,
     fileName,
     content: bytes.toString("base64"),
     sizeBytes: bytes.length,
@@ -1316,7 +1332,11 @@ export class Bridge {
 
   private finish(run: Run, clawRun: string, p: Payload): void {
     run.ended = true;
-    const text = textOf(p["message"]).trim();
+    // A turn that answered `NO_REPLY` passed (Chips ADR 0105): OpenClaw leaves the word out of its
+    // chat, so the bridge says it, and Chips makes the post the turn's pass, which the room never
+    // shows. Without it the run ended on "Answered together with other words, in one reply."
+    const said = textOf(p["message"]).trim();
+    const text = said === "" && run.media.length === 0 && isNoReply(run.said ?? "") ? NO_REPLY : said;
     // No `to`, even for an answer to another harness: it acts on the words only when they @ it.
     // Sending it back by itself kept Jacobian and OpenClaw trading thanks until Chips's guard
     // held the fifth (the live test, 27 September 2026).
@@ -1456,6 +1476,7 @@ export class Bridge {
       case "tool":
         return this.tool(run, p);
       case "assistant":
+        if (data["phase"] !== "commentary") run.said = str(data["text"]) ?? run.said;
         return this.named(run, data);
       default:
         return;
