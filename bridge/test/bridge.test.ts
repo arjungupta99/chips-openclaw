@@ -11,9 +11,11 @@ import {
   type ClawPort,
   type FilesPort,
   heardIn,
+  spentIn,
   textOf,
   titleFrom,
   usageOf,
+  withSpend,
   wordsOf,
 } from "../src/bridge.ts";
 import { type ChipsAgent, type ChipsEvent, ChipsRefusal, type Taken } from "../src/chips.ts";
@@ -42,6 +44,8 @@ let holdPosts: Taken | undefined;
 /** What Chips refuses a `message.post` with, if anything; and the signed URLs the bridge fetched. */
 let refusePost: ((event: ChipsEvent) => ChipsRefusal | undefined) | undefined;
 let fetched: string[] = [];
+/** A session's history as OpenClaw's `chat.history` answers it, or a failure to read it. */
+let history: unknown[] | Error = [];
 let bridge: Bridge;
 
 /** One of our agents as Chips lists it, in one room or in none. */
@@ -101,6 +105,10 @@ const chips: ChipsPort = {
 const claw: ClawPort = {
   request: async <T>(method: string, params: Record<string, unknown>) => {
     calls.push([method, params]);
+    if (method === "chat.history") {
+      if (history instanceof Error) throw history;
+      return { sessionKey: params["sessionKey"], messages: history } as T;
+    }
     return {} as T;
   },
 };
@@ -118,6 +126,7 @@ beforeEach(() => {
   holdPosts = undefined;
   refusePost = undefined;
   fetched = [];
+  history = [];
   bridge = new Bridge(chips, claw, { harnessId: ME, agent: "main" }, () => undefined);
 });
 
@@ -895,6 +904,133 @@ describe("words", () => {
     assert.equal(usageOf({ input: 1 }, "m"), undefined);
     assert.deepEqual(usageOf({ output: 232 }, "m"), { scope: "run", model: "m", output_tokens: 232 });
     assert.deepEqual(usageOf({ inputTokens: 3, outputTokens: 4 }, "m"), { scope: "run", model: "m", input_tokens: 3, output_tokens: 4 });
+  });
+});
+
+describe("what a turn cost (Chips ADRs 0117, 0118)", () => {
+  /** An assistant message as OpenClaw's history keeps it: one model call, priced. */
+  const call = (at: number, cost: number | undefined, input = 600, cacheRead = 16_000, output = 50) => ({
+    role: "assistant",
+    timestamp: at,
+    content: [{ type: "text", text: "…" }],
+    usage: {
+      input,
+      output,
+      cacheRead,
+      cacheWrite: 0,
+      ...(cost === undefined ? {} : { cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: cost } }),
+    },
+  });
+
+  it("adds up the priced model calls since the turn began, and nothing before it or unpriced", () => {
+    const messages = [
+      call(900, 0.4),
+      { role: "user", timestamp: 1_000, content: "In this room: …" },
+      call(1_010, 0.053264, 3_855, 11_264, 69),
+      { role: "toolResult", timestamp: 1_011, content: [] },
+      call(1_020, 0.056176, 1_745, 14_976, 475),
+      call(1_030, 0.02595, 661, 16_640, 54),
+      call(1_040, undefined),
+    ];
+    assert.deepEqual(spentIn(messages, 1_000), { usd: 0.13539, input: 49_141, output: 598 });
+    assert.equal(spentIn(messages, 2_000), undefined);
+    assert.equal(spentIn({}, 0), undefined);
+  });
+
+  it("puts the cost on the turn's usage, and its tokens in when its events never said them", () => {
+    const spent = { usd: 0.135, input: 49_141, output: 598 };
+    assert.deepEqual(withSpend({ scope: "run", model: "m", output_tokens: 598 }, spent, "m"), {
+      scope: "run",
+      model: "m",
+      output_tokens: 598,
+      input_tokens: 49_141,
+      cost: { usd: 0.135, estimated: true },
+    });
+    const own = { scope: "run", model: "m", input_tokens: 3, output_tokens: 4, cost: { usd: 1, estimated: true } };
+    assert.deepEqual(withSpend(own, spent, "m"), own, "a cost of its own is kept");
+    assert.deepEqual(withSpend(undefined, spent, "m"), {
+      scope: "run",
+      model: "m",
+      input_tokens: 49_141,
+      output_tokens: 598,
+      cost: { usd: 0.135, estimated: true },
+    });
+    assert.equal(withSpend(undefined, undefined, "m"), undefined);
+  });
+
+  /** A turn on the room's message, its usage stream, and its end. */
+  async function turn(): Promise<ChipsEvent | undefined> {
+    await bridge.onChips(said("Redesign SPARK"));
+    const r = "msg_01K4ZQPX0000000000000000A1";
+    bridge.onClaw({ event: "chat", payload: { runId: r, sessionKey: key(), seq: 1, state: "status" } });
+    bridge.onClaw({ event: "agent", payload: { runId: r, sessionKey: key(), stream: "usage", data: { outputTokens: 598 } } });
+    bridge.onClaw({
+      event: "chat",
+      payload: {
+        runId: r,
+        sessionKey: key(),
+        seq: 2,
+        state: "final",
+        message: { role: "assistant", content: [{ type: "text", text: "Done." }], usage: { input: 0, output: 0, totalTokens: 0 } },
+      },
+    });
+    await bridge.settled();
+    return sent.find((event) => event.type === "usage");
+  }
+
+  it("reports a turn's cost from OpenClaw's history of its session, read once it ends", async () => {
+    const now = Date.now();
+    history = [call(now - 60_000, 0.4), call(now + 5, 0.053264, 3_855, 11_264, 69), call(now + 10, 0.02595, 661, 16_640, 54)];
+    const usage = await turn();
+    assert.deepEqual(
+      calls.filter(([method]) => method === "chat.history"),
+      [["chat.history", { sessionKey: key(), limit: 50 }]],
+    );
+    assert.equal(usage?.["output_tokens"], 598);
+    assert.equal(usage?.["input_tokens"], 32_420);
+    assert.deepEqual(usage?.["cost"], { usd: 0.079214, estimated: true });
+    assert.deepEqual(
+      sent.map((event) => event.type),
+      ["run.started", "message.post", "usage", "run.completed"],
+      "in order, though the cost is read first",
+    );
+  });
+
+  it("reports the tokens alone when the history says no cost, or cannot be read", async () => {
+    history = new Error("chat.history is not allowed");
+    const usage = await turn();
+    assert.deepEqual(usage, {
+      type: "usage",
+      run_id: usage?.["run_id"],
+      scope: "run",
+      model: "openai",
+      output_tokens: 598,
+      idempotency_key: "openclaw-run:msg_01K4ZQPX0000000000000000A1:usage",
+    });
+  });
+
+  it("says in its log that a room's job reached its ceiling, and does nothing else", async () => {
+    const said: string[] = [];
+    bridge = new Bridge(chips, claw, { harnessId: ME, agent: "main" }, (line) => said.push(line));
+    const warning = (threshold: number, action: string, spent: number) => ({
+      type: "budget.warning",
+      space_id: ROOM,
+      budget: { limit_usd: 3, spent_usd: spent },
+      threshold,
+      action,
+      scope: "job",
+      since_seq: 40,
+    });
+    await bridge.onChips(warning(80, "warn", 2.41));
+    await bridge.onChips(warning(100, "pause", 3.02));
+    await bridge.onChips({ type: "budget.warning", budget: { limit_usd: 25, spent_usd: 20.4 }, threshold: 80, action: "warn" });
+    assert.deepEqual(said, [
+      `the job in ${ROOM} has spent $2.41 of $3.00 it allows`,
+      `chips paused the agents in ${ROOM}: its job has spent $3.02 of $3.00, all it allows; they wait for a person`,
+      "chips says this harness has spent $20.40 of $25.00 of its budget (warn)",
+    ]);
+    assert.deepEqual(sent, []);
+    assert.deepEqual(calls, []);
   });
 });
 

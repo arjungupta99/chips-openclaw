@@ -125,6 +125,8 @@ interface Run {
   said?: string;
   /** The names of the files the answer carried. */
   sent?: string[];
+  /** When the bridge first heard of the turn: its model calls in OpenClaw's history are after it. */
+  readonly startedAt: number;
   /** From the turn's `lifecycle` model phase and its `usage` stream, reported when it ends. */
   model?: string;
   inputTokens?: number;
@@ -307,6 +309,55 @@ export function usageOf(usage: unknown, fallbackModel: string): Payload | undefi
     ...(input === undefined ? {} : { input_tokens: input }),
     output_tokens: output,
     ...(cost === undefined || cost <= 0 ? {} : { cost: { usd: cost, estimated: true } }),
+  };
+}
+
+/** What a turn's model calls cost in all, and the tokens they took in and gave out. */
+export interface Spent {
+  readonly usd: number;
+  readonly input: number;
+  readonly output: number;
+}
+
+/**
+ * What the model calls in a session's history since `since` (ms) cost: each assistant message
+ * OpenClaw priced, `usage.cost.total`, its tokens in (fresh, cached and written to the cache) and
+ * out. Nothing when none since was priced.
+ */
+export function spentIn(messages: unknown, since: number): Spent | undefined {
+  if (!Array.isArray(messages)) return undefined;
+  let usd = 0;
+  let input = 0;
+  let output = 0;
+  let priced = false;
+  for (const message of messages) {
+    if (message === null || typeof message !== "object") continue;
+    const m = message as Payload;
+    if (m["role"] !== "assistant" || !((num(m["timestamp"]) ?? -1) >= since)) continue;
+    const usage = (m["usage"] ?? {}) as Payload;
+    const total = num((usage["cost"] as Payload | undefined)?.["total"]);
+    if (total === undefined || total <= 0) continue;
+    priced = true;
+    usd += total;
+    input += (num(usage["input"]) ?? 0) + (num(usage["cacheRead"]) ?? 0) + (num(usage["cacheWrite"]) ?? 0);
+    output += num(usage["output"]) ?? 0;
+  }
+  return priced ? { usd: Math.round(usd * 1e6) / 1e6, input, output } : undefined;
+}
+
+/**
+ * The turn's usage with what its history says it cost: the cost, and its tokens in when its
+ * events never said them. A cost the turn's own events carried is kept. With no tokens from its
+ * events, the history's alone.
+ */
+export function withSpend(usage: Payload | undefined, spent: Spent | undefined, model: string): Payload | undefined {
+  if (spent === undefined) return usage;
+  const base = usage ?? usageOf({ input: spent.input, output: spent.output }, model);
+  if (base === undefined) return undefined;
+  return {
+    ...base,
+    ...(base["input_tokens"] === undefined && spent.input > 0 ? { input_tokens: spent.input } : {}),
+    ...(base["cost"] === undefined ? { cost: { usd: spent.usd, estimated: true } } : {}),
   };
 }
 
@@ -852,8 +903,46 @@ export class Bridge {
         return this.decided(event);
       case "question.answered":
         return this.answered(event);
+      // A room's job at 80% of its spend ceiling, or at it (Chips ADR 0118). OpenClaw runs a turn
+      // per message and chains none of its own, so there is nothing to stop: Chips holds what our
+      // agents say to each other there, and a person's next word is a new job. Said in the log.
+      case "budget.warning":
+        return this.budgeted(event);
       default:
         return;
+    }
+  }
+
+  private budgeted(event: ChipsEvent): void {
+    const budget = (event["budget"] ?? {}) as Payload;
+    const figures = `$${(num(budget["spent_usd"]) ?? 0).toFixed(2)} of $${(num(budget["limit_usd"]) ?? 0).toFixed(2)}`;
+    if (event["scope"] !== "job") {
+      this.log(`chips says this harness has spent ${figures} of its budget (${String(event["action"])})`);
+      return;
+    }
+    const room = str(event["space_id"]) ?? "a room";
+    this.log(
+      event["action"] === "pause"
+        ? `chips paused the agents in ${room}: its job has spent ${figures}, all it allows; they wait for a person`
+        : `the job in ${room} has spent ${figures} it allows`,
+    );
+  }
+
+  /**
+   * What a turn cost, as OpenClaw's history of the session prices each of its model calls: the
+   * assistant messages since the turn began, each with `usage.cost.total`. Nothing when the
+   * history says no cost, or cannot be read; the turn's tokens are still reported.
+   */
+  private async spentBy(run: Run): Promise<Spent | undefined> {
+    try {
+      const history = await this.claw.request<{ messages?: unknown }>("chat.history", {
+        sessionKey: run.sessionKey,
+        limit: 50,
+      });
+      return spentIn(history.messages, run.startedAt);
+    } catch (error) {
+      this.log(`could not read what ${run.chipsRun} cost from OpenClaw's history: ${String(error)}`);
+      return undefined;
     }
   }
 
@@ -1259,6 +1348,7 @@ export class Bridge {
       ended: false,
       media: [],
       uploaded: new Map(),
+      startedAt: Date.now(),
     };
     this.runs.set(clawRun, run);
     this.runByChips.set(run.chipsRun, run);
@@ -1359,12 +1449,17 @@ export class Bridge {
       });
     }
     const model = run.model ?? str(p["model"]) ?? "openai";
-    const usage =
+    const streamed =
       usageOf(p["usage"], model) ??
       usageOf({ inputTokens: run.inputTokens, outputTokens: run.outputTokens }, model);
-    if (usage !== undefined) {
-      this.write(run, { type: "usage", run_id: run.chipsRun, ...usage, idempotency_key: `openclaw-run:${clawRun}:usage` });
-    }
+    // What the turn cost, from OpenClaw's own history of it: its events carry tokens and no cost,
+    // and a room's job is counted from what its runs cost (Chips ADRs 0117, 0118).
+    this.write(run, async () => {
+      const usage = withSpend(streamed, await this.spentBy(run), model);
+      return usage === undefined
+        ? undefined
+        : { type: "usage", run_id: run.chipsRun, ...usage, idempotency_key: `openclaw-run:${clawRun}:usage` };
+    });
     if (run.contextTokens !== undefined && run.contextWindow !== undefined && run.contextWindow > 0) {
       this.write(run, {
         type: "context.usage",
