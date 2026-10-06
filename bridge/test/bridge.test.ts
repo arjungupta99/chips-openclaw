@@ -996,6 +996,61 @@ describe("what a turn cost (Chips ADRs 0117, 0118)", () => {
     );
   });
 
+  it("says what a turn has cost so far while it works: at a tool's end, at most every 15 s from its start, and only when it grew (LJ-6)", async () => {
+    // Long jobs C, 5 October 2026: one of O3's checks took a $0.50 room's job from $0.27 to $0.95
+    // in one report, at its end, so Chips drew no 80% line and held nobody until it was over.
+    let clock = 1_000_000;
+    bridge = new Bridge(chips, claw, { harnessId: ME, agent: "main" }, () => undefined, undefined, () => clock);
+    await bridge.onChips(said("Check the tour's facts"));
+    const r = "msg_01K4ZQPX0000000000000000B2";
+    const tool = (seq: number, phase: string, id: string) =>
+      bridge.onClaw({ event: "agent", payload: { runId: r, sessionKey: key(), seq, stream: "tool", data: { phase, name: "web_search", toolCallId: id } } });
+    const usages = () =>
+      sent
+        .filter((event) => event.type === "usage")
+        .map((event) => [event["idempotency_key"], (event["cost"] as { usd: number } | undefined)?.usd]);
+    bridge.onClaw({ event: "chat", payload: { runId: r, sessionKey: key(), seq: 1, state: "status" } });
+
+    // Within its first 15 s: nothing yet.
+    history = [call(clock + 1_000, 0.2)];
+    clock += 5_000;
+    tool(2, "start", "call_1");
+    tool(3, "end", "call_1");
+    await bridge.settled();
+    assert.deepEqual(usages(), []);
+
+    clock += 15_000;
+    tool(4, "start", "call_2");
+    tool(5, "end", "call_2");
+    await bridge.settled();
+    assert.deepEqual(usages(), [[`openclaw-run:${r}:usage-so-far-1`, 0.2]]);
+
+    // Five seconds on: not yet; and fifteen on, nothing more spent, nothing said.
+    history = [...history, call(clock + 1_000, 0.25)];
+    clock += 5_000;
+    tool(6, "end", "call_3");
+    await bridge.settled();
+    assert.equal(usages().length, 1);
+    clock += 15_000;
+    tool(7, "end", "call_4");
+    await bridge.settled();
+    assert.deepEqual(usages().at(-1), [`openclaw-run:${r}:usage-so-far-2`, 0.45]);
+    clock += 15_000;
+    tool(8, "end", "call_5");
+    await bridge.settled();
+    assert.equal(usages().length, 2);
+
+    history = [...history, call(clock + 1_000, 0.05)];
+    bridge.onClaw({
+      event: "chat",
+      payload: { runId: r, sessionKey: key(), seq: 9, state: "final", message: { role: "assistant", content: [{ type: "text", text: "Checked." }] } },
+    });
+    await bridge.settled();
+    assert.deepEqual(usages().at(-1), [`openclaw-run:${r}:usage`, 0.5], "the end's report is the total");
+    assert.equal(sent.at(-1)?.type, "run.completed");
+    assert.ok(usages().every(([key]) => String(key).startsWith(`openclaw-run:${r}:`)));
+  });
+
   it("reports the tokens alone when the history says no cost, or cannot be read", async () => {
     history = new Error("chat.history is not allowed");
     const usage = await turn();

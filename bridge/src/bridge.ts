@@ -97,6 +97,9 @@ const NO_FILES: FilesPort = {
 /** As many files as one Chips post takes. */
 const MAX_FILES = 20;
 
+/** How often, at most, a turn says what it has cost so far while it works (LJ-6). */
+const COST_EVERY_MS = 15_000;
+
 interface Run {
   readonly chipsRun: string;
   /**
@@ -127,6 +130,13 @@ interface Run {
   sent?: string[];
   /** When the bridge first heard of the turn: its model calls in OpenClaw's history are after it. */
   readonly startedAt: number;
+  /**
+   * When the turn last said its cost so far, from when it began, and what it said, how many times
+   * (LJ-6): so a turn shorter than that says it once, at its end, as ever.
+   */
+  costAt: number;
+  costUsd: number;
+  costCount: number;
   /** From the turn's `lifecycle` model phase and its `usage` stream, reported when it ends. */
   model?: string;
   inputTokens?: number;
@@ -549,6 +559,7 @@ export class Bridge {
     private readonly self: { readonly harnessId: string; readonly agent: string },
     private readonly log: (message: string) => void,
     private readonly files: FilesPort = NO_FILES,
+    private readonly now: () => number = Date.now,
   ) {
     this.primary = self.agent;
   }
@@ -1348,7 +1359,10 @@ export class Bridge {
       ended: false,
       media: [],
       uploaded: new Map(),
-      startedAt: Date.now(),
+      startedAt: this.now(),
+      costAt: this.now(),
+      costUsd: 0,
+      costCount: 0,
     };
     this.runs.set(clawRun, run);
     this.runByChips.set(run.chipsRun, run);
@@ -1605,6 +1619,33 @@ export class Bridge {
       tool: str(data["name"]) ?? "tool",
       ...(summaryOf(data) === undefined ? {} : { summary: summaryOf(data) }),
       idempotency_key: `openclaw-step:${stepId}:${status}`,
+    });
+    const clawRun = str(p["runId"]);
+    if (phase !== "start" && clawRun !== undefined) this.costSoFar(run, clawRun);
+  }
+
+  /**
+   * What the turn has cost so far, every so often while it works (LJ-6): read from OpenClaw's
+   * history of the session, which prices each model call as it returns, at a tool's end, at most
+   * every 15 s from the turn's start, and said only when it grew. Chips weighs the room's job after
+   * each `usage` (its ADR 0118), so it warns at 80% and holds the agents at the ceiling while the
+   * turn works. Until 5 October 2026 a turn said its cost once, at its end, and one of O3's checks
+   * took a $0.50 room's job from $0.27 to $0.95 in one report (long jobs C). Each report is the
+   * run's total so far, under a key of its own; the end's is still the total.
+   */
+  private costSoFar(run: Run, clawRun: string): void {
+    const at = this.now();
+    if (run.spaceId === undefined || at - run.costAt < COST_EVERY_MS) return;
+    run.costAt = at;
+    this.write(run, async () => {
+      const spent = await this.spentBy(run);
+      if (spent === undefined || spent.usd <= run.costUsd) return undefined;
+      run.costUsd = spent.usd;
+      run.costCount += 1;
+      const usage = withSpend(undefined, spent, run.model ?? "openai");
+      return usage === undefined
+        ? undefined
+        : { type: "usage", run_id: run.chipsRun, ...usage, idempotency_key: `openclaw-run:${clawRun}:usage-so-far-${run.costCount}` };
     });
   }
 
