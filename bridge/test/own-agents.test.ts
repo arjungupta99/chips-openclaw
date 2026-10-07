@@ -70,4 +70,20 @@ describe("the OpenClaw agents the bridge makes", () => {
     assert.equal(existsSync(join(folder, "SOUL.md")), true);
     await workspaces.settle("chips-01k4");
   });
+
+  it("clears the empty folders a deleted agent leaves, and keeps one with anything in it", async () => {
+    const workspaces = workspacesIn(rootsFor(sandbox));
+    const folder = join(sandbox, "state", "chips", "chips-01k4");
+    const state = join(sandbox, "state", "agents", "chips-01k4");
+    mkdirSync(folder, { recursive: true });
+    mkdirSync(state, { recursive: true });
+    await workspaces.clear("chips-01k4");
+    assert.equal(existsSync(folder), false);
+    assert.equal(existsSync(state), false);
+    mkdirSync(folder, { recursive: true });
+    writeFileSync(join(folder, "kept.md"), "not OpenClaw's to lose");
+    await workspaces.clear("chips-01k4");
+    assert.equal(existsSync(join(folder, "kept.md")), true);
+    await workspaces.clear("chips-01k9");
+  });
 });

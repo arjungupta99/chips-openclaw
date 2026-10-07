@@ -19,7 +19,7 @@
  */
 
 import { constants } from "node:fs";
-import { copyFile, mkdir, rm } from "node:fs/promises";
+import { copyFile, mkdir, rm, rmdir } from "node:fs/promises";
 import { join, posix } from "node:path";
 import type { MediaRoots } from "./media.ts";
 
@@ -47,6 +47,11 @@ export interface Workspaces {
   seed(agent: string): Promise<void>;
   /** A made agent's folder, without the first-run ritual OpenClaw puts in a new one. */
   settle(agent: string): Promise<void>;
+  /**
+   * What a deleted agent left: OpenClaw moves its files to a trash inside its container and leaves
+   * the empty folders they were in (`agents/<agent>`, `chips/<agent>`). Only an empty one goes.
+   */
+  clear(agent: string): Promise<void>;
 }
 
 /** Folders under OpenClaw's state, which is mounted from this Mac (`media.ts`). */
@@ -72,6 +77,15 @@ export function workspacesIn(roots: MediaRoots): Workspaces {
     },
     settle: async (agent) => {
       await rm(join(onMac(of(agent)), "BOOTSTRAP.md"), { force: true });
+    },
+    clear: async (agent) => {
+      for (const folder of [onMac(of(agent)), join(roots.stateDir, "agents", agent)]) {
+        try {
+          await rmdir(folder);
+        } catch {
+          // Not there, or not empty: kept.
+        }
+      }
     },
   };
 }

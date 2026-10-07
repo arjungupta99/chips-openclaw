@@ -105,6 +105,7 @@ const NO_WORKSPACES: Workspaces = {
   of: (agent) => `/home/node/.openclaw/chips/${agent}`,
   seed: async () => undefined,
   settle: async () => undefined,
+  clear: async () => undefined,
 };
 
 /** As many files as one Chips post takes. */
@@ -816,11 +817,12 @@ export class Bridge {
   /**
    * An OpenClaw agent of ours deleted, folder, memory and conversations, as deleting one of
    * Jacobian's agents deletes its Space (Chips ADR 0095). OpenClaw moves the files to its trash,
-   * which is inside its container.
+   * which is inside its container, about a megabyte an agent; the empty folders it leaves go.
    */
   private async removeClawAgent(agent: string): Promise<void> {
     try {
       await this.claw.request("agents.delete", { agentId: agent, deleteFiles: true });
+      await this.workspaces.clear(agent);
       this.log(`openclaw: deleted agent ${agent}`);
     } catch (error) {
       this.log(`openclaw: could not delete agent ${agent}: ${String(error)}`);
