@@ -43,7 +43,11 @@ export function rootsFor(sandbox: string): MediaRoots {
   };
 }
 
-export async function readMedia(reference: string, roots: MediaRoots): Promise<Media> {
+/**
+ * A file a turn named, read on this Mac. A relative path starts in the workspace of the agent whose
+ * turn it was (`workspace`, as the gateway sees it), else in the primary agent's.
+ */
+export async function readMedia(reference: string, roots: MediaRoots, workspace?: string): Promise<Media> {
   const said = reference.trim();
   if (/^https?:\/\//i.test(said)) return { kind: "link", url: said };
   let path = said;
@@ -57,7 +61,7 @@ export async function readMedia(reference: string, roots: MediaRoots): Promise<M
   // The gateway's home is where its state is kept.
   if (path.startsWith("~/")) path = posix.join(posix.dirname(roots.gatewayStateDir), path.slice(2));
   const name = posix.basename(path) || said;
-  const inGateway = posix.resolve(roots.gatewayWorkspaceDir, path);
+  const inGateway = posix.resolve(workspace ?? roots.gatewayWorkspaceDir, path);
   const underState = posix.relative(roots.gatewayStateDir, inGateway);
   if (underState === "" || underState.startsWith("..") || posix.isAbsolute(underState)) {
     return { kind: "refused", name, why: "it is outside OpenClaw's folder" };

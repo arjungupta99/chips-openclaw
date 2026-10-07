@@ -26,7 +26,8 @@ and Chips's own guard fails if anything of OpenClaw appears in Chips.
 ## Where things are kept
 
 Everything OpenClaw and the bridge keep is under `~/chips-openclaw/`:
-- `state/`: OpenClaw's config, sessions, workspace and logs
+- `state/`: OpenClaw's config, sessions, workspace and logs; `state/chips/<agent>/` is the folder of
+  each OpenClaw agent the bridge made for an agent in Chips (`bridge/src/own-agents.ts`)
 - `secrets/`: its sign-in
 - `.env`: the gateway token
 - `bridge/`: the bridge's device key, one cursor per Chips harness, its log, `chips.env` (the scratch

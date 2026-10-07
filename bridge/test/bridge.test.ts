@@ -46,6 +46,9 @@ let refusePost: ((event: ChipsEvent) => ChipsRefusal | undefined) | undefined;
 let fetched: string[] = [];
 /** A session's history as OpenClaw's `chat.history` answers it, or a failure to read it. */
 let history: unknown[] | Error = [];
+/** The gateway methods OpenClaw refuses, and the agents its `agents.list` names. */
+let refuseClaw = new Set<string>();
+let clawAgents: { id: string }[] = [];
 let bridge: Bridge;
 
 /** One of our agents as Chips lists it, in one room or in none. */
@@ -105,6 +108,8 @@ const chips: ChipsPort = {
 const claw: ClawPort = {
   request: async <T>(method: string, params: Record<string, unknown>) => {
     calls.push([method, params]);
+    if (refuseClaw.has(method)) throw new Error(`${method} refused`);
+    if (method === "agents.list") return { agents: clawAgents } as T;
     if (method === "chat.history") {
       if (history instanceof Error) throw history;
       return { sessionKey: params["sessionKey"], messages: history } as T;
@@ -127,6 +132,8 @@ beforeEach(() => {
   refusePost = undefined;
   fetched = [];
   history = [];
+  refuseClaw = new Set();
+  clawAgents = [];
   bridge = new Bridge(chips, claw, { harnessId: ME, agent: "main" }, () => undefined);
 });
 
@@ -141,13 +148,20 @@ describe("rooms and sessions", () => {
     assert.equal(key(), "agent:main:chips-spc_01k4zqpx000000000000000002");
     assert.equal(bridge.spaceFor(key()), ROOM);
     assert.equal(bridge.spaceFor("agent:main:main"), undefined);
-    // A claim's key has a shape of its own, and so do sessions named for whose they are.
-    assert.equal(bridge.claimKeyFor(ROOM), "agent:main:chips-spc_01k4zqpx000000000000000002:asked");
+    // A claim's key is the room's session of the OpenClaw agent made for it, and so is a new
+    // agent's; where none could be made, a session of the primary agent's of its own shape.
+    assert.equal(bridge.claimKeyFor(ROOM), "agent:chips-01k4zqpx000000000000000002:chips-spc_01k4zqpx000000000000000002");
+    assert.equal(bridge.spaceFor(bridge.claimKeyFor(ROOM)), ROOM);
+    assert.equal(bridge.agentFor(bridge.claimKeyFor(ROOM)), "chips-01k4zqpx000000000000000002");
+    assert.equal(
+      bridge.madeKeyFor(ROOM, "evt_01K4ZQPX0000000000000000N1"),
+      "agent:chips-01k4zqpx0000000000000000n1:chips-spc_01k4zqpx000000000000000002",
+    );
     for (const whose of ["asked", "own", "default", "made-01k4zqpx0000000000000000n1"]) {
       assert.equal(bridge.spaceFor(`${key()}:${whose}`), ROOM);
     }
     assert.equal(
-      bridge.madeKeyFor(ROOM, "evt_01K4ZQPX0000000000000000N1"),
+      bridge.madeKeyFor(ROOM, "evt_01K4ZQPX0000000000000000N1", false),
       "agent:main:chips-spc_01k4zqpx000000000000000002:made-01k4zqpx0000000000000000n1",
     );
     assert.equal(bridge.spaceFor(`${key()}:somebody`), undefined);
@@ -1175,7 +1189,7 @@ describe("OpenClaw's agents as agents in Chips (Chips ADR 0087)", () => {
     const reviewer = `agt_${session}`;
     await bridge.onChips({ type: "agent.attached", space_id: ROOM, agent_id: reviewer });
     await bridge.onChips(said("@Reviewer check A–M", { addressed_to: [reviewer], for: [reviewer] }));
-    // Its own conversation, on the primary agent: not the main agent's session in the room.
+    // Its own conversation, of its own OpenClaw agent: not the main agent's session in the room.
     assert.equal(calls.find(([method]) => method === "chat.send")?.[1]["sessionKey"], session);
     bridge.onClaw({ event: "chat", payload: { runId: "msg_01K4ZQPX0000000000000000A1", sessionKey: session, seq: 1, state: "final", message: "On it." } });
     await bridge.settled();
@@ -1691,5 +1705,112 @@ describe("OpenClaw's agents as agents in Chips (Chips ADR 0087)", () => {
     await bridge.settled();
     assert.deepEqual(attached, []);
     assert.deepEqual(sent.find((event) => event.type === "message.post")?.["actor"], { kind: "agent", id: "agt_main" });
+  });
+});
+
+describe("an OpenClaw agent of its own for each agent Chips asks for", () => {
+  const ASKED = "spc_01K4ZQPX000000000000000099";
+  const MADE = "chips-01k4zqpx000000000000000099";
+  const OTHER_ROOM = "spc_01K4ZQPX000000000000000077";
+
+  it("makes one for a room asked from the +, takes the turn in it, and names it as Chips named its agent", async () => {
+    await bridge.adoptAgents({ defaultId: "main", agents: [{ id: "main" }] });
+    calls = [];
+    await bridge.onChips({ type: "space.created", space_id: ASKED, asked_of: ME, kind: "direct" });
+    await bridge.onChips(said("Plan a picnic", { space_id: ASKED, addressed_to: [ME], for: [ME] }));
+    const session = bridge.keyFor(ASKED, MADE);
+    assert.deepEqual(calls.map(([method]) => method), ["agents.create", "sessions.create", "agents.update", "chat.send"]);
+    assert.deepEqual(calls[0]?.[1], { name: MADE, workspace: `/home/node/.openclaw/chips/${MADE}` });
+    assert.deepEqual(calls[1]?.[1], { key: session, agentId: MADE, displayName: "Plan a picnic" });
+    assert.deepEqual(calls[2]?.[1], { agentId: MADE, name: "OpenClaw" });
+    assert.equal(calls[3]?.[1]["sessionKey"], session);
+    assert.deepEqual(claims.map(([room, claimKey]) => [room, claimKey]), [[ASKED, session]]);
+  });
+
+  it("claims the room on the primary agent, as before, when OpenClaw will not make one", async () => {
+    refuseClaw = new Set(["agents.create"]);
+    await bridge.onChips({ type: "space.created", space_id: ASKED, asked_of: ME, kind: "direct" });
+    await bridge.onChips(said("Plan a picnic", { space_id: ASKED, addressed_to: [ME], for: [ME] }));
+    const fallback = `${bridge.keyFor(ASKED)}:asked`;
+    assert.deepEqual(calls.map(([method]) => method), ["agents.create", "agents.list", "sessions.create", "chat.send"]);
+    assert.deepEqual(calls[2]?.[1], { key: fallback, agentId: "main", displayName: "Plan a picnic" });
+    assert.equal(calls[3]?.[1]["sessionKey"], fallback);
+    assert.deepEqual(claims.map(([room, claimKey]) => [room, claimKey]), [[ASKED, fallback]]);
+  });
+
+  it("takes one OpenClaw has already, made before a restart, as made", async () => {
+    refuseClaw = new Set(["agents.create"]);
+    clawAgents = [{ id: "main" }, { id: MADE }];
+    await bridge.onChips({ type: "space.created", space_id: ASKED, asked_of: ME, kind: "direct" });
+    await bridge.onChips(said("Plan a picnic", { space_id: ASKED, addressed_to: [ME], for: [ME] }));
+    assert.equal(calls.find(([method]) => method === "chat.send")?.[1]["sessionKey"], bridge.keyFor(ASKED, MADE));
+  });
+
+  it("makes one for a new agent asked for in a room, named as Chips named the agent (ADR 0108)", async () => {
+    const ask = "evt_01K4ZQPX0000000000000000N1";
+    const made = "chips-01k4zqpx0000000000000000n1";
+    await bridge.onChips({ type: "agent.asked", id: ask, ts: new Date().toISOString(), space_id: ROOM, harness_id: ME, name: "Reviewer", by: ARJUN.participant_id });
+    assert.deepEqual(calls.map(([method]) => method), ["agents.create", "agents.update"]);
+    assert.deepEqual(calls[1]?.[1], { agentId: made, name: "Reviewer" });
+    assert.deepEqual(registered, [{ key: bridge.keyFor(ROOM, made), name: "Reviewer", made_for: ask, space_id: ROOM }]);
+  });
+
+  it("unmakes the OpenClaw agent of a new agent Chips refuses", async () => {
+    const refusing: ChipsPort = {
+      ...chips,
+      registerAgent: async () => {
+        throw new ChipsRefusal(409, "conflict", "That room has an agent of that name.");
+      },
+    };
+    const quiet = new Bridge(refusing, claw, { harnessId: ME, agent: "main" }, () => undefined);
+    await quiet.onChips({ type: "agent.asked", id: "evt_01K4ZQPX0000000000000000N1", ts: new Date().toISOString(), space_id: ROOM, harness_id: ME, name: "Reviewer", by: ARJUN.participant_id });
+    assert.deepEqual(calls.map(([method]) => method), ["agents.create", "agents.delete"]);
+    assert.deepEqual(calls[1]?.[1], { agentId: "chips-01k4zqpx0000000000000000n1", deleteFiles: true });
+  });
+
+  it("deletes the OpenClaw agent it made when its agent is deleted in Chips, and never one it did not make", async () => {
+    agents = [agentIn("agt_main", "main", OTHER_ROOM), agentIn("agt_made", bridge.keyFor(ROOM, MADE), ROOM, "O3")];
+    await bridge.adoptAgents({ defaultId: "main", agents: [{ id: "main" }] });
+    calls = [];
+    await bridge.onChips({ type: "agent.deleted", agent_id: "agt_made", harness_id: ME, key: bridge.keyFor(ROOM, MADE), name: "O3", by: ARJUN.participant_id });
+    await bridge.onChips({ type: "agent.deleted", agent_id: "agt_main", harness_id: ME, key: "main", name: "OpenClaw", by: ARJUN.participant_id });
+    assert.deepEqual(calls, [["agents.delete", { agentId: MADE, deleteFiles: true }]]);
+    assert.equal(bridge.isOwn("agt_made"), false);
+  });
+
+  it("renames the OpenClaw agent it made when Chips renames its agent, and no other", async () => {
+    agents = [agentIn("agt_main", "main", OTHER_ROOM), agentIn("agt_made", bridge.keyFor(ROOM, MADE), ROOM, "O3")];
+    await bridge.adoptAgents({ defaultId: "main", agents: [{ id: "main" }] });
+    calls = [];
+    await bridge.onChips({ type: "agent.updated", agent_id: "agt_made", name: "Scout" });
+    await bridge.onChips({ type: "agent.updated", agent_id: "agt_main", name: "Main" });
+    assert.deepEqual(calls, [["agents.update", { agentId: MADE, name: "Scout" }]]);
+  });
+
+  it("does not take the agents it made as OpenClaw agents of their own when it lists OpenClaw's", async () => {
+    await bridge.adoptAgents({ defaultId: "main", agents: [{ id: "main" }, { id: MADE }, { id: "scout", name: "Scout" }] });
+    assert.deepEqual(registered.map((each) => each["key"]), ["main", "scout"]);
+  });
+
+  it("reads a file a made agent's answer names from its own folder", async () => {
+    const asked: [string, string | undefined][] = [];
+    const files: FilesPort = {
+      read: async (reference, workspace) => {
+        asked.push([reference, workspace]);
+        return { kind: "file", filename: reference, bytes: Buffer.from("page") };
+      },
+    };
+    const session = bridge.keyFor(ROOM, MADE);
+    agents = [agentIn("agt_made", session, ROOM, "O3")];
+    bridge = new Bridge(chips, claw, { harnessId: ME, agent: "main" }, () => undefined, files);
+    await bridge.adoptAgents({ defaultId: "main", agents: [{ id: "main" }] });
+    await bridge.onChips(said("@O3 make a page", { addressed_to: ["agt_made"], for: ["agt_made"] }));
+    const R1 = `msg_01K4ZQPX0000000000000000A1:${MADE}`;
+    const stream = { runId: R1, sessionKey: session, stream: "assistant" };
+    bridge.onClaw({ event: "chat", payload: { runId: R1, sessionKey: session, seq: 1, state: "status" } });
+    bridge.onClaw({ event: "agent", payload: { ...stream, seq: 2, data: { text: "Here.", delta: "", mediaUrls: ["page.html"], phase: "final_answer" } } });
+    bridge.onClaw({ event: "chat", payload: { runId: R1, sessionKey: session, seq: 3, state: "final", message: "Here." } });
+    await bridge.settled();
+    assert.deepEqual(asked, [["page.html", `/home/node/.openclaw/chips/${MADE}`]]);
   });
 });

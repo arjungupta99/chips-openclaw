@@ -77,3 +77,12 @@ describe("an answer's files, read where OpenClaw keeps them", () => {
     assert.equal(refusal(await read("/home/node/.openclaw/workspace/empty.txt")), "it is empty");
   });
 });
+
+describe("a made agent's files", () => {
+  it("reads a relative path from the agent's own folder when the turn was its", async () => {
+    mkdirSync(join(sandbox, "state", "chips", "chips-01k4"), { recursive: true });
+    writeFileSync(join(sandbox, "state", "chips", "chips-01k4", "page.html"), "<html>its own</html>");
+    assert.equal(file(await readMedia("page.html", roots, "/home/node/.openclaw/chips/chips-01k4")).text, "<html>its own</html>");
+    assert.equal(refusal(await readMedia("page.html", roots)), "it is not there");
+  });
+});
