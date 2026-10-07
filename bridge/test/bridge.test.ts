@@ -52,7 +52,7 @@ let history: unknown[] | Error = [];
  * after it answers.
  */
 let refuseClaw = new Set<string>();
-let clawAgents: { id: string }[] = [];
+let clawAgents: { id: string; name?: string }[] = [];
 let listLag = 0;
 let bridge: Bridge;
 
@@ -119,6 +119,10 @@ const claw: ClawPort = {
   request: async <T>(method: string, params: Record<string, unknown>) => {
     calls.push([method, params]);
     if (refuseClaw.has(method)) throw new Error(`${method} refused`);
+    if (method === "agents.update") {
+      const named = clawAgents.find((each) => each.id === params["agentId"]);
+      if (named !== undefined) named.name = String(params["name"]);
+    }
     if (method === "agents.create") {
       const made = { id: String(params["name"]) };
       if (listLag === 0) clawAgents.push(made);
@@ -1742,11 +1746,13 @@ describe("an OpenClaw agent of its own for each agent Chips asks for", () => {
     await bridge.onChips({ type: "space.created", space_id: ASKED, asked_of: ME, kind: "direct" });
     await bridge.onChips(said("Plan a picnic", { space_id: ASKED, addressed_to: [ME], for: [ME] }));
     const session = bridge.keyFor(ASKED, MADE);
-    assert.deepEqual(calls.map(([method]) => method), ["agents.create", "agents.list", "sessions.create", "agents.update", "chat.send"]);
+    // Made, then listed; named, then listed by that name: each a config change the gateway takes
+    // in before the agent is sent a turn.
+    assert.deepEqual(calls.map(([method]) => method), ["agents.create", "agents.list", "sessions.create", "agents.update", "agents.list", "chat.send"]);
     assert.deepEqual(calls[0]?.[1], { name: MADE, workspace: `/home/node/.openclaw/chips/${MADE}` });
     assert.deepEqual(calls[2]?.[1], { key: session, agentId: MADE, displayName: "Plan a picnic" });
     assert.deepEqual(calls[3]?.[1], { agentId: MADE, name: "OpenClaw" });
-    assert.equal(calls[4]?.[1]["sessionKey"], session);
+    assert.equal(calls[5]?.[1]["sessionKey"], session);
     assert.deepEqual(claims.map(([room, claimKey]) => [room, claimKey]), [[ASKED, session]]);
   });
 
@@ -1754,7 +1760,7 @@ describe("an OpenClaw agent of its own for each agent Chips asks for", () => {
     listLag = 3;
     await bridge.onChips({ type: "space.created", space_id: ASKED, asked_of: ME, kind: "direct" });
     await bridge.onChips(said("Plan a picnic", { space_id: ASKED, addressed_to: [ME], for: [ME] }));
-    assert.deepEqual(calls.map(([method]) => method), ["agents.create", "agents.list", "agents.list", "agents.list", "sessions.create", "agents.update", "chat.send"]);
+    assert.deepEqual(calls.map(([method]) => method), ["agents.create", "agents.list", "agents.list", "agents.list", "sessions.create", "agents.update", "agents.list", "chat.send"]);
     assert.equal(calls.find(([method]) => method === "chat.send")?.[1]["sessionKey"], bridge.keyFor(ASKED, MADE));
   });
 
@@ -1781,7 +1787,7 @@ describe("an OpenClaw agent of its own for each agent Chips asks for", () => {
     const ask = "evt_01K4ZQPX0000000000000000N1";
     const made = "chips-01k4zqpx0000000000000000n1";
     await bridge.onChips({ type: "agent.asked", id: ask, ts: new Date().toISOString(), space_id: ROOM, harness_id: ME, name: "Reviewer", by: ARJUN.participant_id });
-    assert.deepEqual(calls.map(([method]) => method), ["agents.create", "agents.list", "agents.update"]);
+    assert.deepEqual(calls.map(([method]) => method), ["agents.create", "agents.list", "agents.update", "agents.list"]);
     assert.deepEqual(calls[2]?.[1], { agentId: made, name: "Reviewer" });
     assert.deepEqual(registered, [{ key: bridge.keyFor(ROOM, made), name: "Reviewer", made_for: ask, space_id: ROOM }]);
   });
@@ -1813,9 +1819,10 @@ describe("an OpenClaw agent of its own for each agent Chips asks for", () => {
     agents = [agentIn("agt_main", "main", OTHER_ROOM), agentIn("agt_made", bridge.keyFor(ROOM, MADE), ROOM, "O3")];
     await bridge.adoptAgents({ defaultId: "main", agents: [{ id: "main" }] });
     calls = [];
+    clawAgents = [{ id: "main" }, { id: MADE, name: "O3" }];
     await bridge.onChips({ type: "agent.updated", agent_id: "agt_made", name: "Scout" });
     await bridge.onChips({ type: "agent.updated", agent_id: "agt_main", name: "Main" });
-    assert.deepEqual(calls, [["agents.update", { agentId: MADE, name: "Scout" }]]);
+    assert.deepEqual(calls, [["agents.update", { agentId: MADE, name: "Scout" }], ["agents.list", {}]]);
   });
 
   it("does not take the agents it made as OpenClaw agents of their own when it lists OpenClaw's", async () => {
@@ -1843,5 +1850,40 @@ describe("an OpenClaw agent of its own for each agent Chips asks for", () => {
     bridge.onClaw({ event: "chat", payload: { runId: R1, sessionKey: session, seq: 3, state: "final", message: "Here." } });
     await bridge.settled();
     assert.deepEqual(asked, [["page.html", `/home/node/.openclaw/chips/${MADE}`]]);
+  });
+
+  it("sends a turn again, once, as the same run, when OpenClaw refused it for a config change as it began", async () => {
+    const R1 = "msg_01K4ZQPX0000000000000000A1";
+    const replaced = "PreparedModelCatalogConfigReplacedError: prepared model catalog owner config was replaced during the read (/home/node/.openclaw/agents/main/agent)";
+    await bridge.onChips(said("What can you do?"));
+    bridge.onClaw({ event: "chat", payload: { runId: R1, sessionKey: key(), seq: 1, state: "error", errorMessage: replaced } });
+    await bridge.settled();
+    assert.deepEqual(sent.map((event) => event.type), ["run.started"]);
+    await new Promise((resolve) => setTimeout(resolve, 1_100));
+    const sends = calls.filter(([method]) => method === "chat.send").map(([, params]) => params);
+    assert.deepEqual(sends.map((params) => params["idempotencyKey"]), [R1, `${R1}:again`]);
+    assert.equal(sends[1]?.["message"], sends[0]?.["message"]);
+    bridge.onClaw({ event: "chat", payload: { runId: `${R1}:again`, sessionKey: key(), seq: 1, state: "final", message: "Plenty." } });
+    await bridge.settled();
+    assert.deepEqual(sent.map((event) => event.type), ["run.started", "message.post", "run.completed"]);
+    // One run in Chips: the turn sent again goes on with the run its first sending started.
+    assert.equal(sent[2]?.["run_id"], sent[0]?.["run_id"]);
+  });
+
+  it("fails a turn refused for a config change a second time, and any other failure at once", async () => {
+    const R1 = "msg_01K4ZQPX0000000000000000A1";
+    const replaced = "PreparedModelCatalogConfigReplacedError: prepared model catalog owner config was replaced during the read (x)";
+    await bridge.onChips(said("What can you do?"));
+    bridge.onClaw({ event: "chat", payload: { runId: R1, sessionKey: key(), seq: 1, state: "error", errorMessage: replaced } });
+    await new Promise((resolve) => setTimeout(resolve, 1_100));
+    bridge.onClaw({ event: "chat", payload: { runId: `${R1}:again`, sessionKey: key(), seq: 1, state: "error", errorMessage: replaced } });
+    await bridge.settled();
+    assert.deepEqual(sent.map((event) => event.type), ["run.started", "run.failed"]);
+    sent = [];
+    await bridge.onChips(said("Again?", { message_id: "msg_01K4ZQPX0000000000000000A2" }));
+    bridge.onClaw({ event: "chat", payload: { runId: "msg_01K4ZQPX0000000000000000A2", sessionKey: key(), seq: 1, state: "error", errorMessage: "rate limited" } });
+    await bridge.settled();
+    assert.deepEqual(sent.map((event) => event.type), ["run.started", "run.failed"]);
+    assert.equal(calls.filter(([method]) => method === "chat.send").length, 3);
   });
 });

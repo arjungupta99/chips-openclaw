@@ -121,6 +121,14 @@ const COST_EVERY_MS = 15_000;
 const AGENT_KNOWN_WAIT_MS = 20_000;
 const AGENT_KNOWN_EVERY_MS = 200;
 
+/**
+ * A turn that began while the gateway took in a config change (an agent made, renamed or deleted)
+ * is refused before it does anything (the scratch run, 7 October 2026: a made agent's first turn,
+ * sent as its rename was applied). It is sent again once, this long after, as the same run.
+ */
+const CONFIG_REPLACED = /PreparedModelCatalogConfigReplacedError|model catalog owner config was replaced/;
+const AGAIN_AFTER_MS = 1_000;
+
 interface Run {
   readonly chipsRun: string;
   /**
@@ -528,6 +536,8 @@ export class Bridge {
    * OpenClaw starts on its own.
    */
   private readonly asks = new Map<string, { readonly words: string; readonly spaceId: string; readonly agentId: string | undefined }>();
+  /** What each turn the bridge asked for was sent with, until it ends: to send it again once. */
+  private readonly sends = new Map<string, Payload>();
   private readonly latest = new Map<string, string>();
   /**
    * What a session's next turn in a room is to be told, by session and room: that Chips held what
@@ -771,23 +781,36 @@ export class Bridge {
     return false;
   }
 
-  /** Whether the gateway lists an agent, as it does once it has taken in the config that made it. */
-  private async listsAgent(agent: string): Promise<boolean> {
+  /**
+   * Whether the gateway lists an agent, by that name when one is given, as it does once it has
+   * taken in the config that made or named it.
+   */
+  private async listsAgent(agent: string, name?: string): Promise<boolean> {
     try {
       const listed = await this.claw.request<{ agents?: ClawAgent[] }>("agents.list", {});
-      return listed.agents?.some((each) => each.id === agent) === true;
+      return listed.agents?.some((each) => each.id === agent && (name === undefined || each.name === name)) === true;
     } catch {
       return false;
     }
   }
 
-  /** An OpenClaw agent of ours called what its agent in Chips is: what it is told it is (`IDENTITY.md`). */
+  /**
+   * An OpenClaw agent of ours called what its agent in Chips is: what it is told it is
+   * (`IDENTITY.md`). A config change, so the bridge waits for the gateway to list the name before
+   * it sends the agent a turn.
+   */
   private async nameClawAgent(agent: string, name: string): Promise<void> {
     try {
       await this.claw.request("agents.update", { agentId: agent, name });
     } catch (error) {
       this.log(`openclaw: could not name agent ${agent} ${name}: ${String(error)}`);
+      return;
     }
+    for (let waited = 0; waited < AGENT_KNOWN_WAIT_MS; waited += AGENT_KNOWN_EVERY_MS) {
+      if (await this.listsAgent(agent, name)) return;
+      await new Promise((resolve) => setTimeout(resolve, AGENT_KNOWN_EVERY_MS));
+    }
+    this.log(`openclaw: agent ${agent} was named ${name} but the gateway never listed the name`);
   }
 
   /**
@@ -1146,13 +1169,15 @@ export class Bridge {
       const sent = [...attachments, ...files.sent];
       // Steered: into the session's turn while one runs, a turn of its own when none does. Said, not
       // left to OpenClaw's stored queue mode, which could make it wait for a turn after.
-      await this.claw.request("chat.send", {
+      const send: Payload = {
         sessionKey: taker.sessionKey,
         message: [...chips, note, files.line, message].filter((part) => part !== undefined).join("\n\n"),
         idempotencyKey: turn,
         queueMode: "steer",
         ...(sent.length === 0 ? {} : { attachments: sent }),
-      });
+      };
+      this.sends.set(turn, send);
+      await this.claw.request("chat.send", send);
       files.took();
     }
   }
@@ -1559,12 +1584,36 @@ export class Bridge {
     const run = this.runFor(clawRun, sessionKey);
     if (run === undefined || run.ended) return;
     const state = str(p["state"]);
+    if (state === "error" && this.againAfterReload(run, clawRun, p)) return;
+    if (state === "final" || state === "error" || state === "aborted") this.sends.delete(clawRun);
     if (state === "final") return this.finish(run, clawRun, p);
     if (state === "error" || state === "aborted") {
       run.ended = true;
       const error = state === "aborted" ? "Stopped." : (str(p["errorMessage"]) ?? "OpenClaw's turn failed.");
       this.write(run, { type: "run.failed", run_id: run.chipsRun, error, idempotency_key: `openclaw-run:${clawRun}:failed` });
     }
+  }
+
+  /**
+   * A turn the gateway refused as it began because its config was changing (`CONFIG_REPLACED`):
+   * sent again once, a moment later, under another key, and the same run in Chips goes on with
+   * it. False for any other failure, or a turn sent again already, which fails as ever.
+   */
+  private againAfterReload(run: Run, clawRun: string, p: Payload): boolean {
+    const sent = this.sends.get(clawRun);
+    if (sent === undefined || !CONFIG_REPLACED.test(str(p["errorMessage"]) ?? "")) return false;
+    this.sends.delete(clawRun);
+    const again = `${clawRun}:again`;
+    this.runs.delete(clawRun);
+    this.runs.set(again, run);
+    this.log(`openclaw: ${clawRun} began as OpenClaw took in a config change; sent again as ${again}`);
+    setTimeout(() => {
+      this.claw.request("chat.send", { ...sent, idempotencyKey: again }).catch((error: unknown) => {
+        run.ended = true;
+        this.write(run, { type: "run.failed", run_id: run.chipsRun, error: String(error), idempotency_key: `openclaw-run:${again}:failed` });
+      });
+    }, AGAIN_AFTER_MS);
+    return true;
   }
 
   private finish(run: Run, clawRun: string, p: Payload): void {
