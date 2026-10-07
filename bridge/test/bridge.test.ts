@@ -46,9 +46,14 @@ let refusePost: ((event: ChipsEvent) => ChipsRefusal | undefined) | undefined;
 let fetched: string[] = [];
 /** A session's history as OpenClaw's `chat.history` answers it, or a failure to read it. */
 let history: unknown[] | Error = [];
-/** The gateway methods OpenClaw refuses, and the agents its `agents.list` names. */
+/**
+ * The gateway methods OpenClaw refuses, and the agents its `agents.list` names: an agent
+ * `agents.create` makes is listed after `listLag` more lists, as the gateway takes it in a moment
+ * after it answers.
+ */
 let refuseClaw = new Set<string>();
 let clawAgents: { id: string }[] = [];
+let listLag = 0;
 let bridge: Bridge;
 
 /** One of our agents as Chips lists it, in one room or in none. */
@@ -105,11 +110,27 @@ const chips: ChipsPort = {
     return { lines, since_seq: 0, truncated: false, before: Number(lines[0]?.["seq"] ?? before) };
   },
 };
+let pending: { agent: { id: string }; lists: number } | undefined;
+function setLater(agent: { id: string }): void {
+  pending = { agent, lists: listLag };
+}
+
 const claw: ClawPort = {
   request: async <T>(method: string, params: Record<string, unknown>) => {
     calls.push([method, params]);
     if (refuseClaw.has(method)) throw new Error(`${method} refused`);
-    if (method === "agents.list") return { agents: clawAgents } as T;
+    if (method === "agents.create") {
+      const made = { id: String(params["name"]) };
+      if (listLag === 0) clawAgents.push(made);
+      else setLater(made);
+    }
+    if (method === "agents.list") {
+      if (pending !== undefined && --pending.lists <= 0) {
+        clawAgents.push(pending.agent);
+        pending = undefined;
+      }
+      return { agents: clawAgents } as T;
+    }
     if (method === "chat.history") {
       if (history instanceof Error) throw history;
       return { sessionKey: params["sessionKey"], messages: history } as T;
@@ -134,6 +155,8 @@ beforeEach(() => {
   history = [];
   refuseClaw = new Set();
   clawAgents = [];
+  listLag = 0;
+  pending = undefined;
   bridge = new Bridge(chips, claw, { harnessId: ME, agent: "main" }, () => undefined);
 });
 
@@ -1719,12 +1742,20 @@ describe("an OpenClaw agent of its own for each agent Chips asks for", () => {
     await bridge.onChips({ type: "space.created", space_id: ASKED, asked_of: ME, kind: "direct" });
     await bridge.onChips(said("Plan a picnic", { space_id: ASKED, addressed_to: [ME], for: [ME] }));
     const session = bridge.keyFor(ASKED, MADE);
-    assert.deepEqual(calls.map(([method]) => method), ["agents.create", "sessions.create", "agents.update", "chat.send"]);
+    assert.deepEqual(calls.map(([method]) => method), ["agents.create", "agents.list", "sessions.create", "agents.update", "chat.send"]);
     assert.deepEqual(calls[0]?.[1], { name: MADE, workspace: `/home/node/.openclaw/chips/${MADE}` });
-    assert.deepEqual(calls[1]?.[1], { key: session, agentId: MADE, displayName: "Plan a picnic" });
-    assert.deepEqual(calls[2]?.[1], { agentId: MADE, name: "OpenClaw" });
-    assert.equal(calls[3]?.[1]["sessionKey"], session);
+    assert.deepEqual(calls[2]?.[1], { key: session, agentId: MADE, displayName: "Plan a picnic" });
+    assert.deepEqual(calls[3]?.[1], { agentId: MADE, name: "OpenClaw" });
+    assert.equal(calls[4]?.[1]["sessionKey"], session);
     assert.deepEqual(claims.map(([room, claimKey]) => [room, claimKey]), [[ASKED, session]]);
+  });
+
+  it("asks for the made agent's session only once the gateway lists it", async () => {
+    listLag = 3;
+    await bridge.onChips({ type: "space.created", space_id: ASKED, asked_of: ME, kind: "direct" });
+    await bridge.onChips(said("Plan a picnic", { space_id: ASKED, addressed_to: [ME], for: [ME] }));
+    assert.deepEqual(calls.map(([method]) => method), ["agents.create", "agents.list", "agents.list", "agents.list", "sessions.create", "agents.update", "chat.send"]);
+    assert.equal(calls.find(([method]) => method === "chat.send")?.[1]["sessionKey"], bridge.keyFor(ASKED, MADE));
   });
 
   it("claims the room on the primary agent, as before, when OpenClaw will not make one", async () => {
@@ -1750,8 +1781,8 @@ describe("an OpenClaw agent of its own for each agent Chips asks for", () => {
     const ask = "evt_01K4ZQPX0000000000000000N1";
     const made = "chips-01k4zqpx0000000000000000n1";
     await bridge.onChips({ type: "agent.asked", id: ask, ts: new Date().toISOString(), space_id: ROOM, harness_id: ME, name: "Reviewer", by: ARJUN.participant_id });
-    assert.deepEqual(calls.map(([method]) => method), ["agents.create", "agents.update"]);
-    assert.deepEqual(calls[1]?.[1], { agentId: made, name: "Reviewer" });
+    assert.deepEqual(calls.map(([method]) => method), ["agents.create", "agents.list", "agents.update"]);
+    assert.deepEqual(calls[2]?.[1], { agentId: made, name: "Reviewer" });
     assert.deepEqual(registered, [{ key: bridge.keyFor(ROOM, made), name: "Reviewer", made_for: ask, space_id: ROOM }]);
   });
 
@@ -1764,8 +1795,8 @@ describe("an OpenClaw agent of its own for each agent Chips asks for", () => {
     };
     const quiet = new Bridge(refusing, claw, { harnessId: ME, agent: "main" }, () => undefined);
     await quiet.onChips({ type: "agent.asked", id: "evt_01K4ZQPX0000000000000000N1", ts: new Date().toISOString(), space_id: ROOM, harness_id: ME, name: "Reviewer", by: ARJUN.participant_id });
-    assert.deepEqual(calls.map(([method]) => method), ["agents.create", "agents.delete"]);
-    assert.deepEqual(calls[1]?.[1], { agentId: "chips-01k4zqpx0000000000000000n1", deleteFiles: true });
+    assert.deepEqual(calls.map(([method]) => method), ["agents.create", "agents.list", "agents.delete"]);
+    assert.deepEqual(calls[2]?.[1], { agentId: "chips-01k4zqpx0000000000000000n1", deleteFiles: true });
   });
 
   it("deletes the OpenClaw agent it made when its agent is deleted in Chips, and never one it did not make", async () => {

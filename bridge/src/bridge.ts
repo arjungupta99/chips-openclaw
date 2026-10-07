@@ -113,6 +113,14 @@ const MAX_FILES = 20;
 /** How often, at most, a turn says what it has cost so far while it works (LJ-6). */
 const COST_EVERY_MS = 15_000;
 
+/**
+ * How long a made OpenClaw agent may take to be one the gateway knows, and how often the bridge
+ * asks. `agents.create` answers once the config is written, and the gateway takes it in a moment
+ * later: a session asked of it 5 ms after was refused, "Unknown agent id" (7 October 2026).
+ */
+const AGENT_KNOWN_WAIT_MS = 20_000;
+const AGENT_KNOWN_EVERY_MS = 200;
+
 interface Run {
   readonly chipsRun: string;
   /**
@@ -735,25 +743,40 @@ export class Bridge {
   /**
    * An OpenClaw agent of its own for one of ours (`own-agents.ts`): its folder begun with the
    * primary agent's persona, then made with `agents.create`, which takes effect with no restart,
-   * and its first-run ritual taken out. Made again, by a replay or a restart between the make and
-   * the claim, it is there already. False when it could not be made: the caller goes on on the
-   * primary agent, as before.
+   * and its first-run ritual taken out; ready once the gateway lists it. Made again, by a replay
+   * or a restart between the make and the claim, it is there already. False when it could not be
+   * made: the caller goes on on the primary agent, as before.
    */
   private async makeClawAgent(agent: string): Promise<boolean> {
+    let made = false;
     try {
       await this.workspaces.seed(agent);
       await this.claw.request("agents.create", { name: agent, workspace: this.workspaces.of(agent) });
       await this.workspaces.settle(agent);
-      this.log(`openclaw: made agent ${agent}`);
-      return true;
+      made = true;
     } catch (error) {
-      try {
-        const listed = await this.claw.request<{ agents?: ClawAgent[] }>("agents.list", {});
-        if (listed.agents?.some((each) => each.id === agent) === true) return true;
-      } catch {
-        // Said below, with why it could not be made.
+      if (!(await this.listsAgent(agent))) {
+        this.log(`openclaw: could not make agent ${agent}, so it is a session of ${this.primary}: ${String(error)}`);
+        return false;
       }
-      this.log(`openclaw: could not make agent ${agent}, so it is a session of ${this.primary}: ${String(error)}`);
+    }
+    for (let waited = 0; waited < AGENT_KNOWN_WAIT_MS; waited += AGENT_KNOWN_EVERY_MS) {
+      if (await this.listsAgent(agent)) {
+        if (made) this.log(`openclaw: made agent ${agent}`);
+        return true;
+      }
+      await new Promise((resolve) => setTimeout(resolve, AGENT_KNOWN_EVERY_MS));
+    }
+    this.log(`openclaw: agent ${agent} was made but the gateway never listed it, so it is a session of ${this.primary}`);
+    return false;
+  }
+
+  /** Whether the gateway lists an agent, as it does once it has taken in the config that made it. */
+  private async listsAgent(agent: string): Promise<boolean> {
+    try {
+      const listed = await this.claw.request<{ agents?: ClawAgent[] }>("agents.list", {});
+      return listed.agents?.some((each) => each.id === agent) === true;
+    } catch {
       return false;
     }
   }
