@@ -10,6 +10,7 @@ import { fileURLToPath } from "node:url";
 import { Bridge } from "./bridge.ts";
 import { Chips, type ChipsEvent } from "./chips.ts";
 import { loadConfig } from "./config.ts";
+import { Contexts } from "./context.ts";
 import { health } from "./health.ts";
 import { readMedia, rootsFor } from "./media.ts";
 import { workspacesIn } from "./own-agents.ts";
@@ -30,6 +31,8 @@ const chips = new Chips({
   stateDir: config.stateDir,
   log,
   onRestart: (ask) => void restart?.restart(ask),
+  onContextEdit: (frame) =>
+    void bridge?.onContextEdit(frame).catch((error) => log(`chips: a context edit failed: ${String(error)}`)),
 });
 let bridge: Bridge | undefined;
 
@@ -119,6 +122,7 @@ bridge = new Bridge(
   { read: (reference, workspace) => readMedia(reference, roots, workspace) },
   Date.now,
   workspacesIn(roots),
+  new Contexts(claw, (owner, body) => chips.putContext(owner, body), log),
 );
 
 /**
@@ -184,6 +188,8 @@ async function main(): Promise<void> {
   await claw.start();
   await claw.request("sessions.subscribe", {});
   await adopt(active);
+  // What each agent the bridge made is built from, as Chips shows it (Chips ADR 0134).
+  await active.sendContexts();
   await catchUp(active);
   chips.stream((event) => active.onChips(event));
 }

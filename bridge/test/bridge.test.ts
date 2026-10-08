@@ -175,8 +175,7 @@ describe("rooms and sessions", () => {
     assert.equal(key(), "agent:main:chips-spc_01k4zqpx000000000000000002");
     assert.equal(bridge.spaceFor(key()), ROOM);
     assert.equal(bridge.spaceFor("agent:main:main"), undefined);
-    // A claim's key is the room's session of the OpenClaw agent made for it, and so is a new
-    // agent's; where none could be made, a session of the primary agent's of its own shape.
+    // A claim's key is the room's session of the OpenClaw agent made for it, and so is a new agent's.
     assert.equal(bridge.claimKeyFor(ROOM), "agent:chips-01k4zqpx000000000000000002:chips-spc_01k4zqpx000000000000000002");
     assert.equal(bridge.spaceFor(bridge.claimKeyFor(ROOM)), ROOM);
     assert.equal(bridge.agentFor(bridge.claimKeyFor(ROOM)), "chips-01k4zqpx000000000000000002");
@@ -184,14 +183,12 @@ describe("rooms and sessions", () => {
       bridge.madeKeyFor(ROOM, "evt_01K4ZQPX0000000000000000N1"),
       "agent:chips-01k4zqpx0000000000000000n1:chips-spc_01k4zqpx000000000000000002",
     );
-    for (const whose of ["asked", "own", "default", "made-01k4zqpx0000000000000000n1"]) {
-      assert.equal(bridge.spaceFor(`${key()}:${whose}`), ROOM);
+    for (const whose of ["own", "default"]) assert.equal(bridge.spaceFor(`${key()}:${whose}`), ROOM);
+    // A claim or a new agent on the primary agent, from before each had an agent of its own, is
+    // not one of ours any more (no backward support, 7 October 2026).
+    for (const whose of ["asked", "made-01k4zqpx0000000000000000n1", "somebody"]) {
+      assert.equal(bridge.spaceFor(`${key()}:${whose}`), undefined);
     }
-    assert.equal(
-      bridge.madeKeyFor(ROOM, "evt_01K4ZQPX0000000000000000N1", false),
-      "agent:main:chips-spc_01k4zqpx000000000000000002:made-01k4zqpx0000000000000000n1",
-    );
-    assert.equal(bridge.spaceFor(`${key()}:somebody`), undefined);
   });
 
   it("sends a person's words to the room's session, made once, keyed by the message", async () => {
@@ -1764,15 +1761,25 @@ describe("an OpenClaw agent of its own for each agent Chips asks for", () => {
     assert.equal(calls.find(([method]) => method === "chat.send")?.[1]["sessionKey"], bridge.keyFor(ASKED, MADE));
   });
 
-  it("claims the room on the primary agent, as before, when OpenClaw will not make one", async () => {
+  it("claims nothing and takes no turn when OpenClaw will not make one, and tries again on the next words", async () => {
     refuseClaw = new Set(["agents.create"]);
     await bridge.onChips({ type: "space.created", space_id: ASKED, asked_of: ME, kind: "direct" });
     await bridge.onChips(said("Plan a picnic", { space_id: ASKED, addressed_to: [ME], for: [ME] }));
-    const fallback = `${bridge.keyFor(ASKED)}:asked`;
-    assert.deepEqual(calls.map(([method]) => method), ["agents.create", "agents.list", "sessions.create", "chat.send"]);
-    assert.deepEqual(calls[2]?.[1], { key: fallback, agentId: "main", displayName: "Plan a picnic" });
-    assert.equal(calls[3]?.[1]["sessionKey"], fallback);
-    assert.deepEqual(claims.map(([room, claimKey]) => [room, claimKey]), [[ASKED, fallback]]);
+    // Never a conversation of the primary agent's in its place (ruling 15, 7 October 2026).
+    assert.deepEqual(calls.map(([method]) => method), ["agents.create", "agents.list"]);
+    assert.equal(claims.length, 0);
+    refuseClaw = new Set();
+    calls = [];
+    await bridge.onChips(said("Still there?", { space_id: ASKED, message_id: "msg_01K4ZQPX0000000000000000A2", addressed_to: [ME], for: [ME] }));
+    assert.deepEqual(claims.map(([room, claimKey]) => [room, claimKey]), [[ASKED, bridge.keyFor(ASKED, MADE)]]);
+    assert.equal(calls.find(([method]) => method === "chat.send")?.[1]["sessionKey"], bridge.keyFor(ASKED, MADE));
+  });
+
+  it("asks Chips for no new agent when OpenClaw will not make one", async () => {
+    refuseClaw = new Set(["agents.create"]);
+    await bridge.onChips({ type: "agent.asked", id: "evt_01K4ZQPX0000000000000000N1", ts: new Date().toISOString(), space_id: ROOM, harness_id: ME, name: "Reviewer", by: ARJUN.participant_id });
+    assert.deepEqual(calls.map(([method]) => method), ["agents.create", "agents.list"]);
+    assert.deepEqual(registered, []);
   });
 
   it("takes one OpenClaw has already, made before a restart, as made", async () => {

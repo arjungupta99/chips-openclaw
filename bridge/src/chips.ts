@@ -39,6 +39,11 @@ export interface ChipsOptions {
    * bridge's socket says `restart` in its hello, so Chips may ask it.
    */
   readonly onRestart?: (ask: { readonly askedBy: string; readonly askedAt: string }) => void;
+  /**
+   * A person changed one of an agent's context files, or one of the harness's own, from Chips
+   * (Chips ADR 0134). Given, the socket says `context` in its hello, so Chips sends edits to it.
+   */
+  readonly onContextEdit?: (frame: Record<string, unknown>) => void;
 }
 
 /** What a refused write said, so the bridge can tell a duplicate or a closed run from a fault. */
@@ -184,6 +189,16 @@ export class Chips {
     return (await this.call("POST", `/v1/harnesses/${this.options.harnessId}/agents`, agent)) as ChipsAgent & Placed;
   }
 
+  /**
+   * A copy of an agent's context files, or of the harness's own set, whole (Chips ADR 0134):
+   * `PUT /v1/agents/:id/context` or `PUT /v1/harnesses/:id/context`, answering an edit or not.
+   */
+  async putContext(owner: { readonly agentId: string } | "harness", body: Record<string, unknown>): Promise<void> {
+    const path =
+      owner === "harness" ? `/v1/harnesses/${this.options.harnessId}/context` : `/v1/agents/${owner.agentId}/context`;
+    await this.call("PUT", path, body);
+  }
+
   /** One of our agents in a room, in the place of `replacing` there. True when it moved in now. */
   async attach(agentId: string, spaceId: string, replacing: string): Promise<boolean> {
     const answer = (await this.call("POST", `/v1/agents/${agentId}/attach`, { space_id: spaceId, replacing })) as {
@@ -284,7 +299,11 @@ export class Chips {
           frame: "hello",
           protocol: { min: 1, max: 1 },
           client: { name: "chips-openclaw-bridge", version: "0.1.0" },
-          accepts: this.options.onRestart === undefined ? ["events"] : ["events", "restart"],
+          accepts: [
+            "events",
+            ...(this.options.onRestart === undefined ? [] : ["restart"]),
+            ...(this.options.onContextEdit === undefined ? [] : ["context"]),
+          ],
         }),
       );
     });
@@ -310,6 +329,10 @@ export class Chips {
       case "restart":
         // Now or never: not an event, so it is not remembered with the cursor (Chips ADR 0094).
         this.options.onRestart?.({ askedBy: String(frame["asked_by"]), askedAt: String(frame["asked_at"]) });
+        return;
+      case "context.edit":
+        // Now or never, as a restart is: answered by the next copy of the file's set (ADR 0134).
+        this.options.onContextEdit?.(frame);
         return;
       case "error":
         this.options.log(`chips: error frame ${JSON.stringify(frame)}`);
