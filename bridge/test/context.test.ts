@@ -196,9 +196,9 @@ describe("the copy Chips holds", () => {
     assert.deepEqual(
       shared.map((each) => [each["id"], each["used_by"], each["for_new_agents"], each["editable"]]),
       [
-        ["soul", 0, true, true],
-        ["agents", 0, true, true],
-        ["user", 0, true, true],
+        ["soul", undefined, true, true],
+        ["agents", undefined, true, true],
+        ["user", undefined, true, true],
       ],
     );
     assert.equal(typeof body?.["new_agents_note"], "string");

@@ -15,7 +15,9 @@
  * Chips holds no file names of anybody's: each file's row says what this module calls it.
  *
  * The harness's own set is what a new agent starts with: the primary agent's persona, copied into
- * each agent the bridge makes (`own-agents.ts`). No agent reads it after that, so `used_by` is 0.
+ * each agent the bridge makes (`own-agents.ts`). No agent reads it after that, so it says no
+ * `used_by`: Chips takes a shared file with no count as one only copied into new agents (Chips ADR
+ * 0134's addendum), and a count, 0 included, as one agents read.
  */
 
 import type { ClawPort } from "./bridge.ts";
@@ -113,7 +115,6 @@ export function ownSetOf(files: readonly ClawFile[]): Payload {
     shared: shown.map((file) => ({
       ...file,
       id: String(file["name"]).replace(/\.md$/i, "").toLowerCase(),
-      used_by: 0,
       for_new_agents: true,
     })),
     not_shown,
