@@ -11,6 +11,7 @@ import { Bridge } from "./bridge.ts";
 import { Chips, type ChipsEvent } from "./chips.ts";
 import { loadConfig } from "./config.ts";
 import { Contexts } from "./context.ts";
+import { Heartbeats } from "./heartbeats.ts";
 import { Models } from "./models.ts";
 import { health } from "./health.ts";
 import { readMedia, rootsFor } from "./media.ts";
@@ -36,6 +37,8 @@ const chips = new Chips({
     void bridge?.onContextEdit(frame).catch((error) => log(`chips: a context edit failed: ${String(error)}`)),
   onModelChange: (frame) =>
     void bridge?.onModelChange(frame).catch((error) => log(`chips: a model change failed: ${String(error)}`)),
+  onHeartbeatChange: (frame) =>
+    void bridge?.onHeartbeatChange(frame).catch((error) => log(`chips: a heartbeat change failed: ${String(error)}`)),
 });
 let bridge: Bridge | undefined;
 
@@ -127,6 +130,7 @@ bridge = new Bridge(
   workspacesIn(roots),
   new Contexts(claw, (owner, body) => chips.putContext(owner, body), log),
   new Models(claw, (agentId, body) => chips.putModel(agentId, body), log),
+  new Heartbeats(claw, (agentId, body) => chips.putHeartbeat(agentId, body), log),
 );
 
 /**
@@ -196,6 +200,8 @@ async function main(): Promise<void> {
   await active.sendContexts();
   // What each of them runs on, and how hard it thinks (Chips ADR 0140).
   await active.sendModels();
+  // Whether the Main agent checks in on its own, and how often (Chips ADR 0143).
+  await active.sendHeartbeats();
   await catchUp(active);
   chips.stream((event) => active.onChips(event));
 }

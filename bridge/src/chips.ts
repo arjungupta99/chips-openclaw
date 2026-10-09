@@ -49,6 +49,11 @@ export interface ChipsOptions {
    * `models` in its hello, so Chips sends changes to it.
    */
   readonly onModelChange?: (frame: Record<string, unknown>) => void;
+  /**
+   * A person changed an agent's heartbeat from Chips (Chips ADR 0143). Given, the socket says
+   * `heartbeats` in its hello, so Chips sends changes to it.
+   */
+  readonly onHeartbeatChange?: (frame: Record<string, unknown>) => void;
 }
 
 /** What a refused write said, so the bridge can tell a duplicate or a closed run from a fault. */
@@ -214,6 +219,14 @@ export class Chips {
     await this.call("PUT", `/v1/agents/${agentId}/model`, body);
   }
 
+  /**
+   * A copy of an agent's heartbeat, whole (Chips ADR 0143): `PUT /v1/agents/:id/heartbeat`,
+   * answering a change or not.
+   */
+  async putHeartbeat(agentId: string, body: Record<string, unknown>): Promise<void> {
+    await this.call("PUT", `/v1/agents/${agentId}/heartbeat`, body);
+  }
+
   /** One of our agents in a room, in the place of `replacing` there. True when it moved in now. */
   async attach(agentId: string, spaceId: string, replacing: string): Promise<boolean> {
     const answer = (await this.call("POST", `/v1/agents/${agentId}/attach`, { space_id: spaceId, replacing })) as {
@@ -331,6 +344,7 @@ export class Chips {
             ...(this.options.onRestart === undefined ? [] : ["restart"]),
             ...(this.options.onContextEdit === undefined ? [] : ["context"]),
             ...(this.options.onModelChange === undefined ? [] : ["models"]),
+            ...(this.options.onHeartbeatChange === undefined ? [] : ["heartbeats"]),
           ],
         }),
       );
@@ -365,6 +379,10 @@ export class Chips {
       case "model.change":
         // Now or never too: answered by the agent's next copy (Chips ADR 0140).
         this.options.onModelChange?.(frame);
+        return;
+      case "heartbeat.change":
+        // Now or never too: answered by the agent's next copy (Chips ADR 0143).
+        this.options.onHeartbeatChange?.(frame);
         return;
       case "error":
         this.options.log(`chips: error frame ${JSON.stringify(frame)}`);

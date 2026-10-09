@@ -66,6 +66,7 @@ import type { Media } from "./media.ts";
 import type { ClawEvent } from "./openclaw.ts";
 import { Contexts, type EditFrame } from "./context.ts";
 import type { ChangeFrame, Models, Whose as ModelOwner } from "./models.ts";
+import { type ChangeFrame as BeatChange, checkInOf, type Heartbeats } from "./heartbeats.ts";
 import { isMadeAgent, madeAgentId, type Workspaces } from "./own-agents.ts";
 import { filesLine, namedIn, ROOM_FILES, type RoomFile, roomFilesIn, STALE_FILE, staleIn } from "./room-files.ts";
 
@@ -619,6 +620,8 @@ export class Bridge {
     private readonly contexts?: Contexts,
     /** Our agents' models in Chips (ADR 0140); none, and nothing is sent or changed. */
     private readonly models?: Models,
+    /** The Main agent's heartbeat in Chips (ADR 0143); none, and nothing is sent, changed or posted. */
+    private readonly heartbeats?: Heartbeats,
   ) {
     this.primary = self.agent;
   }
@@ -951,6 +954,7 @@ export class Bridge {
     this.log(`chips: ${key} was deleted`);
     this.contexts?.forget(agentId);
     this.models?.forget(agentId);
+    this.heartbeats?.forget(agentId);
     const clawAgent = this.agentFor(key);
     if (clawAgent !== undefined && isMadeAgent(clawAgent)) await this.removeClawAgent(clawAgent);
   }
@@ -1213,6 +1217,64 @@ export class Bridge {
       return;
     }
     return this.models.change(change, whose);
+  }
+
+  /**
+   * The Main agent, the one of ours whose heartbeat Chips shows (ADR 0143): it beats in Home, so what
+   * it says reaches the Main room. Agents in other rooms beat in a Home of their own, which no room
+   * shows, so they are sent no copy.
+   */
+  private beatingAgent(): string | undefined {
+    return this.agentByKey.get(this.mainKey());
+  }
+
+  /** The Main agent's heartbeat, sent to Chips at start (ADR 0143). */
+  async sendHeartbeats(): Promise<void> {
+    const main = this.beatingAgent();
+    if (this.heartbeats === undefined || main === undefined) return;
+    await this.heartbeats.agent(main, this.primary);
+  }
+
+  /**
+   * A person's change of an agent's heartbeat from Chips (ADR 0143): written into the primary
+   * agent's block for the Main agent. One for any other agent, which was sent no copy, is not
+   * answered, and Chips tells the person it was missed.
+   */
+  async onHeartbeatChange(frame: Payload): Promise<void> {
+    if (this.heartbeats === undefined) return;
+    const change = frame as unknown as BeatChange;
+    if (!this.keyOf.has(change.agent_id)) this.learn(await this.chips.agents());
+    if (change.agent_id !== this.beatingAgent()) {
+      this.log(`chips: a heartbeat change for ${change.agent_id}, which is not the Main agent`);
+      return;
+    }
+    return this.heartbeats.change(change, this.primary);
+  }
+
+  /**
+   * What the primary agent's heartbeat said for the person (ADR 0143): a `heartbeat_respond` call
+   * that notifies, in a message of its Home, posted in the Main room as the Main agent and marked
+   * as a check-in. A quiet check posts nothing, and one heard again posts nothing more.
+   */
+  private heartbeatSaid(p: Payload): void {
+    if (this.heartbeats === undefined || str(p["sessionKey"]) !== this.homeKey()) return;
+    const checkIn = checkInOf(p["message"]);
+    if (checkIn === undefined) return;
+    const where = this.whereSaid(this.homeKey());
+    if (where?.spaceId === undefined || where.agentId === undefined) {
+      this.log(`chips: a heartbeat check-in with no Main room to say it in: ${checkIn.text.slice(0, 80)}`);
+      return;
+    }
+    void this.chips
+      .send({
+        type: "message.post",
+        space_id: where.spaceId,
+        text: checkIn.text,
+        heartbeat: true,
+        actor: { kind: "agent", id: where.agentId },
+        idempotency_key: `openclaw-heartbeat:${checkIn.id}`,
+      })
+      .catch((error: unknown) => this.log(`chips: a heartbeat check-in not posted: ${String(error)}`));
   }
 
   /** A room asked of this harness while the bridge was away (from `GET …/spaces`). */
@@ -1622,6 +1684,8 @@ export class Bridge {
         return this.chat(p);
       case "agent":
         return this.agent(p);
+      case "session.message":
+        return this.heartbeatSaid(p);
       case "exec.approval.requested":
         return this.asksApproval(p);
       case "plugin.approval.requested":
@@ -1813,6 +1877,8 @@ export class Bridge {
     // Its model may have been changed in OpenClaw meanwhile: read again, and sent if it moved (ADR 0140).
     const owner = agentId === undefined ? undefined : this.modelOwnerOf(agentId);
     if (agentId !== undefined && owner !== undefined) void this.models?.agent(agentId, owner);
+    // So may the Main agent's heartbeat, which a person may change in OpenClaw too (ADR 0143).
+    if (agentId !== undefined && agentId === this.beatingAgent()) void this.heartbeats?.agent(agentId, this.primary);
     // A turn that answered `NO_REPLY` passed (Chips ADR 0105): OpenClaw leaves the word out of its
     // chat, so the bridge says it, and Chips makes the post the turn's pass, which the room never
     // shows. Without it the run ended on "Answered together with other words, in one reply."
@@ -2283,6 +2349,7 @@ export class Bridge {
     await Promise.all([...this.runs.values()].map((run) => run.chain));
     await this.contexts?.settled();
     await this.models?.settled();
+    await this.heartbeats?.settled();
   }
 }
 
