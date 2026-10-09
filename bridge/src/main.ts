@@ -11,6 +11,7 @@ import { Bridge } from "./bridge.ts";
 import { Chips, type ChipsEvent } from "./chips.ts";
 import { loadConfig } from "./config.ts";
 import { Contexts } from "./context.ts";
+import { Models } from "./models.ts";
 import { health } from "./health.ts";
 import { readMedia, rootsFor } from "./media.ts";
 import { workspacesIn } from "./own-agents.ts";
@@ -33,6 +34,8 @@ const chips = new Chips({
   onRestart: (ask) => void restart?.restart(ask),
   onContextEdit: (frame) =>
     void bridge?.onContextEdit(frame).catch((error) => log(`chips: a context edit failed: ${String(error)}`)),
+  onModelChange: (frame) =>
+    void bridge?.onModelChange(frame).catch((error) => log(`chips: a model change failed: ${String(error)}`)),
 });
 let bridge: Bridge | undefined;
 
@@ -123,6 +126,7 @@ bridge = new Bridge(
   Date.now,
   workspacesIn(roots),
   new Contexts(claw, (owner, body) => chips.putContext(owner, body), log),
+  new Models(claw, (agentId, body) => chips.putModel(agentId, body), log),
 );
 
 /**
@@ -190,6 +194,8 @@ async function main(): Promise<void> {
   await adopt(active);
   // What each agent the bridge made is built from, as Chips shows it (Chips ADR 0134).
   await active.sendContexts();
+  // What each of them runs on, and how hard it thinks (Chips ADR 0140).
+  await active.sendModels();
   await catchUp(active);
   chips.stream((event) => active.onChips(event));
 }

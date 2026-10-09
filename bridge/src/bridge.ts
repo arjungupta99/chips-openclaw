@@ -65,6 +65,7 @@ import { chipsId } from "./ids.ts";
 import type { Media } from "./media.ts";
 import type { ClawEvent } from "./openclaw.ts";
 import { Contexts, type EditFrame } from "./context.ts";
+import type { ChangeFrame, Models, Whose as ModelOwner } from "./models.ts";
 import { isMadeAgent, madeAgentId, type Workspaces } from "./own-agents.ts";
 import { filesLine, namedIn, ROOM_FILES, type RoomFile, roomFilesIn, STALE_FILE, staleIn } from "./room-files.ts";
 
@@ -616,6 +617,8 @@ export class Bridge {
     private readonly workspaces: Workspaces = NO_WORKSPACES,
     /** Our agents' context in Chips (ADR 0134); none, and nothing is sent or edited. */
     private readonly contexts?: Contexts,
+    /** Our agents' models in Chips (ADR 0140); none, and nothing is sent or changed. */
+    private readonly models?: Models,
   ) {
     this.primary = self.agent;
   }
@@ -797,6 +800,7 @@ export class Bridge {
       this.learn([made]);
       await this.nameClawAgent(clawAgent, made.name);
       void this.contexts?.agent(made.agent_id, clawAgent);
+      void this.models?.agent(made.agent_id, { clawAgent, made: true });
       const placed = made.attached === false && made.why !== undefined ? `, not in it: ${made.why}` : "";
       this.log(`chips: made ${made.name} for ${room}${placed}`);
     } catch (error) {
@@ -927,6 +931,7 @@ export class Bridge {
     this.lastHeard.delete(agentId);
     this.log(`chips: ${key} was deleted`);
     this.contexts?.forget(agentId);
+    this.models?.forget(agentId);
     const clawAgent = this.agentFor(key);
     if (clawAgent !== undefined && isMadeAgent(clawAgent)) await this.removeClawAgent(clawAgent);
   }
@@ -957,6 +962,21 @@ export class Bridge {
     const key = this.keyOf.get(agentId);
     const clawAgent = key === undefined ? undefined : this.agentFor(key);
     return clawAgent !== undefined && isMadeAgent(clawAgent) ? clawAgent : undefined;
+  }
+
+  /**
+   * The OpenClaw agent whose model one of ours runs on (ADR 0140), and whether the bridge made it,
+   * which only one it made may be changed from Chips: the one made for it; the primary agent for
+   * the Main agent and for the harness itself; otherwise the agent its key names, a session's or
+   * one the bridge found in OpenClaw.
+   */
+  private modelOwnerOf(agentId: string): ModelOwner | undefined {
+    const key = this.keyOf.get(agentId);
+    if (key === undefined) return undefined;
+    const made = this.madeClawAgentOf(agentId);
+    if (made !== undefined) return { clawAgent: made, made: true };
+    if (key === this.mainKey() || key === this.self.harnessId) return { clawAgent: this.primary, made: false };
+    return { clawAgent: this.agentFor(key) ?? key, made: false };
   }
 
   /** One of ours taken out of its room: free, until Chips puts it in another. Its OpenClaw sessions stay. */
@@ -1082,7 +1102,10 @@ export class Bridge {
     const name = agents.find((each) => each.key === key)?.name;
     const clawAgent = this.agentFor(key);
     if (name !== undefined && clawAgent !== undefined && isMadeAgent(clawAgent)) await this.nameClawAgent(clawAgent, name);
-    if (agentId !== undefined && clawAgent !== undefined && isMadeAgent(clawAgent)) void this.contexts?.agent(agentId, clawAgent);
+    if (agentId !== undefined && clawAgent !== undefined && isMadeAgent(clawAgent)) {
+      void this.contexts?.agent(agentId, clawAgent);
+      void this.models?.agent(agentId, { clawAgent, made: true });
+    }
     return agentId !== undefined && this.roomOf.get(agentId) === spaceId ? agentId : undefined;
   }
 
@@ -1139,6 +1162,38 @@ export class Bridge {
       return;
     }
     return this.contexts.edit(edit, clawAgent);
+  }
+
+  /**
+   * Each of our agents' model, sent to Chips at start (ADR 0140): every agent OpenClaw lists that
+   * one of ours runs as, read only unless the bridge made it. Each is sent once at start, since the
+   * bridge keeps no record of what it sent before.
+   */
+  async sendModels(): Promise<void> {
+    if (this.models === undefined) return;
+    const sends: Promise<void>[] = [];
+    for (const agentId of this.keyOf.keys()) {
+      const whose = this.modelOwnerOf(agentId);
+      if (whose !== undefined) sends.push(this.models.agent(agentId, whose));
+    }
+    await Promise.all(sends);
+  }
+
+  /**
+   * A person's change of an agent's model or effort from Chips (ADR 0140): written into the OpenClaw
+   * agent the bridge made for it, and refused for any other with OpenClaw's own words for why. One
+   * for an agent the bridge doesn't know is not answered, and Chips tells the person it was missed.
+   */
+  async onModelChange(frame: Payload): Promise<void> {
+    if (this.models === undefined) return;
+    const change = frame as unknown as ChangeFrame;
+    if (!this.keyOf.has(change.agent_id)) this.learn(await this.chips.agents());
+    const whose = this.modelOwnerOf(change.agent_id);
+    if (whose === undefined) {
+      this.log(`chips: a model change for ${change.agent_id}, which is none of this bridge's agents`);
+      return;
+    }
+    return this.models.change(change, whose);
   }
 
   /** A room asked of this harness while the bridge was away (from `GET …/spaces`). */
@@ -1734,6 +1789,9 @@ export class Bridge {
     const agentId = this.agentByKey.get(run.sessionKey);
     const clawAgent = agentId === undefined ? undefined : this.filesClawAgentOf(agentId);
     if (agentId !== undefined && clawAgent !== undefined) void this.contexts?.agent(agentId, clawAgent);
+    // Its model may have been changed in OpenClaw meanwhile: read again, and sent if it moved (ADR 0140).
+    const owner = agentId === undefined ? undefined : this.modelOwnerOf(agentId);
+    if (agentId !== undefined && owner !== undefined) void this.models?.agent(agentId, owner);
     // A turn that answered `NO_REPLY` passed (Chips ADR 0105): OpenClaw leaves the word out of its
     // chat, so the bridge says it, and Chips makes the post the turn's pass, which the room never
     // shows. Without it the run ended on "Answered together with other words, in one reply."
@@ -2203,6 +2261,7 @@ export class Bridge {
   async settled(): Promise<void> {
     await Promise.all([...this.runs.values()].map((run) => run.chain));
     await this.contexts?.settled();
+    await this.models?.settled();
   }
 }
 

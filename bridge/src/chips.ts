@@ -44,6 +44,11 @@ export interface ChipsOptions {
    * (Chips ADR 0134). Given, the socket says `context` in its hello, so Chips sends edits to it.
    */
   readonly onContextEdit?: (frame: Record<string, unknown>) => void;
+  /**
+   * A person changed an agent's model or effort from Chips (Chips ADR 0140). Given, the socket says
+   * `models` in its hello, so Chips sends changes to it.
+   */
+  readonly onModelChange?: (frame: Record<string, unknown>) => void;
 }
 
 /** What a refused write said, so the bridge can tell a duplicate or a closed run from a fault. */
@@ -201,6 +206,14 @@ export class Chips {
     await this.call("PUT", path, body);
   }
 
+  /**
+   * A copy of an agent's model and effort, whole (Chips ADR 0140): `PUT /v1/agents/:id/model`,
+   * answering a change or not.
+   */
+  async putModel(agentId: string, body: Record<string, unknown>): Promise<void> {
+    await this.call("PUT", `/v1/agents/${agentId}/model`, body);
+  }
+
   /** One of our agents in a room, in the place of `replacing` there. True when it moved in now. */
   async attach(agentId: string, spaceId: string, replacing: string): Promise<boolean> {
     const answer = (await this.call("POST", `/v1/agents/${agentId}/attach`, { space_id: spaceId, replacing })) as {
@@ -317,6 +330,7 @@ export class Chips {
             "events",
             ...(this.options.onRestart === undefined ? [] : ["restart"]),
             ...(this.options.onContextEdit === undefined ? [] : ["context"]),
+            ...(this.options.onModelChange === undefined ? [] : ["models"]),
           ],
         }),
       );
@@ -347,6 +361,10 @@ export class Chips {
       case "context.edit":
         // Now or never, as a restart is: answered by the next copy of the file's set (ADR 0134).
         this.options.onContextEdit?.(frame);
+        return;
+      case "model.change":
+        // Now or never too: answered by the agent's next copy (Chips ADR 0140).
+        this.options.onModelChange?.(frame);
         return;
       case "error":
         this.options.log(`chips: error frame ${JSON.stringify(frame)}`);
