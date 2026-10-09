@@ -8,6 +8,7 @@ import { beforeEach, describe, it } from "node:test";
 import {
   Bridge,
   type ChipsPort,
+  commandAsk,
   type ClawPort,
   type FilesPort,
   heardIn,
@@ -757,6 +758,11 @@ describe("supervision", () => {
     const card = sent.find((event) => event.type === "approval.request");
     assert.match(String(card?.["approval_id"]), /^apr_/);
     assert.deepEqual(card?.["action"], { kind: "shell.exec", input: { command: "ls -la", cwd: "/workspace" } });
+    // The card asks the question, where it runs, and that a yes is for this command (Chips ADR 0142).
+    assert.equal(card?.["question"], "Run `ls -la`?");
+    assert.equal(card?.["effect"], "It runs in /workspace.");
+    assert.equal(card?.["lasts"], "once");
+    assert.deepEqual(card?.["preview"], { format: "markdown", title: "Run a command", body: "```sh\nls -la\n```" });
     assert.equal(card?.["fallback"], "deny");
     assert.ok(Number(card?.["expires_in"]) > 100 && Number(card?.["expires_in"]) <= 120);
   });
@@ -816,6 +822,8 @@ describe("supervision", () => {
     await bridge.settled();
     const card = sent.find((event) => event.type === "approval.request");
     assert.deepEqual(card?.["action"], { kind: "shell.exec", input: { command: "ls -la" } });
+    assert.equal(card?.["question"], "Run `ls -la`?");
+    assert.equal(card?.["effect"], undefined);
     await bridge.onChips({ type: "approval.resolved", approval_id: card?.["approval_id"], decision: "approved", scope: "always" });
     assert.deepEqual(calls, [["plugin.approval.resolve", { id: "plugin:ap-3", decision: "allow-always" }]]);
   });
@@ -921,6 +929,19 @@ describe("supervision", () => {
 });
 
 describe("words", () => {
+  it("asks about a command by name when it reads in one line, and as this command otherwise", () => {
+    assert.deepEqual(commandAsk("date", "/home/node/.openclaw/workspace"), {
+      question: "Run `date`?",
+      effect: "It runs in /home/node/.openclaw/workspace.",
+      lasts: "once",
+    });
+    assert.deepEqual(commandAsk("npm test", undefined), { question: "Run `npm test`?", lasts: "once" });
+    assert.equal(commandAsk("echo `whoami`", undefined)["question"], "Run this command?");
+    assert.equal(commandAsk("set -e\nnpm ci", undefined)["question"], "Run this command?");
+    assert.equal(commandAsk("x".repeat(121), undefined)["question"], "Run this command?");
+    assert.equal(commandAsk(undefined, undefined)["question"], "Run this command?");
+  });
+
   it("takes the text of a message however OpenClaw shapes it", () => {
     assert.equal(textOf("plain"), "plain");
     assert.equal(textOf({ content: [{ type: "text", text: "a" }, { type: "image" }, { type: "text", text: "b" }] }), "ab");

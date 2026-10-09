@@ -193,6 +193,20 @@ interface Taker {
 const str = (value: unknown): string | undefined => (typeof value === "string" ? value : undefined);
 const num = (value: unknown): number | undefined => (typeof value === "number" ? value : undefined);
 
+/**
+ * What a command's card asks (Chips ADR 0142): the command itself when it reads in one line, where
+ * it runs, and that a yes is for this command alone. A long or many-lined command, or one with a
+ * backtick in it, is asked about as "this command", and the card's preview shows it in full.
+ */
+export function commandAsk(command: string | undefined, cwd: string | undefined): Payload {
+  const readable = command !== undefined && command.length <= 120 && !/[`\n]/.test(command);
+  return {
+    question: readable ? `Run \`${command}\`?` : "Run this command?",
+    ...(cwd === undefined ? {} : { effect: `It runs in ${cwd}.` }),
+    lasts: "once",
+  };
+}
+
 /** A room's name from its first words: the first line, cut at a word near 48 characters. */
 export function titleFrom(text: string): string {
   const line = text.trim().split("\n")[0] ?? "";
@@ -1895,7 +1909,8 @@ export class Bridge {
     const run = clawRun === undefined ? this.latestRun(sessionKey) : this.runFor(clawRun, sessionKey);
     // A turn stopped or ended already has no card to ask on: Chips refuses one on a closed run.
     if (run === undefined || run.ended) return;
-    const command = str(plan["commandText"]) ?? str(request["command"]) ?? "a command";
+    const given = str(plan["commandText"]) ?? str(request["command"]);
+    const command = given ?? "a command";
     const cwd = str(plan["cwd"]) ?? str(request["cwd"]);
     const approvalId = chipsId("apr", `openclaw-approval:${clawId}`);
     const unavailable = Array.isArray(request["unavailableDecisions"]) ? (request["unavailableDecisions"] as unknown[]) : [];
@@ -1908,7 +1923,9 @@ export class Bridge {
       run_id: run.chipsRun,
       approval_id: approvalId,
       action: { kind: "shell.exec", input: { command, ...(cwd === undefined ? {} : { cwd }) } },
-      preview: { format: "markdown", title: "Run a command", body: `\`\`\`sh\n${command}\n\`\`\`${cwd === undefined ? "" : `\nin \`${cwd}\``}` },
+      // Where it runs is the effect's to say, so the preview is the command alone.
+      ...commandAsk(given, cwd),
+      preview: { format: "markdown", title: "Run a command", body: `\`\`\`sh\n${command}\n\`\`\`` },
       // A command in the sandboxed container fits none of Chips's closed risk classes.
       risk: [],
       expires_in: expires === undefined ? 900 : Math.max(30, Math.round((expires - Date.now()) / 1000)),
@@ -1947,6 +1964,13 @@ export class Bridge {
         command === undefined
           ? { kind: "tool.call", input: { tool: str(request["toolName"]) ?? "a tool", title } }
           : { kind: "shell.exec", input: { command } },
+      // A plugin's own title is a question only when it reads as one; otherwise the card is
+      // headed by it as the preview's title, which is what it is.
+      ...(command !== undefined
+        ? commandAsk(command, undefined)
+        : title.trim().endsWith("?")
+          ? { question: title.trim().slice(0, 200), lasts: "once" }
+          : { lasts: "once" }),
       preview: {
         format: "markdown",
         title: command === undefined ? title.slice(0, 120) : "Run a command",
