@@ -647,13 +647,32 @@ export class Bridge {
   }
 
   /**
-   * The key the Main agent is registered under and its Main room opened by (Chips ADR 0087): the
-   * primary agent's session in a room called `main`, which no Chips room is. Keyed by a session,
-   * as an agent the bridge made is, it is that one conversation of the primary agent's wherever
-   * Chips has it, and its Main room is the only place Chips has it.
+   * The key the Main agent is registered under and its Main room opened by (Chips ADR 0087), named
+   * as a session of the primary agent's in a room called `main`, which no Chips room is. Its turns
+   * are in Home (`homeKey`), not in a session of that name: the key stays, as Chips keeps it.
    */
   mainKey(): string {
     return `agent:${this.primary}:chips-main`;
+  }
+
+  /**
+   * The primary agent's own conversation, OpenClaw's Home (`agent:<id>:main`): every direct
+   * message from any of OpenClaw's channels lands there, its web app opens on it, its heartbeat
+   * wakes it and its background work reports to it. The Main agent speaks there, so the Main room
+   * is that one conversation, and a turn OpenClaw starts there is said in the Main room.
+   */
+  homeKey(): string {
+    return `agent:${this.primary}:main`;
+  }
+
+  /** The session one of ours speaks in, by its key: the key's own, and Home for the Main agent. */
+  private sessionOfKey(key: string): string {
+    return key === this.mainKey() ? this.homeKey() : key;
+  }
+
+  /** Which of ours a session is: the one keyed by it, and the Main agent for Home. */
+  private agentOfSession(sessionKey: string): string | undefined {
+    return this.agentByKey.get(sessionKey === this.homeKey() ? this.mainKey() : sessionKey);
   }
 
   /** The room a session is, when it is one of this bridge's. */
@@ -1008,7 +1027,7 @@ export class Bridge {
   private takerFor(agentId: string | undefined, room: string): Taker {
     const key = agentId === undefined ? undefined : this.keyOf.get(agentId);
     const clawAgent = key === undefined ? undefined : this.agentFor(key);
-    if (key !== undefined && clawAgent !== undefined) return { agentId, clawAgent, sessionKey: key };
+    if (key !== undefined && clawAgent !== undefined) return { agentId, clawAgent, sessionKey: this.sessionOfKey(key) };
     if (agentId === undefined && this.asked.has(room)) {
       const claimKey = this.claimKeyFor(room);
       return { agentId, clawAgent: this.agentFor(claimKey) ?? this.primary, sessionKey: claimKey };
@@ -1714,11 +1733,13 @@ export class Bridge {
   /**
    * Where a turn OpenClaw started on its own is said, and as whom (ADR 0087). A session one of our
    * agents is keyed by is that agent's: in the room Chips last said it is in, or in none, and
-   * Chips holds its words until it joins one. Any other session of ours is an OpenClaw agent's in
+   * Chips holds its words until it joins one. Home is the Main agent's, in its Main room: what the
+   * primary agent says there on its own (a heartbeat's alert, a background job's report, an answer
+   * to words said to it in OpenClaw's web app) is said there. Any other session of ours is an OpenClaw agent's in
    * one room, named from both: its own agent's there, or the default agent's where its name says.
    */
   private whereSaid(sessionKey: string): { spaceId: string | undefined; agentId: string | undefined } | undefined {
-    const agentId = this.agentByKey.get(sessionKey);
+    const agentId = this.agentOfSession(sessionKey);
     if (agentId !== undefined) return { spaceId: this.roomOf.get(agentId) ?? undefined, agentId };
     const spaceId = this.spaceFor(sessionKey);
     if (spaceId === undefined) return undefined;
@@ -1786,7 +1807,7 @@ export class Bridge {
     run.ended = true;
     // A turn may have changed the files its agent is built from (its memory, its soul): the copy
     // in Chips is read again, and sent if it moved (Chips ADR 0134).
-    const agentId = this.agentByKey.get(run.sessionKey);
+    const agentId = this.agentOfSession(run.sessionKey);
     const clawAgent = agentId === undefined ? undefined : this.filesClawAgentOf(agentId);
     if (agentId !== undefined && clawAgent !== undefined) void this.contexts?.agent(agentId, clawAgent);
     // Its model may have been changed in OpenClaw meanwhile: read again, and sent if it moved (ADR 0140).

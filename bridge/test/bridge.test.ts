@@ -1219,20 +1219,31 @@ describe("OpenClaw's agents as agents in Chips (Chips ADR 0087)", () => {
     assert.deepEqual(homes.map((event) => [event["space_id"], event["actor"]]), [[MAIN_ROOM, { kind: "agent", id: "agt_lead" }]]);
   });
 
-  it("answers in the Main room as the primary agent, in the Main agent's own session, said as it", async () => {
+  it("answers in the Main room as the primary agent, in its Home, said as the Main agent", async () => {
     await bridge.adoptAgents({ defaultId: "main", agents: [{ id: "main" }] });
     const main = "agt_agent:main:chips-main";
     calls = [];
     await bridge.onChips(said("Which channels are set up?", { space_id: MAIN_ROOM, addressed_to: [main], for: [main] }));
     const send = calls.find(([method]) => method === "chat.send")?.[1];
-    assert.equal(send?.["sessionKey"], "agent:main:chips-main");
+    // Home: the primary agent's one conversation, the one OpenClaw's web app and channels use.
+    assert.equal(bridge.homeKey(), "agent:main:main");
+    assert.equal(send?.["sessionKey"], "agent:main:main");
     bridge.onClaw({
       event: "chat",
-      payload: { runId: String(send?.["idempotencyKey"]), sessionKey: "agent:main:chips-main", seq: 1, state: "final", message: "None yet." },
+      payload: { runId: String(send?.["idempotencyKey"]), sessionKey: "agent:main:main", seq: 1, state: "final", message: "None yet." },
     });
     await bridge.settled();
     assert.deepEqual(sent.map((event) => event.type), ["run.started", "message.post", "run.completed"]);
     for (const event of sent) assert.deepEqual(event["actor"], { kind: "agent", id: main });
+  });
+
+  it("says what the primary agent says on its own in Home in the Main room, as the Main agent", async () => {
+    await bridge.adoptAgents({ defaultId: "main", agents: [{ id: "main" }] });
+    bridge.onClaw({ event: "chat", payload: { runId: "heartbeat-1", sessionKey: "agent:main:main", seq: 1, state: "final", message: "The build you asked about finished." } });
+    await bridge.settled();
+    assert.deepEqual(sent.map((event) => event.type), ["run.started", "message.post", "run.completed"]);
+    assert.equal(sent[0]?.["space_id"], MAIN_ROOM);
+    for (const event of sent) assert.deepEqual(event["actor"], { kind: "agent", id: "agt_agent:main:chips-main" });
   });
 
   it("registers the other agents when Chips will not take a Main agent", async () => {
