@@ -13,6 +13,8 @@ import { type ClawFile, Contexts, identityLine, type Owner, ownSetOf, setOf } fr
 
 const ME = "hrn_01K4ZQPX000000000000000004";
 const ROOM = "spc_01K4ZQPX000000000000000002";
+/** The Main agent's room (Chips ADR 0087). */
+const MAIN_ROOM = "spc_01K4ZQPX0000000000000000M1";
 const ARJUN = "usr_01K4ZQPX000000000000000003";
 const MADE = "chips-01k4zqpx000000000000000099";
 const EDIT = "edt_01K4ZQPX00000000000000000E";
@@ -285,9 +287,13 @@ describe("the bridge keeps the copies current", () => {
     agents: async () => agents,
     registerAgent: async (wanted) => {
       registered.push({ ...wanted });
-      const agent = agentIn(`agt_${registered.length}`, wanted.key, wanted.space_id ?? null, wanted.name);
+      const agent = { ...agentIn(`agt_${registered.length}`, wanted.key, wanted.space_id ?? null, wanted.name), lead: wanted.lead === true };
       agents = [...agents, agent];
       return { ...agent, attached: true };
+    },
+    openSpace: async (key) => {
+      agents = agents.map((each) => (each.key === key ? { ...each, spaces: [MAIN_ROOM], room: MAIN_ROOM } : each));
+      return MAIN_ROOM;
     },
     attach: async () => true,
     roomContext: async () => ({ lines: [] }),
@@ -302,10 +308,13 @@ describe("the bridge keeps the copies current", () => {
     folder(MADE).set("SOUL.md", "who");
   });
 
-  it("sends the harness's own and each agent it made at start, and none it did not make", async () => {
+  it("sends the harness's own, each agent it made and the Main agent at start, and none other", async () => {
     await bridge.adoptAgents({ defaultId: "main", agents: [{ id: "main" }] });
     await bridge.sendContexts();
-    assert.deepEqual(puts.map(([owner]) => owner), ["harness", { agentId: "agt_scout" }]);
+    assert.deepEqual(puts.map(([owner]) => owner), ["harness", { agentId: "agt_scout" }, { agentId: "agt_1" }]);
+    // The Main agent's files are the primary agent's.
+    const soul = (puts[2]?.[1]["files"] as Record<string, unknown>[]).find((each) => each["name"] === "SOUL.md");
+    assert.equal(soul?.["text"], folder("main").get("SOUL.md"));
   });
 
   it("sends a made agent's copy once Chips has it, named", async () => {
@@ -352,6 +361,9 @@ describe("the bridge keeps the copies current", () => {
     assert.equal(folder(MADE).get("SOUL.md"), "Careful.");
     await bridge.onContextEdit({ frame: "context.edit", edit_id: EDIT, harness_id: ME, name: "SOUL.md", text: "Main's.", base_hash: sha("# SOUL.md - Who You Are\n\n_You're not a chatbot._"), asked_by: ARJUN, asked_at: "2026-10-07T20:00:00.000Z" });
     assert.equal(folder("main").get("SOUL.md"), "Main's.");
+    // The Main agent's are the primary agent's too.
+    await bridge.onContextEdit({ frame: "context.edit", edit_id: EDIT, harness_id: ME, agent_id: "agt_1", name: "SOUL.md", text: "The Main agent's.", base_hash: sha("Main's."), asked_by: ARJUN, asked_at: "2026-10-07T20:00:00.000Z" });
+    assert.equal(folder("main").get("SOUL.md"), "The Main agent's.");
     // An agent with no OpenClaw agent of its own is not answered; Chips says the edit was missed.
     puts = [];
     await bridge.onContextEdit({ frame: "context.edit", edit_id: EDIT, harness_id: ME, agent_id: "agt_main", name: "SOUL.md", text: "x", base_hash: sha("x"), asked_by: ARJUN, asked_at: "2026-10-07T20:00:00.000Z" });

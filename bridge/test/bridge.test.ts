@@ -23,6 +23,8 @@ import { type ChipsAgent, type ChipsEvent, ChipsRefusal, type Taken } from "../s
 
 const ME = "hrn_01K4ZQPX000000000000000004";
 const ROOM = "spc_01K4ZQPX000000000000000002";
+/** The room a harness's Main agent is in, which takes no other (Chips ADR 0087, rule 7). */
+const MAIN_ROOM = "spc_01K4ZQPX0000000000000000M1";
 const ARJUN = { participant_id: "usr_01K4ZQPX000000000000000003", kind: "person", display_name: "Arjun", role: "owner" };
 /** Arjun as a line of the room names him. */
 const ARJUN_FROM = { id: ARJUN.participant_id, name: "Arjun" };
@@ -33,8 +35,11 @@ let calls: [string, Record<string, unknown>][] = [];
 /** This harness's agents as Chips keeps them, one room each (ADR 0087), and what attaching did. */
 let agents: ChipsAgent[] = [];
 let attached: [string, string, string][] = [];
-/** What the bridge registered with Chips, as it was sent. */
+/** What the bridge registered with Chips, as it was sent, and the keys it opened rooms by. */
 let registered: Record<string, unknown>[] = [];
+let opened: string[] = [];
+/** The rooms the bridge named this harness's home, as it named them. */
+let homes: ChipsEvent[] = [];
 /** A room's lines as Chips's pull route reads them (ADR 0088), and what the bridge asked of it. */
 let roomLines: Record<string, unknown>[] = [];
 let pulls: [string, number, number][] = [];
@@ -64,6 +69,11 @@ function agentIn(agentId: string, key: string, room: string | null, name = "Open
 
 const chips: ChipsPort = {
   send: async (event) => {
+    // A room named the harness's home, kept apart from what is said in rooms (Chips ADR 0069).
+    if (event.type === "space.updated" && event["home"] === true) {
+      homes.push(event);
+      return undefined;
+    }
     const refusal = event.type === "message.post" ? refusePost?.(event) : undefined;
     if (refusal !== undefined) throw refusal;
     sent.push(event);
@@ -90,9 +100,16 @@ const chips: ChipsPort = {
     const had = agents.find((each) => each.key === key);
     // As Chips answers a new agent registered for the room it was asked for (ADR 0108): put in it.
     const room = wanted.made_for !== undefined ? (wanted.space_id ?? null) : (had?.room ?? null);
-    const agent: ChipsAgent = had === undefined ? agentIn(`agt_${key}`, key, room, name) : { ...had, name };
+    const agent: ChipsAgent =
+      had === undefined ? { ...agentIn(`agt_${key}`, key, room, name), lead: wanted.lead === true } : { ...had, name };
     agents = [...agents.filter((each) => each.key !== key), agent];
     return { ...agent, ...(wanted.made_for === undefined ? {} : { attached: had === undefined }) };
+  },
+  // As Chips does for a room a harness opens by its key: the key's own agent is put in it.
+  openSpace: async (key) => {
+    opened.push(key);
+    agents = agents.map((each) => (each.key === key ? { ...each, spaces: [MAIN_ROOM], room: MAIN_ROOM } : each));
+    return MAIN_ROOM;
   },
   attach: async (agentId, spaceId, replacing) => {
     attached.push([agentId, spaceId, replacing]);
@@ -151,6 +168,8 @@ beforeEach(() => {
   agents = [];
   attached = [];
   registered = [];
+  opened = [];
+  homes = [];
   roomLines = [];
   pulls = [];
   uploads = [];
@@ -1163,7 +1182,7 @@ describe("OpenClaw's agents as agents in Chips (Chips ADR 0087)", () => {
     });
     assert.deepEqual(
       agents.filter((each) => each.key !== ME).map((each) => [each.key, each.name]),
-      [["main", "OpenClaw"], ["scout", "Scout"]],
+      [["agent:main:chips-main", "OpenClaw"], ["scout", "Scout"]],
     );
     // An agent is in one room at a time: putting each in the default agent's rooms at start, as
     // the bridge did before, would have Chips refuse all but one. Each stays where Chips has it.
@@ -1171,9 +1190,65 @@ describe("OpenClaw's agents as agents in Chips (Chips ADR 0087)", () => {
     assert.equal(agents.find((each) => each.key === ME)?.room, ROOM);
   });
 
-  it("serves only OPENCLAW_AGENT when it is set", async () => {
-    await bridge.adoptAgents({ defaultId: "main", agents: [{ id: "main" }, { id: "scout" }] }, "main");
-    assert.deepEqual(agents.filter((each) => each.key !== ME).map((each) => each.key), ["main"]);
+  it("serves only OPENCLAW_AGENT when it is set, as its Main agent", async () => {
+    await bridge.adoptAgents({ defaultId: "main", agents: [{ id: "main" }, { id: "scout" }] }, "scout");
+    assert.equal(bridge.mainKey(), "agent:scout:chips-main");
+    assert.deepEqual(agents.filter((each) => each.key !== ME).map((each) => [each.key, each.lead]), [["agent:scout:chips-main", true]]);
+  });
+
+  it("seats its primary agent as the Main agent, in a room opened by the agent's key and named the harness's home", async () => {
+    await bridge.adoptAgents({ defaultId: "main", agents: [{ id: "main", identity: { name: "main" } }, { id: "scout" }] });
+    const main = "agt_agent:main:chips-main";
+    // The Main agent is the primary agent's one conversation in its Main room (Chips ADR 0087).
+    assert.equal(bridge.mainKey(), "agent:main:chips-main");
+    assert.deepEqual(registered[0], { key: bridge.mainKey(), name: "OpenClaw", lead: true });
+    assert.equal(registered.some((each) => each["key"] === "main"), false);
+    assert.deepEqual(opened, [bridge.mainKey()]);
+    assert.equal(agents.find((each) => each.agent_id === main)?.room, MAIN_ROOM);
+    // Its room is the harness's home, which nobody archives or deletes (Chips ADR 0069).
+    assert.deepEqual(homes, [
+      { type: "space.updated", space_id: MAIN_ROOM, home: true, actor: { kind: "agent", id: main }, idempotency_key: `home-${MAIN_ROOM}` },
+    ]);
+  });
+
+  it("keeps the Main agent Chips has, in its room, and names its home again at each start", async () => {
+    agents = [FALLBACK, { ...agentIn("agt_lead", bridge.mainKey(), MAIN_ROOM), lead: true }];
+    await bridge.adoptAgents({ defaultId: "main", agents: [{ id: "main" }] });
+    assert.deepEqual(registered, []);
+    assert.deepEqual(opened, []);
+    assert.deepEqual(homes.map((event) => [event["space_id"], event["actor"]]), [[MAIN_ROOM, { kind: "agent", id: "agt_lead" }]]);
+  });
+
+  it("answers in the Main room as the primary agent, in the Main agent's own session, said as it", async () => {
+    await bridge.adoptAgents({ defaultId: "main", agents: [{ id: "main" }] });
+    const main = "agt_agent:main:chips-main";
+    calls = [];
+    await bridge.onChips(said("Which channels are set up?", { space_id: MAIN_ROOM, addressed_to: [main], for: [main] }));
+    const send = calls.find(([method]) => method === "chat.send")?.[1];
+    assert.equal(send?.["sessionKey"], "agent:main:chips-main");
+    bridge.onClaw({
+      event: "chat",
+      payload: { runId: String(send?.["idempotencyKey"]), sessionKey: "agent:main:chips-main", seq: 1, state: "final", message: "None yet." },
+    });
+    await bridge.settled();
+    assert.deepEqual(sent.map((event) => event.type), ["run.started", "message.post", "run.completed"]);
+    for (const event of sent) assert.deepEqual(event["actor"], { kind: "agent", id: main });
+  });
+
+  it("registers the other agents when Chips will not take a Main agent", async () => {
+    const real = chips.registerAgent;
+    chips.registerAgent = async (wanted) => {
+      if (wanted.lead === true) throw new ChipsRefusal(400, "invalid_event", "This harness has a Main agent already.");
+      return real(wanted);
+    };
+    try {
+      await bridge.adoptAgents({ defaultId: "main", agents: [{ id: "main" }, { id: "scout", name: "Scout" }] });
+    } finally {
+      chips.registerAgent = real;
+    }
+    assert.deepEqual(registered.map((each) => each["key"]), ["scout"]);
+    assert.deepEqual(opened, []);
+    assert.deepEqual(homes, []);
   });
 
   it("takes a turn for each of its agents a message is for, each in its own session, said as it", async () => {
@@ -1197,7 +1272,7 @@ describe("OpenClaw's agents as agents in Chips (Chips ADR 0087)", () => {
 
   it("puts its primary agent in the default one's place, for a message to the default one, when it is in no room", async () => {
     const later = "spc_01K4ZQPX000000000000000088";
-    agents = [agentIn("agt_fallback", ME, later)];
+    agents = [agentIn("agt_fallback", ME, later), agentIn("agt_main", "main", null)];
     await bridge.adoptAgents({ defaultId: "main", agents: [{ id: "main" }] });
     await bridge.onChips(said("Hi", { space_id: later, for: ["agt_fallback"] }));
     assert.deepEqual(attached, [["agt_main", later, "agt_fallback"]]);
@@ -1402,6 +1477,8 @@ describe("OpenClaw's agents as agents in Chips (Chips ADR 0087)", () => {
   });
 
   it("puts Chips's room note first, and says the @ rule once (Chips ADR 0092)", async () => {
+    // OpenClaw's main as an agent of its own, keyed by its id, as it was before the Main agent.
+    agents = [...agents, agentIn("agt_main", "main", ROOM)];
     await bridge.adoptAgents({ defaultId: "main", agents: [{ id: "main" }] });
     calls = [];
     const hello = { participant_id: "agt_hello", kind: "agent", display_name: "Hello", role: "member" };
@@ -1430,6 +1507,8 @@ describe("OpenClaw's agents as agents in Chips (Chips ADR 0087)", () => {
   });
 
   it("gives each of our agents taking the turn its own note", async () => {
+    // OpenClaw's main as an agent of its own, keyed by its id, as it was before the Main agent.
+    agents = [...agents, agentIn("agt_main", "main", ROOM)];
     await bridge.adoptAgents({ defaultId: "main", agents: [{ id: "main" }, { id: "kit" }] });
     calls = [];
     await bridge.onChips(
@@ -1451,6 +1530,8 @@ describe("OpenClaw's agents as agents in Chips (Chips ADR 0087)", () => {
 
   it("leads with Chips's word on the agents' talk, as Chips's, ahead of the room note and the words (the referee)", async () => {
     const word = "The agents here have sent each other 9 messages since Arjun last acted, 21 minutes ago.";
+    // OpenClaw's main as an agent of its own, keyed by its id, as it was before the Main agent.
+    agents = [...agents, agentIn("agt_main", "main", ROOM)];
     await bridge.adoptAgents({ defaultId: "main", agents: [{ id: "main" }] });
     calls = [];
     const hello = { participant_id: "agt_hello", kind: "agent", display_name: "Hello", role: "member" };
@@ -1517,6 +1598,8 @@ describe("OpenClaw's agents as agents in Chips (Chips ADR 0087)", () => {
   });
 
   it("takes an agent's words when Chips names it kind agent, and never its own agents' words", async () => {
+    // OpenClaw's main as an agent of its own, keyed by its id, as it was before the Main agent.
+    agents = [...agents, agentIn("agt_main", "main", ROOM)];
     await bridge.adoptAgents({ defaultId: "main", agents: [{ id: "main" }] });
     calls = [];
     const hello = { participant_id: "agt_hello", kind: "agent", display_name: "Hello", role: "member" };
@@ -1855,7 +1938,7 @@ describe("an OpenClaw agent of its own for each agent Chips asks for", () => {
 
   it("does not take the agents it made as OpenClaw agents of their own when it lists OpenClaw's", async () => {
     await bridge.adoptAgents({ defaultId: "main", agents: [{ id: "main" }, { id: MADE }, { id: "scout", name: "Scout" }] });
-    assert.deepEqual(registered.map((each) => each["key"]), ["main", "scout"]);
+    assert.deepEqual(registered.map((each) => each["key"]), [bridge.mainKey(), "scout"]);
   });
 
   it("reads a file a made agent's answer names from its own folder", async () => {

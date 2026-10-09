@@ -78,6 +78,8 @@ export interface ChipsPort {
   upload(filename: string, bytes: Buffer): Promise<string>;
   agents(): Promise<ChipsAgent[]>;
   registerAgent(agent: NewAgent): Promise<ChipsAgent & Placed>;
+  /** A room of this harness's own by its key: opened, or found again. Its id. */
+  openSpace(key: string): Promise<string>;
   attach(agentId: string, spaceId: string, replacing: string): Promise<boolean>;
   roomContext(spaceId: string, before: number, limit: number): Promise<unknown>;
 }
@@ -641,6 +643,16 @@ export class Bridge {
     return this.keyFor(spaceId, madeAgentId(askId));
   }
 
+  /**
+   * The key the Main agent is registered under and its Main room opened by (Chips ADR 0087): the
+   * primary agent's session in a room called `main`, which no Chips room is. Keyed by a session,
+   * as an agent the bridge made is, it is that one conversation of the primary agent's wherever
+   * Chips has it, and its Main room is the only place Chips has it.
+   */
+  mainKey(): string {
+    return `agent:${this.primary}:chips-main`;
+  }
+
   /** The room a session is, when it is one of this bridge's. */
   spaceFor(sessionKey: string): string | undefined {
     const rest = SESSION.exec(sessionKey)?.[2];
@@ -682,31 +694,61 @@ export class Bridge {
   // ------------------------------------------------------------------ OpenClaw's agents in Chips
 
   /**
-   * OpenClaw's agents as this harness's agents in Chips (ADR 0087): each the gateway lists, or
-   * only `only`, registered by its OpenClaw id and named as the gateway names it — or, with no
-   * name of its own, as the harness is. Nobody is moved: an agent is in one room at a time, so
-   * putting each in the default agent's rooms would have Chips refuse all but one. Each stays
-   * where Chips has it, read again once all are registered. One the bridge made for one of ours
-   * is that agent's already, under its session's key, and is not registered again.
+   * OpenClaw's agents as this harness's agents in Chips (ADR 0087). The primary agent — the
+   * gateway's default, its system agent, or `only` — is the Main agent, in its Main room
+   * (`seatMain`). Each other agent the gateway lists, unless `only` is set, is registered by its
+   * OpenClaw id. Each is named as the gateway names it, or, with no name of its own, as the
+   * harness is. Nobody is moved: an agent is in one room at a time, so putting each in the default
+   * agent's rooms would have Chips refuse all but one. Each stays where Chips has it, read again
+   * once all are registered. One the bridge made for one of ours is that agent's already, under
+   * its session's key, and is not registered again.
    */
   async adoptAgents(listed: { defaultId?: string; agents?: readonly ClawAgent[] }, only?: string): Promise<void> {
-    const agents = (listed.agents ?? []).filter(
-      (each) => each.kind !== "system" && !isMadeAgent(each.id) && (only === undefined || each.id === only),
-    );
     this.primary = only ?? listed.defaultId ?? this.primary;
-    if (!agents.some((each) => each.id === this.primary)) agents.unshift({ id: this.primary });
+    const listedAgents = listed.agents ?? [];
+    const agents = listedAgents.filter(
+      (each) => each.kind !== "system" && !isMadeAgent(each.id) && each.id !== this.primary && only === undefined,
+    );
     const known = await this.chips.agents();
     const harnessName = known.find((each) => each.key === this.self.harnessId)?.name ?? "OpenClaw";
-    for (const agent of agents) {
+    const nameOf = (agent: ClawAgent): string => {
       const named = agent.identity?.name ?? agent.name;
-      const name = named === undefined || named === agent.id || named.trim() === "" ? harnessName : named.trim();
+      return named === undefined || named === agent.id || named.trim() === "" ? harnessName : named.trim();
+    };
+    await this.seatMain(known, nameOf(listedAgents.find((each) => each.id === this.primary) ?? { id: this.primary }));
+    for (const agent of agents) {
       try {
-        await this.chips.registerAgent({ key: agent.id, name });
+        await this.chips.registerAgent({ key: agent.id, name: nameOf(agent) });
       } catch (error) {
         this.log(`chips refused agent ${agent.id}: ${String(error)}`);
       }
     }
     this.learn(await this.chips.agents());
+  }
+
+  /**
+   * The primary agent as this harness's Main agent (Chips ADR 0087, rule 7), as Jacobian's J is:
+   * registered under `mainKey` as the lead, in a room opened by the same key, which Chips puts it
+   * in, and that room named the harness's home (ADR 0069), which nobody archives or deletes. A
+   * Main agent Chips has already is kept, under whatever key, in its room; one with no room is
+   * given its room again. Each step is the same asked twice, so a start does them all again.
+   */
+  private async seatMain(known: readonly ChipsAgent[], name: string): Promise<void> {
+    try {
+      const had = known.find((each) => each.lead);
+      const main = had ?? (await this.chips.registerAgent({ key: this.mainKey(), name, lead: true }));
+      const room = main.room ?? main.spaces[0] ?? (await this.chips.openSpace(main.key));
+      await this.chips.send({
+        type: "space.updated",
+        space_id: room,
+        home: true,
+        actor: { kind: "agent", id: main.agent_id },
+        idempotency_key: `home-${room}`,
+      });
+      if (had === undefined) this.log(`chips: ${main.name} is this harness's Main agent, in ${room}`);
+    } catch (error) {
+      this.log(`chips: no Main agent in its Main room: ${String(error)}`);
+    }
   }
 
   /**
@@ -902,6 +944,14 @@ export class Bridge {
     void this.contexts?.agent(agentId, clawAgent);
   }
 
+  /**
+   * The OpenClaw agent whose files one of ours is built from, as its page in Chips shows them
+   * (ADR 0134): the one the bridge made for it, or the primary agent for the Main agent.
+   */
+  private filesClawAgentOf(agentId: string): string | undefined {
+    return this.keyOf.get(agentId) === this.mainKey() ? this.primary : this.madeClawAgentOf(agentId);
+  }
+
   /** The OpenClaw agent the bridge made for one of our agents in Chips, if it made one. */
   private madeClawAgentOf(agentId: string): string | undefined {
     const key = this.keyOf.get(agentId);
@@ -1060,14 +1110,14 @@ export class Bridge {
 
   /**
    * Our agents' context, and the harness's own, sent to Chips at start (ADR 0134): each agent the
-   * bridge made, as its folder is now. A copy that has not moved since is sent again once, at
+   * bridge made, as its folder is now, and the Main agent, as the primary agent's is. A copy that has not moved since is sent again once, at
    * start, since the bridge keeps no record of what it sent before.
    */
   async sendContexts(): Promise<void> {
     if (this.contexts === undefined) return;
     const sends = [this.contexts.harness(this.primary)];
     for (const agentId of this.keyOf.keys()) {
-      const clawAgent = this.madeClawAgentOf(agentId);
+      const clawAgent = this.filesClawAgentOf(agentId);
       if (clawAgent !== undefined) sends.push(this.contexts.agent(agentId, clawAgent));
     }
     await Promise.all(sends);
@@ -1075,15 +1125,15 @@ export class Bridge {
 
   /**
    * A person's edit of a context file from Chips (ADR 0134): one of an agent's the bridge made, in
-   * its folder, or of the harness's own set, in the primary agent's. One for an agent the bridge
-   * did not make is not answered, and Chips tells the person it was missed.
+   * its folder, or of the harness's own set or the Main agent's, in the primary agent's. One for
+   * any other agent is not answered, and Chips tells the person it was missed.
    */
   async onContextEdit(frame: Payload): Promise<void> {
     if (this.contexts === undefined) return;
     const edit = frame as unknown as EditFrame;
     if (edit.agent_id === undefined) return this.contexts.edit(edit, this.primary);
     if (!this.keyOf.has(edit.agent_id)) this.learn(await this.chips.agents());
-    const clawAgent = this.madeClawAgentOf(edit.agent_id);
+    const clawAgent = this.filesClawAgentOf(edit.agent_id);
     if (clawAgent === undefined) {
       this.log(`chips: an edit of ${edit.name} for ${edit.agent_id}, which has no OpenClaw agent of its own`);
       return;
@@ -1682,7 +1732,7 @@ export class Bridge {
     // A turn may have changed the files its agent is built from (its memory, its soul): the copy
     // in Chips is read again, and sent if it moved (Chips ADR 0134).
     const agentId = this.agentByKey.get(run.sessionKey);
-    const clawAgent = agentId === undefined ? undefined : this.madeClawAgentOf(agentId);
+    const clawAgent = agentId === undefined ? undefined : this.filesClawAgentOf(agentId);
     if (agentId !== undefined && clawAgent !== undefined) void this.contexts?.agent(agentId, clawAgent);
     // A turn that answered `NO_REPLY` passed (Chips ADR 0105): OpenClaw leaves the word out of its
     // chat, so the bridge says it, and Chips makes the post the turn's pass, which the room never

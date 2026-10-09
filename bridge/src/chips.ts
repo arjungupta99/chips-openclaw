@@ -65,6 +65,8 @@ export class ChipsRefusal extends Error {
 export interface NewAgent {
   readonly key: string;
   readonly name: string;
+  /** The harness's Main agent (Chips ADR 0087): one at most, only ever in its Main room. */
+  readonly lead?: boolean;
   readonly made_for?: string;
   readonly space_id?: string;
 }
@@ -205,6 +207,18 @@ export class Chips {
       attached?: boolean;
     };
     return answer.attached === true;
+  }
+
+  /**
+   * A room of this harness's own, opened by its key, or found again by it: Chips puts the agent
+   * registered under the same key in it, in the harness's place (Chips ADR 0087's addendum of 30
+   * September, point 5). Untitled, it is called what its agent is.
+   */
+  async openSpace(key: string): Promise<string> {
+    const opened = (await this.call("POST", `/v1/harnesses/${this.options.harnessId}/spaces`, { key })) as {
+      space_id: string;
+    };
+    return opened.space_id;
   }
 
   /** Claim a room a person asked for, under this harness's own key for its session. */
