@@ -128,11 +128,15 @@ export class OpenClaw {
   }
 
   /** A gateway method, once connected; one the socket dropped under is tried again after hello. */
-  async request<T = Record<string, unknown>>(method: string, params: Record<string, unknown>): Promise<T> {
+  async request<T = Record<string, unknown>>(
+    method: string,
+    params: Record<string, unknown>,
+    options?: { readonly timeoutMs?: number },
+  ): Promise<T> {
     for (let attempt = 1; ; attempt += 1) {
       await this.ready();
       try {
-        return (await this.client.request(method, params)) as T;
+        return (await this.client.request(method, params, options)) as T;
       } catch (error) {
         // A refusal from the gateway is its answer; only a lost socket is worth another try.
         if (this.connected || attempt >= 3) throw error;

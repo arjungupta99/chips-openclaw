@@ -12,6 +12,7 @@ import { Chips, type ChipsEvent } from "./chips.ts";
 import { loadConfig } from "./config.ts";
 import { Contexts } from "./context.ts";
 import { Heartbeats } from "./heartbeats.ts";
+import { Windows } from "./windows.ts";
 import { Models } from "./models.ts";
 import { health } from "./health.ts";
 import { readMedia, rootsFor } from "./media.ts";
@@ -39,6 +40,10 @@ const chips = new Chips({
     void bridge?.onModelChange(frame).catch((error) => log(`chips: a model change failed: ${String(error)}`)),
   onHeartbeatChange: (frame) =>
     void bridge?.onHeartbeatChange(frame).catch((error) => log(`chips: a heartbeat change failed: ${String(error)}`)),
+  onWindowCompact: (frame) =>
+    void bridge?.onWindowCompact(frame).catch((error) => log(`chips: a Compact now failed: ${String(error)}`)),
+  onWindowChange: (frame) =>
+    void bridge?.onWindowChange(frame).catch((error) => log(`chips: a context window limit failed: ${String(error)}`)),
 });
 let bridge: Bridge | undefined;
 
@@ -131,6 +136,7 @@ bridge = new Bridge(
   new Contexts(claw, (owner, body) => chips.putContext(owner, body), log),
   new Models(claw, (agentId, body) => chips.putModel(agentId, body), log),
   new Heartbeats(claw, (agentId, body) => chips.putHeartbeat(agentId, body), log),
+  new Windows(claw, (agentId, body) => chips.putWindow(agentId, body), log, join(config.stateDir, "context-windows.json")),
 );
 
 /**
@@ -202,6 +208,8 @@ async function main(): Promise<void> {
   await active.sendModels();
   // Whether the Main agent checks in on its own, and how often (Chips ADR 0143).
   await active.sendHeartbeats();
+  // How full each of them is, and the limit it compacts itself at (Chips ADR 0146).
+  await active.sendWindows();
   await catchUp(active);
   chips.stream((event) => active.onChips(event));
 }

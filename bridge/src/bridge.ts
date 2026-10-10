@@ -67,6 +67,7 @@ import type { ClawEvent } from "./openclaw.ts";
 import { Contexts, type EditFrame } from "./context.ts";
 import type { ChangeFrame, Models, Whose as ModelOwner } from "./models.ts";
 import { type ChangeFrame as BeatChange, checkInOf, type Heartbeats } from "./heartbeats.ts";
+import type { CompactFrame, LimitFrame, Session, Windows } from "./windows.ts";
 import { isMadeAgent, madeAgentId, type Workspaces } from "./own-agents.ts";
 import { filesLine, namedIn, ROOM_FILES, type RoomFile, roomFilesIn, STALE_FILE, staleIn } from "./room-files.ts";
 
@@ -96,7 +97,12 @@ export interface ClawAgent {
 
 /** What the bridge needs of OpenClaw. */
 export interface ClawPort {
-  request<T = Record<string, unknown>>(method: string, params: Record<string, unknown>): Promise<T>;
+  /** `timeoutMs`: for a method that takes longer than the client waits by default, a compaction's. */
+  request<T = Record<string, unknown>>(
+    method: string,
+    params: Record<string, unknown>,
+    options?: { readonly timeoutMs?: number },
+  ): Promise<T>;
 }
 
 /** The files an OpenClaw turn names with `MEDIA:` lines, read where the gateway keeps them (`media.ts`). */
@@ -182,6 +188,11 @@ interface Run {
   outputTokens?: number;
   contextTokens?: number;
   contextWindow?: number;
+  /**
+   * OpenClaw compacted the session on its own during the turn (its `compaction` stream), from about
+   * this many tokens: the turn's end reads what it came to, and Chips's line says so (ADR 0146).
+   */
+  compactedFrom?: number;
 }
 
 type Payload = Record<string, unknown>;
@@ -622,6 +633,8 @@ export class Bridge {
     private readonly models?: Models,
     /** The Main agent's heartbeat in Chips (ADR 0143); none, and nothing is sent, changed or posted. */
     private readonly heartbeats?: Heartbeats,
+    /** Our agents' context windows in Chips (ADR 0146); none, and nothing is sent or compacted. */
+    private readonly windows?: Windows,
   ) {
     this.primary = self.agent;
   }
@@ -955,6 +968,7 @@ export class Bridge {
     this.contexts?.forget(agentId);
     this.models?.forget(agentId);
     this.heartbeats?.forget(agentId);
+    this.windows?.forget(agentId);
     const clawAgent = this.agentFor(key);
     if (clawAgent !== undefined && isMadeAgent(clawAgent)) await this.removeClawAgent(clawAgent);
   }
@@ -1249,6 +1263,85 @@ export class Bridge {
       return;
     }
     return this.heartbeats.change(change, this.primary);
+  }
+
+  /**
+   * The OpenClaw session one of ours speaks in, whose context window Chips shows (ADR 0146): its own
+   * wherever Chips moves it, Home for the Main agent, and for an agent keyed by an OpenClaw agent,
+   * its session in the room it is in. Nothing for one of those in no room, or for none of ours.
+   */
+  private windowSessionOf(agentId: string): Session | undefined {
+    const key = this.keyOf.get(agentId);
+    if (key === undefined) return undefined;
+    const clawAgent = this.agentFor(key);
+    if (clawAgent !== undefined) return { key: this.sessionOfKey(key), clawAgent };
+    if (key === this.mainKey()) return { key: this.homeKey(), clawAgent: this.primary };
+    const room = this.roomOf.get(agentId);
+    if (room === undefined || room === null) return undefined;
+    const taker = this.takerFor(agentId, room);
+    return { key: taker.sessionKey, clawAgent: taker.clawAgent };
+  }
+
+  /** Whether one of the bridge's own turns runs in a session now. */
+  private turnIn(sessionKey: string): boolean {
+    for (const run of this.runs.values()) if (!run.ended && run.sessionKey === sessionKey) return true;
+    return false;
+  }
+
+  /** Each of our agents' context window, sent to Chips at start (ADR 0146): every one with a session. */
+  async sendWindows(): Promise<void> {
+    if (this.windows === undefined) return;
+    const sends: Promise<void>[] = [];
+    for (const agentId of this.keyOf.keys()) {
+      const session = this.windowSessionOf(agentId);
+      if (session !== undefined) sends.push(this.windows.agent(agentId, session));
+    }
+    await Promise.all(sends);
+  }
+
+  /** The session a Compact now or a limit from Chips is for: one of ours, learnt again if need be. */
+  private async windowFor(agentId: string, what: string): Promise<Session | undefined> {
+    if (!this.keyOf.has(agentId)) this.learn(await this.chips.agents());
+    const session = this.windowSessionOf(agentId);
+    if (session === undefined) this.log(`chips: ${what} for ${agentId}, which has no OpenClaw session of ours now`);
+    return session;
+  }
+
+  /**
+   * A person's Compact now from Chips (ADR 0146): done in the agent's session now, or when the
+   * bridge's turn there ends. One for an agent with no session of ours is not answered, and Chips
+   * tells the person it was missed.
+   */
+  async onWindowCompact(frame: Payload): Promise<void> {
+    if (this.windows === undefined) return;
+    const ask = frame as unknown as CompactFrame;
+    const session = await this.windowFor(ask.agent_id, "a Compact now");
+    if (session === undefined) return;
+    return this.windows.compact(ask, session, this.turnIn(session.key));
+  }
+
+  /** A person's change of the limit an agent compacts itself at, from Chips (ADR 0146). */
+  async onWindowChange(frame: Payload): Promise<void> {
+    if (this.windows === undefined) return;
+    const change = frame as unknown as LimitFrame;
+    const session = await this.windowFor(change.agent_id, "a context window limit");
+    if (session === undefined) return;
+    return this.windows.change(change, session);
+  }
+
+  /**
+   * OpenClaw said a session changed (ADR 0146): one of ours is read again once the change settles,
+   * unless one of the bridge's turns runs there, whose end reads it anyway; a compaction done in
+   * OpenClaw itself is remembered.
+   */
+  private sessionChanged(p: Payload): void {
+    const sessionKey = str(p["sessionKey"]) ?? str(p["key"]);
+    if (this.windows === undefined || sessionKey === undefined || this.turnIn(sessionKey)) return;
+    const agentId = this.agentOfSession(sessionKey);
+    const session = agentId === undefined ? undefined : this.windowSessionOf(agentId);
+    if (agentId === undefined || session?.key !== sessionKey) return;
+    const compacted = p["reason"] === "compact" && p["compacted"] !== false;
+    this.windows.changed(agentId, session, compacted);
   }
 
   /**
@@ -1686,6 +1779,8 @@ export class Bridge {
         return this.agent(p);
       case "session.message":
         return this.heartbeatSaid(p);
+      case "sessions.changed":
+        return this.sessionChanged(p);
       case "exec.approval.requested":
         return this.asksApproval(p);
       case "plugin.approval.requested":
@@ -1879,6 +1974,12 @@ export class Bridge {
     if (agentId !== undefined && owner !== undefined) void this.models?.agent(agentId, owner);
     // So may the Main agent's heartbeat, which a person may change in OpenClaw too (ADR 0143).
     if (agentId !== undefined && agentId === this.beatingAgent()) void this.heartbeats?.agent(agentId, this.primary);
+    // How full its session is now, and whether it compacts itself or as a person asked (ADR 0146).
+    const session = agentId === undefined ? undefined : this.windowSessionOf(agentId);
+    const filled =
+      agentId === undefined || session === undefined || this.windows === undefined
+        ? undefined
+        : this.windows.turnEnded(agentId, session, run.compactedFrom);
     // A turn that answered `NO_REPLY` passed (Chips ADR 0105): OpenClaw leaves the word out of its
     // chat, so the bridge says it, and Chips makes the post the turn's pass, which the room never
     // shows. Without it the run ended on "Answered together with other words, in one reply."
@@ -1917,16 +2018,23 @@ export class Bridge {
         ? undefined
         : { type: "usage", run_id: run.chipsRun, ...usage, idempotency_key: `openclaw-run:${clawRun}:usage` };
     });
-    if (run.contextTokens !== undefined && run.contextWindow !== undefined && run.contextWindow > 0) {
-      this.write(run, {
+    // How full the session is: from Codex's own counts where it ran the turn, else from OpenClaw's
+    // session as the turn left it, for the room's context ring (Chips ADR 0146).
+    this.write(run, async () => {
+      const fill = await filled?.catch(() => undefined);
+      const used = run.contextTokens ?? fill?.used;
+      const limit = run.contextWindow ?? fill?.window;
+      if (used === undefined || limit === undefined || limit <= 0) return undefined;
+      return {
         type: "context.usage",
         run_id: run.chipsRun,
-        used_tokens: run.contextTokens,
-        limit_tokens: run.contextWindow,
+        used_tokens: used,
+        limit_tokens: limit,
         model,
+        ...(run.compactedFrom === undefined ? {} : { compacted: true }),
         idempotency_key: `openclaw-run:${clawRun}:context`,
-      });
-    }
+      };
+    });
     // The whole reply as it was posted, so Chips draws the answer and the summary as one card
     // rather than two.
     this.write(run, () => {
@@ -2029,6 +2137,13 @@ export class Bridge {
         return;
       case "tool":
         return this.tool(run, p);
+      case "compaction":
+        // OpenClaw compacting the session on its own, near full (ADR 0146): from about what it held.
+        if (data["phase"] === "start" && run.compactedFrom === undefined) {
+          const agentId = this.agentOfSession(run.sessionKey);
+          run.compactedFrom = run.contextTokens ?? (agentId === undefined ? undefined : this.windows?.usedOf(agentId)) ?? 0;
+        }
+        return;
       case "assistant":
         if (data["phase"] !== "commentary") run.said = str(data["text"]) ?? run.said;
         return this.named(run, data);
@@ -2350,6 +2465,7 @@ export class Bridge {
     await this.contexts?.settled();
     await this.models?.settled();
     await this.heartbeats?.settled();
+    await this.windows?.settled();
   }
 }
 

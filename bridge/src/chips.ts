@@ -54,6 +54,12 @@ export interface ChipsOptions {
    * `heartbeats` in its hello, so Chips sends changes to it.
    */
   readonly onHeartbeatChange?: (frame: Record<string, unknown>) => void;
+  /**
+   * A person asked an agent to compact now, or changed the limit it compacts itself at, from Chips
+   * (Chips ADR 0146). Given, the socket says `context_windows` in its hello, so Chips sends both.
+   */
+  readonly onWindowCompact?: (frame: Record<string, unknown>) => void;
+  readonly onWindowChange?: (frame: Record<string, unknown>) => void;
 }
 
 /** What a refused write said, so the bridge can tell a duplicate or a closed run from a fault. */
@@ -227,6 +233,14 @@ export class Chips {
     await this.call("PUT", `/v1/agents/${agentId}/heartbeat`, body);
   }
 
+  /**
+   * A copy of an agent's context window, whole (Chips ADR 0146): `PUT
+   * /v1/agents/:id/context-window`, answering an ask or not.
+   */
+  async putWindow(agentId: string, body: Record<string, unknown>): Promise<void> {
+    await this.call("PUT", `/v1/agents/${agentId}/context-window`, body);
+  }
+
   /** One of our agents in a room, in the place of `replacing` there. True when it moved in now. */
   async attach(agentId: string, spaceId: string, replacing: string): Promise<boolean> {
     const answer = (await this.call("POST", `/v1/agents/${agentId}/attach`, { space_id: spaceId, replacing })) as {
@@ -345,6 +359,7 @@ export class Chips {
             ...(this.options.onContextEdit === undefined ? [] : ["context"]),
             ...(this.options.onModelChange === undefined ? [] : ["models"]),
             ...(this.options.onHeartbeatChange === undefined ? [] : ["heartbeats"]),
+            ...(this.options.onWindowCompact === undefined ? [] : ["context_windows"]),
           ],
         }),
       );
@@ -383,6 +398,13 @@ export class Chips {
       case "heartbeat.change":
         // Now or never too: answered by the agent's next copy (Chips ADR 0143).
         this.options.onHeartbeatChange?.(frame);
+        return;
+      case "context_window.compact":
+        // Now or never too: taken, and then done, by the agent's next copies (Chips ADR 0146).
+        this.options.onWindowCompact?.(frame);
+        return;
+      case "context_window.change":
+        this.options.onWindowChange?.(frame);
         return;
       case "error":
         this.options.log(`chips: error frame ${JSON.stringify(frame)}`);
