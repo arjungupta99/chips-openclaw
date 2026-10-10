@@ -17,8 +17,9 @@
  * starting as it is taken in can fail, and the bridge sends such a turn again once (`bridge.ts`).
  * `null` takes the agent's own away, so it runs on the defaults again.
  *
- * Only the agents the bridge made are changed from Chips. The primary agent, and any agent the
- * bridge found in OpenClaw, are OpenClaw's: their copies say so, and Chips shows them read only.
+ * The agents the bridge made are changed from Chips, and so is the primary agent, which is the
+ * Main agent in Chips (its heartbeat is set from Chips too, ADR 0143). Any agent the bridge found
+ * in OpenClaw is OpenClaw's: its copy says so, and Chips shows it read only.
  *
  * Chips holds no model's name: every label here is OpenClaw's, or this module's for its levels.
  */
@@ -33,7 +34,7 @@ export const EFFORT_LEVELS_MAX = 8;
 /** How long a refusal's words may be in Chips. */
 const MESSAGE_MAX = 300;
 
-/** Why an agent the bridge did not make can't be changed from Chips (the plan's ruling 11). */
+/** Why an agent the bridge found in OpenClaw can't be changed from Chips (the plan's ruling 11). */
 export const READ_ONLY_WHY = "OpenClaw's own agent. Change it in OpenClaw.";
 /** What the Same as switch says for an agent with no model of its own. */
 export const DEFAULT_LABEL = "OpenClaw's default";
@@ -83,10 +84,13 @@ export interface ClawSetting {
   readonly thinkingDefault?: string;
 }
 
-/** Whose an agent is, as the bridge sees it: the OpenClaw agent, and whether the bridge made it. */
+/**
+ * Whose an agent is, as the bridge sees it: the OpenClaw agent, and whether Chips may change it,
+ * which it may for one the bridge made and for the primary agent.
+ */
 export interface Whose {
   readonly clawAgent: string;
-  readonly made: boolean;
+  readonly changeable: boolean;
 }
 
 /** What a copy says of a person's change: made, or not and why. */
@@ -257,7 +261,7 @@ export class Models {
       own: config.config?.agents?.entries?.[whose.clawAgent],
       defaults: config.config?.agents?.defaults,
       models: offered.models ?? [],
-      editable: whose.made,
+      editable: whose.changeable,
     });
   }
 
@@ -285,13 +289,13 @@ export class Models {
 
   /**
    * A person's change from Chips: written into the agent's entry, then answered by the copy as it
-   * is now. An agent the bridge did not make is refused, as is any write OpenClaw refuses, with
+   * is now. An agent Chips may not change is refused, as is any write OpenClaw refuses, with
    * its words; the copy beside the refusal says what the agent still runs on.
    */
   async change(frame: ChangeFrame, whose: Whose): Promise<void> {
     let answer: Answer;
     let made: ChangeFrame | undefined;
-    if (!whose.made) {
+    if (!whose.changeable) {
       answer = { refuses: { change_id: frame.change_id, message: READ_ONLY_WHY } };
     } else {
       try {

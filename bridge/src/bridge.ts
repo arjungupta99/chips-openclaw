@@ -835,7 +835,7 @@ export class Bridge {
       this.learn([made]);
       await this.nameClawAgent(clawAgent, made.name);
       void this.contexts?.agent(made.agent_id, clawAgent);
-      void this.models?.agent(made.agent_id, { clawAgent, made: true });
+      void this.models?.agent(made.agent_id, { clawAgent, changeable: true });
       const placed = made.attached === false && made.why !== undefined ? `, not in it: ${made.why}` : "";
       this.log(`chips: made ${made.name} for ${room}${placed}`);
     } catch (error) {
@@ -1002,18 +1002,18 @@ export class Bridge {
   }
 
   /**
-   * The OpenClaw agent whose model one of ours runs on (ADR 0140), and whether the bridge made it,
-   * which only one it made may be changed from Chips: the one made for it; the primary agent for
-   * the Main agent and for the harness itself; otherwise the agent its key names, a session's or
-   * one the bridge found in OpenClaw.
+   * The OpenClaw agent whose model one of ours runs on (ADR 0140), and whether Chips may change it:
+   * the one made for it, which it may; the primary agent for the Main agent and for the harness
+   * itself, which it may too, as it sets the Main agent's heartbeat (ADR 0143); otherwise the agent
+   * its key names, a session's or one the bridge found in OpenClaw, which is OpenClaw's.
    */
   private modelOwnerOf(agentId: string): ModelOwner | undefined {
     const key = this.keyOf.get(agentId);
     if (key === undefined) return undefined;
     const made = this.madeClawAgentOf(agentId);
-    if (made !== undefined) return { clawAgent: made, made: true };
-    if (key === this.mainKey() || key === this.self.harnessId) return { clawAgent: this.primary, made: false };
-    return { clawAgent: this.agentFor(key) ?? key, made: false };
+    if (made !== undefined) return { clawAgent: made, changeable: true };
+    if (key === this.mainKey() || key === this.self.harnessId) return { clawAgent: this.primary, changeable: true };
+    return { clawAgent: this.agentFor(key) ?? key, changeable: false };
   }
 
   /** One of ours taken out of its room: free, until Chips puts it in another. Its OpenClaw sessions stay. */
@@ -1141,7 +1141,7 @@ export class Bridge {
     if (name !== undefined && clawAgent !== undefined && isMadeAgent(clawAgent)) await this.nameClawAgent(clawAgent, name);
     if (agentId !== undefined && clawAgent !== undefined && isMadeAgent(clawAgent)) {
       void this.contexts?.agent(agentId, clawAgent);
-      void this.models?.agent(agentId, { clawAgent, made: true });
+      void this.models?.agent(agentId, { clawAgent, changeable: true });
     }
     return agentId !== undefined && this.roomOf.get(agentId) === spaceId ? agentId : undefined;
   }
@@ -1203,8 +1203,8 @@ export class Bridge {
 
   /**
    * Each of our agents' model, sent to Chips at start (ADR 0140): every agent OpenClaw lists that
-   * one of ours runs as, read only unless the bridge made it. Each is sent once at start, since the
-   * bridge keeps no record of what it sent before.
+   * one of ours runs as, read only unless the bridge made it or it is the primary agent. Each is
+   * sent once at start, since the bridge keeps no record of what it sent before.
    */
   async sendModels(): Promise<void> {
     if (this.models === undefined) return;
@@ -1218,8 +1218,9 @@ export class Bridge {
 
   /**
    * A person's change of an agent's model or effort from Chips (ADR 0140): written into the OpenClaw
-   * agent the bridge made for it, and refused for any other with OpenClaw's own words for why. One
-   * for an agent the bridge doesn't know is not answered, and Chips tells the person it was missed.
+   * agent the bridge made for it, or the primary agent for the Main agent, and refused for any other
+   * with OpenClaw's own words for why. One for an agent the bridge doesn't know is not answered, and
+   * Chips tells the person it was missed.
    */
   async onModelChange(frame: Payload): Promise<void> {
     if (this.models === undefined) return;
