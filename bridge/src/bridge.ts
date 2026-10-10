@@ -1538,9 +1538,9 @@ export class Bridge {
     spaceId: string,
     event: ChipsEvent,
     words: string,
-  ): Promise<{ sent: Payload[]; line: string | undefined; took: () => void }> {
+  ): Promise<{ sent: Payload[]; line: string; took: () => void }> {
     const files = roomFilesIn(event["context"]);
-    if (files.length === 0) return { sent: [], line: undefined, took: () => undefined };
+    if (files.length === 0) return { sent: [], line: filesLine([], []), took: () => undefined };
     const has = this.versionsOf(sessionKey, spaceId);
     const onMessage = attachmentsOf(event);
     const carried = files.filter((file) => carries(onMessage, file));

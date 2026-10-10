@@ -12,6 +12,10 @@
  *
  * Nothing here from a Chips that lists no files, and a Chips that does not know `replaces` leaves it
  * out of what it keeps.
+ *
+ * Every turn in a room is also told how a file reaches it (Chips AW-19, 10 October 2026): on their
+ * first turns in the Terra Fab room, before it had a file, both of our agents named a path in their
+ * own folder instead of sending the file, and nobody else could open it.
  */
 
 /** One file of a room, at its current version, as Chips lists it with a message. */
@@ -26,6 +30,11 @@ export interface RoomFile {
   readonly by: string | undefined;
   readonly url: string;
 }
+
+/** How a file reaches a room, said with every turn there: a path in an agent's folder does not. */
+export const SENDING_FILES =
+  "A file reaches this room only when you send it, on a line of its own: MEDIA:<path>. " +
+  "A path alone reaches nobody: the people and agents here cannot open your folder.";
 
 /** As many of a room's files as one turn is handed, and the most bytes each may have. */
 export const ROOM_FILES = { most: 5, bytes: 5 * 1024 * 1024 } as const;
@@ -96,11 +105,14 @@ function described(file: RoomFile): string {
   return about === "" ? file.name : `${file.name} (${about})`;
 }
 
-/** What a turn is told of the room's files it was handed, and of those it named and was not. */
+/**
+ * What a turn is told of the room's files it was handed, of those it named and was not, and how a
+ * file of its own reaches the room.
+ */
 export function filesLine(
   handed: readonly RoomFile[],
   left: readonly { readonly file: RoomFile; readonly why: string }[],
-): string | undefined {
+): string {
   const lines: string[] = [];
   if (handed.length > 0) {
     lines.push(
@@ -109,7 +121,8 @@ export function filesLine(
     );
   }
   for (const { file, why } of left) lines.push(`Not attached: ${described(file)}, ${why}.`);
-  return lines.length === 0 ? undefined : lines.join("\n");
+  lines.push(SENDING_FILES);
+  return lines.join("\n");
 }
 
 /**
