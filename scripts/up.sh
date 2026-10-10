@@ -32,10 +32,22 @@ if [ ! -f "$DIR/state/openclaw.json" ]; then
   oc_run config set plugins.entries.codex.enabled true
   # Codex's own sandbox (bubblewrap) cannot start in an unprivileged container, so every command
   # failed after its yes. The container is the sandbox instead (Arjun's call, 27 September 2026):
-  # full access inside it, and `untrusted` asks for everything beyond Codex's read-only safe list.
-  oc_run config set plugins.entries.codex.config.appServer.approvalPolicy untrusted
+  # full access inside it. It was `untrusted` (everything beyond Codex's read-only safe list asked)
+  # until 10 October 2026, when the Codex plugin refused to load with it ("retired") and
+  # `openclaw doctor --fix` moved it to `on-request` on Arjun's word.
+  oc_run config set plugins.entries.codex.config.appServer.approvalPolicy on-request
   oc_run config set plugins.entries.codex.config.appServer.approvalsReviewer user
   oc_run config set plugins.entries.codex.config.appServer.sandbox danger-full-access
+  # The models' larger window (Arjun's call, 10 October 2026): the ChatGPT sign-in's catalog gives
+  # gpt-6-astra 272K by default and 872K at most, and a 337,853-token turn was taken. Codex gets
+  # the window and compacts at 700K, 80% of it, as Jacobian does by default (total scope counts
+  # the whole thread). OpenClaw's own cap, which sessions.describe and so Chips report, is raised
+  # to match; the model is pinned to Codex, since an authored provider entry could otherwise move
+  # it off the implicit Codex route.
+  oc_run config set plugins.entries.codex.config.appServer.args \
+    '["app-server","--listen","stdio://","-c","model_context_window=872000","-c","model_auto_compact_token_limit=700000","-c","model_auto_compact_token_limit_scope=total"]' \
+    --strict-json
+  oc_run config set --batch-json '[{"path":"models.providers.openai.models","value":[{"id":"gpt-6-astra","name":"GPT-6 Astra","contextWindow":1050000,"contextTokens":872000,"maxTokens":128000}]},{"path":"agents.defaults.models[\"openai/gpt-6-astra\"].agentRuntime","value":{"id":"codex"}}]'
 fi
 
 compose up -d gateway
