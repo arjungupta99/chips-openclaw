@@ -164,6 +164,11 @@ interface Run {
   readonly media: string[];
   /** The files its answer uploaded, by upload id: each one's name. */
   readonly uploaded: Map<string, string>;
+  /**
+   * Where each of its tools runs, by tool call, from the tool's start until its result: a plugin's
+   * ask names no folder, so its card says the one its tool started in (AQ-2).
+   */
+  readonly cwds: Map<string, string>;
   /** The answer as it was posted, files' notes and links included, for the run's summary. */
   reply?: string;
   /**
@@ -1865,6 +1870,7 @@ export class Bridge {
       ended: false,
       media: [],
       uploaded: new Map(),
+      cwds: new Map(),
       startedAt: this.now(),
       costAt: this.now(),
       costUsd: 0,
@@ -2170,6 +2176,9 @@ export class Bridge {
     const phase = str(data["phase"]);
     const stepId = str(data["toolCallId"]) ?? str(data["id"]);
     if (stepId === undefined || (phase !== "start" && phase !== "result" && phase !== "end")) return;
+    const cwd = str(((data["args"] ?? {}) as Payload)["cwd"]);
+    if (phase === "start" && cwd !== undefined) run.cwds.set(stepId, cwd);
+    if (phase !== "start") run.cwds.delete(stepId);
     const failed = data["isError"] === true;
     const status = phase === "start" ? "started" : failed ? "failed" : "done";
     this.write(run, {
@@ -2247,8 +2256,10 @@ export class Bridge {
 
   /**
    * A plugin's ask. Codex's own shell asks this way ("Codex app-server command approval") when the
-   * model runs a command natively rather than through OpenClaw's exec tool; the command is on the
-   * description's `Command:` line.
+   * model runs a command natively rather than through OpenClaw's exec tool, and with
+   * `approvalPolicy: on-request` every command does (10 October 2026); the command is on the
+   * description's `Command:` line. The ask names no folder, so where it runs is where the tool
+   * call it shares an id with started (AQ-2): the card said so through exec approvals, which carry it.
    */
   private asksPluginApproval(p: Payload): void {
     const clawId = str(p["id"]);
@@ -2262,6 +2273,8 @@ export class Bridge {
     const title = str(request["title"]) ?? "Allow this?";
     const description = str(request["description"]) ?? "";
     const command = /^Command: (.+)$/m.exec(description)?.[1];
+    const toolCallId = str(request["toolCallId"]);
+    const cwd = command === undefined || toolCallId === undefined ? undefined : run.cwds.get(toolCallId);
     const approvalId = chipsId("apr", `openclaw-approval:${clawId}`);
     const offered = Array.isArray(request["allowedDecisions"]) ? (request["allowedDecisions"] as unknown[]) : undefined;
     const always = offered === undefined || offered.includes("allow-always");
@@ -2274,11 +2287,11 @@ export class Bridge {
       action:
         command === undefined
           ? { kind: "tool.call", input: { tool: str(request["toolName"]) ?? "a tool", title } }
-          : { kind: "shell.exec", input: { command } },
+          : { kind: "shell.exec", input: { command, ...(cwd === undefined ? {} : { cwd }) } },
       // A plugin's own title is a question only when it reads as one; otherwise the card is
       // headed by it as the preview's title, which is what it is.
       ...(command !== undefined
-        ? commandAsk(command, undefined)
+        ? commandAsk(command, cwd)
         : title.trim().endsWith("?")
           ? { question: title.trim().slice(0, 200), lasts: "once" }
           : { lasts: "once" }),

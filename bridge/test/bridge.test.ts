@@ -860,6 +860,46 @@ describe("supervision", () => {
     assert.deepEqual(calls, [["plugin.approval.resolve", { id: "plugin:ap-3", decision: "allow-always" }]]);
   });
 
+  it("says where Codex's own command runs, from the folder its tool call started in (AQ-2)", async () => {
+    const codexAsk = (id: string, toolCallId: string) =>
+      bridge.onClaw({
+        event: "plugin.approval.requested",
+        payload: {
+          id,
+          request: {
+            title: "Codex app-server command approval",
+            description: "Command: mkdir -p /tmp/t",
+            toolName: "codex_command_approval",
+            toolCallId,
+            sessionKey: key(),
+          },
+        },
+      });
+    bridge.onClaw({ event: "chat", payload: { runId: "r11", sessionKey: key(), seq: 1, state: "status" } });
+    bridge.onClaw({
+      event: "agent",
+      payload: {
+        runId: "r11",
+        sessionKey: key(),
+        seq: 2,
+        stream: "tool",
+        data: { phase: "start", name: "bash", toolCallId: "exec-1", args: { command: "/bin/bash -lc 'mkdir -p /tmp/t'", cwd: "/home/node/.openclaw/chips/a" } },
+      },
+    });
+    codexAsk("plugin:ap-5", "exec-1");
+    await bridge.settled();
+    const card = sent.find((event) => event.type === "approval.request");
+    assert.equal(card?.["question"], "Run `mkdir -p /tmp/t`?");
+    assert.equal(card?.["effect"], "It runs in /home/node/.openclaw/chips/a.");
+    assert.deepEqual(card?.["action"], { kind: "shell.exec", input: { command: "mkdir -p /tmp/t", cwd: "/home/node/.openclaw/chips/a" } });
+    // Once the tool has its result the folder is forgotten: an ask for that call again says none.
+    bridge.onClaw({ event: "agent", payload: { runId: "r11", sessionKey: key(), seq: 3, stream: "tool", data: { phase: "result", name: "bash", toolCallId: "exec-1" } } });
+    codexAsk("plugin:ap-6", "exec-1");
+    await bridge.settled();
+    const later = sent.filter((event) => event.type === "approval.request").at(-1);
+    assert.equal(later?.["effect"], undefined);
+  });
+
   it("tells Chips of an approval answered in OpenClaw, once, so the card cools", async () => {
     asked();
     await bridge.settled();
