@@ -225,6 +225,38 @@ describe("the Main agent's heartbeat through the bridge", () => {
     assert.equal(sent[1]?.["idempotency_key"], sent[0]?.["idempotency_key"]);
   });
 
+  it("@s the Main room's person in a check-in that @s nobody, as Chips's note names them (Chips ADR 0158)", async () => {
+    const arjun = { participant_id: "usr_01K4ZQPX000000000000000003", kind: "person", display_name: "Arjun", role: "owner" };
+    await bridge.onChips({
+      type: "message.new",
+      space_id: MAIN_ROOM,
+      message_id: "msg_01K4ZQPX0000000000000000A1",
+      from: arjun,
+      text: "Keep an eye on the build.",
+      addressed_to: [MAIN],
+      for: [MAIN],
+      room: {
+        members: [
+          { participant_id: arjun.participant_id, kind: "person", name: "Arjun", handle: "@Arjun" },
+          { participant_id: MAIN, kind: "agent", name: "OpenClaw", handle: "@OpenClaw" },
+        ],
+        notes: {},
+      },
+    });
+    sent = [];
+    bridge.onClaw(heartbeatMessage("agent:main:main", { notify: true, outcome: "alert", notificationText: "The build finished." }));
+    bridge.onClaw(heartbeatMessage("agent:main:main", { notify: true, outcome: "alert", notificationText: "@arjun the build failed." }));
+    await new Promise((done) => setImmediate(done));
+    // Telling the person is an @, which pushes their phone; still a check-in. One @ is enough.
+    assert.deepEqual(
+      sent.map((event) => [event["text"], event["heartbeat"]]),
+      [
+        ["@Arjun The build finished.", true],
+        ["@arjun the build failed.", true],
+      ],
+    );
+  });
+
   it("posts nothing for a quiet check, or for a heartbeat outside Home", async () => {
     bridge.onClaw(heartbeatMessage("agent:main:main", { notify: false, outcome: "no_change", summary: "Nothing new." }));
     bridge.onClaw(heartbeatMessage("agent:scout:main", { notify: true, outcome: "alert", summary: "Not for a room." }));

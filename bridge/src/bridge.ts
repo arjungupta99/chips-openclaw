@@ -1405,6 +1405,10 @@ export class Bridge {
    * What the primary agent's heartbeat said for the person (ADR 0143): a `heartbeat_respond` call
    * that notifies, in a message of its Home, posted in the Main room as the Main agent and marked
    * as a check-in. A quiet check posts nothing, and one heard again posts nothing more.
+   *
+   * Notifying is telling the person, and an @ is what pushes their phone (Chips ADR 0158): words
+   * that @ nobody in the room @ the Main room's person, by the handle Chips's note gave them. With
+   * no handle known (no note heard yet, or more than one person there), the words go as they are.
    */
   private heartbeatSaid(p: Payload): void {
     if (this.heartbeats === undefined || str(p["sessionKey"]) !== this.homeKey()) return;
@@ -1419,7 +1423,7 @@ export class Bridge {
       .send({
         type: "message.post",
         space_id: where.spaceId,
-        text: checkIn.text,
+        text: this.forAsker(checkIn.text, where.spaceId, undefined),
         heartbeat: true,
         actor: { kind: "agent", id: where.agentId },
         idempotency_key: `openclaw-heartbeat:${checkIn.id}`,
