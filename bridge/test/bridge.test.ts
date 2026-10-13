@@ -21,9 +21,17 @@ import {
 } from "../src/bridge.ts";
 import { type ChipsAgent, type ChipsEvent, ChipsRefusal, type Taken } from "../src/chips.ts";
 import { SENDING_FILES } from "../src/room-files.ts";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { Automations, SPEAKING_LATER } from "../src/automations.ts";
 
-/** A turn's words as a room sends them: behind how a file reaches the room (Chips AW-19), and Chips's note ahead of that. */
-const told = (words: string, note?: string): string => [note, SENDING_FILES, words].filter((part) => part !== undefined).join("\n\n");
+/**
+ * A turn's words as a room sends them: behind how a file reaches the room (Chips AW-19) and how to
+ * speak in it later (Chips ADR 0157), and Chips's note ahead of those.
+ */
+const told = (words: string, note?: string): string =>
+  [note, SENDING_FILES, SPEAKING_LATER, words].filter((part) => part !== undefined).join("\n\n");
 
 const ME = "hrn_01K4ZQPX000000000000000004";
 const ROOM = "spc_01K4ZQPX000000000000000002";
@@ -625,7 +633,7 @@ describe("an answer's files", () => {
       content: Buffer.from("png-bytes").toString("base64"),
       sizeBytes: 9,
     });
-    const HANDED = `Files in this room, attached at their current version: ascii-alphabet.html (v2, by Oc3). To change one, send it back under the same name: Chips takes it as the next version.\n${SENDING_FILES}`;
+    const HANDED = `Files in this room, attached at their current version: ascii-alphabet.html (v2, by Oc3). To change one, send it back under the same name: Chips takes it as the next version.\n${SENDING_FILES}\n\n${SPEAKING_LATER}`;
 
     it("tells a turn in a room with no files yet how a file of its own reaches the room (Chips AW-19)", async () => {
       // Terra Fab, 10 October 2026: both agents' first answers named a path in their own folder.
@@ -670,6 +678,8 @@ describe("an answer's files", () => {
           "Not attached: big.mov (v1), since it is larger than 5 MB.",
           "Not attached: a6.txt (v1), since a turn is handed 5 files at most.",
           SENDING_FILES,
+          "",
+          SPEAKING_LATER,
           "",
           `Look at ${names.join(", ")}`,
         ].join("\n"),
@@ -755,6 +765,7 @@ describe("an answer's files", () => {
         [
           `Chips: Your last answer here sent a file Chips did not take as its next version: ${why}`,
           `Files in this room, attached at their current version: ascii-alphabet.html (v3, by Oc2). To change one, send it back under the same name: Chips takes it as the next version.\n${SENDING_FILES}`,
+          SPEAKING_LATER,
           "How is it going?",
         ].join("\n\n"),
       );
@@ -1645,7 +1656,7 @@ describe("OpenClaw's agents as agents in Chips (Chips ADR 0087)", () => {
     const sends = calls.filter(([method]) => method === "chat.send").map(([, params]) => String(params["message"]));
     assert.equal(
       sends[1],
-      `Chips: Your last message here was held, so the agents it named do not have it yet: messages between the agents in this room are held (they have sent each other 48 since a person last acted) until a person acts. Until then, tell the person what is done and what is blocked, rather than asking the agents again.\n\n${SENDING_FILES}\n\nWhere are we?`,
+      `Chips: Your last message here was held, so the agents it named do not have it yet: messages between the agents in this room are held (they have sent each other 48 since a person last acted) until a person acts. Until then, tell the person what is done and what is blocked, rather than asking the agents again.\n\n${SENDING_FILES}\n\n${SPEAKING_LATER}\n\nWhere are we?`,
     );
     assert.equal(sends[2], told("Thanks"));
   });
@@ -2060,5 +2071,191 @@ describe("an OpenClaw agent of its own for each agent Chips asks for", () => {
     await bridge.settled();
     assert.deepEqual(sent.map((event) => event.type), ["run.started", "run.failed"]);
     assert.equal(calls.filter(([method]) => method === "chat.send").length, 3);
+  });
+});
+
+describe("automations answer in the room they were asked in (Chips ADR 0157)", () => {
+  /** An agent the bridge made for a room, keyed by its session there, as OpenClaw 3 was on scratch. */
+  const MADE = "chips-01k4zqpx000000000000000002";
+  const MADE_KEY = `agent:${MADE}:chips-spc_01k4zqpx000000000000000002`;
+  const JOB = "3d340e0f-3477-4799-b510-9b598721a3a9";
+  /** The job's run, a turn in a session of its own, as OpenClaw names it. */
+  const RUN_KEY = `agent:${MADE}:cron:${JOB}:run:2911e849-3f56-4aa9-b06a-dcc1d5b01eb0`;
+  const KIT = { participant_id: "usr_01K4ZQPX0000000000000000K1", kind: "person", display_name: "Kit Lee", role: "member" };
+  /** Chips's note on the room (ADR 0092): who is here, with the @ that reaches each. */
+  const members = (...people: (typeof ARJUN)[]) => ({
+    members: [
+      ...people.map((each) => ({ participant_id: each.participant_id, kind: "person", name: each.display_name, handle: `@${each.display_name.split(" ")[0]}` })),
+      { participant_id: "agt_made", kind: "agent", name: "OpenClaw 3", handle: "@OpenClaw3" },
+    ],
+    notes: {},
+  });
+  /** OpenClaw's `cron` event, carrying the job as it does each time. */
+  const cron = (action: string, job: Record<string, unknown> = {}) => ({
+    event: "cron",
+    payload: {
+      jobId: JOB,
+      action,
+      job: { id: JOB, name: "Stretch reminder", owner: { agentId: MADE, sessionKey: MADE_KEY, accountId: "default" }, sessionKey: MADE_KEY, sessionTarget: "current", ...job },
+    },
+  });
+  const answer = (text: string, runId = "649865b6-292c-4ae4-bbe0-6936b9204825") => ({
+    event: "chat",
+    payload: { runId, sessionKey: RUN_KEY, seq: 24, state: "final", message: { role: "assistant", content: [{ type: "text", text }] } },
+  });
+  /** What a `current` job commits to the conversation it was made in, as chat.history showed it on scratch. */
+  const committed = (text: string, sessionKey = MADE_KEY) => ({
+    event: "session.message",
+    payload: {
+      sessionKey,
+      agentId: MADE,
+      message: {
+        role: "assistant",
+        content: [{ type: "text", text }],
+        api: "openclaw-transcript",
+        provider: "openclaw",
+        model: "automation-result",
+        idempotencyKey: `cron-current-completion:cron:${JOB}:1791885238801`,
+        openclawAutomation: { kind: "cron", jobId: JOB, runId: `cron:${JOB}:1791885238801` },
+      },
+    },
+  });
+
+  async function asked(by = ARJUN, room = members(ARJUN)): Promise<void> {
+    agents = [agentIn("agt_made", MADE_KEY, ROOM, "OpenClaw 3")];
+    await bridge.adoptAgents({ defaultId: "main", agents: [{ id: "main" }] });
+    await bridge.onChips(said("Remind me in 2 minutes to stretch.", { from: by, addressed_to: ["agt_made"], for: ["agt_made"], room }));
+    sent = [];
+  }
+
+  it("says a job's run in the room whose turn made it, as its agent, for the person who asked", async () => {
+    await asked(KIT, members(ARJUN, KIT));
+    bridge.onClaw(cron("added"));
+    bridge.onClaw(cron("started"));
+    bridge.onClaw(answer("Reminder: stretch."));
+    await bridge.settled();
+    assert.deepEqual(sent.map((event) => event.type), ["run.started", "message.post", "run.completed"]);
+    // A turn OpenClaw started on its own (no goal_from), named for the job.
+    assert.equal(sent[0]?.["space_id"], ROOM);
+    assert.equal(sent[0]?.["goal"], "Scheduled: Stretch reminder");
+    assert.equal(sent[0]?.["goal_from"], undefined);
+    // For Kit, who asked, though Arjun is in the room too.
+    assert.equal(sent[1]?.["text"], "@Kit Reminder: stretch.");
+    assert.equal(sent[2]?.["summary"], "@Kit Reminder: stretch.");
+    for (const event of sent) assert.deepEqual(event["actor"], { kind: "agent", id: "agt_made" });
+  });
+
+  it("@s nobody more when the words @ somebody in the room already, and passes on NO_REPLY as it is", async () => {
+    await asked();
+    bridge.onClaw(cron("added"));
+    bridge.onClaw(answer("@Arjun time to stretch.", "r1"));
+    bridge.onClaw(answer("NO_REPLY", "r2"));
+    await bridge.settled();
+    assert.deepEqual(
+      sent.filter((event) => event.type === "message.post").map((event) => event["text"]),
+      ["@Arjun time to stretch.", "NO_REPLY"],
+    );
+  });
+
+  it("@s the room's only person for a job it did not see made", async () => {
+    await asked();
+    // Learned from the job's start alone, as after a restart with nothing kept.
+    bridge.onClaw(cron("started"));
+    bridge.onClaw(answer("Reminder: stretch."));
+    await bridge.settled();
+    assert.equal(sent.find((event) => event.type === "message.post")?.["text"], "@Arjun Reminder: stretch.");
+  });
+
+  it("says nothing of a run whose job it has not heard of, or of a job made outside its rooms, and holds none of its events", async () => {
+    await asked();
+    // OpenClaw's own background work (Memory Dreaming), and a job made on another channel.
+    bridge.onClaw(cron("added", { owner: { agentId: "main", sessionKey: "agent:main:telegram:direct:42" }, sessionKey: undefined }));
+    bridge.onClaw({ event: "agent", payload: { runId: "dream", sessionKey: RUN_KEY, stream: "lifecycle", data: { phase: "model" } } });
+    bridge.onClaw(answer("Promoted 3 memories.", "dream"));
+    await bridge.settled();
+    assert.deepEqual(sent, []);
+    // What its events were held for until its end, with no room to say them in, is let go.
+    assert.equal((bridge as unknown as { early: Map<string, unknown> }).early.size, 0);
+  });
+
+  it("posts what a current job commits to the room's conversation when its run went unseen, as the room's agent, once", async () => {
+    await asked();
+    bridge.onClaw(cron("added"));
+    bridge.onClaw(committed("Reminder: stretch."));
+    bridge.onClaw(committed("Reminder: stretch."));
+    await new Promise((done) => setImmediate(done));
+    assert.deepEqual(sent[0], {
+      type: "message.post",
+      space_id: ROOM,
+      text: "@Arjun Reminder: stretch.",
+      actor: { kind: "agent", id: "agt_made" },
+      idempotency_key: `openclaw-automation:${JOB}:1791885238801`,
+    });
+    // Heard twice, the same key: Chips takes it once.
+    assert.equal(sent[1]?.["idempotency_key"], sent[0]?.["idempotency_key"]);
+  });
+
+  it("does not post the commit of a run whose answer it posted: those are the same words", async () => {
+    await asked();
+    bridge.onClaw(cron("added"));
+    // On scratch the commit came half a second after the run's final.
+    bridge.onClaw(answer("Reminder: stretch."));
+    bridge.onClaw(committed("Reminder: stretch."));
+    await bridge.settled();
+    await new Promise((done) => setImmediate(done));
+    assert.deepEqual(sent.map((event) => event.type), ["run.started", "message.post", "run.completed"]);
+  });
+
+  it("posts nothing for a silent commit, one in none of its rooms, or a message no automation made", async () => {
+    await asked();
+    bridge.onClaw(committed("NO_REPLY"));
+    bridge.onClaw(committed("Reminder: stretch.", "agent:ops:telegram:direct:42"));
+    bridge.onClaw({ event: "session.message", payload: { sessionKey: MADE_KEY, message: { role: "assistant", content: [{ type: "text", text: "Hi." }] } } });
+    await new Promise((done) => setImmediate(done));
+    assert.deepEqual(sent, []);
+  });
+
+  it("asks a job's run's approvals as cards in its room", async () => {
+    await asked();
+    bridge.onClaw(cron("started"));
+    bridge.onClaw({
+      event: "exec.approval.requested",
+      payload: { id: "ap-9", request: { command: "curl wttr.in", sessionKey: RUN_KEY, runId: "r9", systemRunPlan: { commandText: "curl wttr.in" } } },
+    });
+    await bridge.settled();
+    assert.deepEqual(sent.map((event) => event.type), ["run.started", "approval.request"]);
+    assert.equal(sent[0]?.["space_id"], ROOM);
+    assert.equal(sent[1]?.["run_id"], sent[0]?.["run_id"]);
+  });
+
+  it("keeps who a job is for across a restart, learns its room again from its next event, and forgets it once removed", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "automations-"));
+    const file = join(dir, "automations.json");
+    try {
+      bridge = new Bridge(chips, claw, { harnessId: ME, agent: "main" }, () => undefined, undefined, Date.now, undefined, undefined, undefined, undefined, undefined, new Automations(file));
+      await asked(KIT, members(ARJUN, KIT));
+      bridge.onClaw(cron("added"));
+      assert.deepEqual(JSON.parse(readFileSync(file, "utf8")), { [JOB]: { id: KIT.participant_id, handle: "@Kit" } });
+      // Restarted: no note heard yet, nothing in memory.
+      bridge = new Bridge(chips, claw, { harnessId: ME, agent: "main" }, () => undefined, undefined, Date.now, undefined, undefined, undefined, undefined, undefined, new Automations(file));
+      await bridge.adoptAgents({ defaultId: "main", agents: [{ id: "main" }] });
+      sent = [];
+      bridge.onClaw(cron("started"));
+      bridge.onClaw(answer("Reminder: stretch."));
+      await bridge.settled();
+      assert.equal(sent.find((event) => event.type === "message.post")?.["text"], "@Kit Reminder: stretch.");
+      bridge.onClaw({ event: "cron", payload: { jobId: JOB, action: "removed" } });
+      assert.deepEqual(JSON.parse(readFileSync(file, "utf8")), {});
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("tells every turn to schedule in its conversation, with the offset Chips gives", async () => {
+    await asked();
+    const message = String(calls.findLast(([method]) => method === "chat.send")?.[1]["message"]);
+    assert.ok(message.includes(SPEAKING_LATER));
+    assert.match(SPEAKING_LATER, /sessionTarget "current"/);
+    assert.match(SPEAKING_LATER, /without one is read as UTC/);
   });
 });

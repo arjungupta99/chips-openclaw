@@ -7,6 +7,7 @@ import { spawn } from "node:child_process";
 import { rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { Automations } from "./automations.ts";
 import { Bridge } from "./bridge.ts";
 import { Chips, type ChipsEvent } from "./chips.ts";
 import { loadConfig } from "./config.ts";
@@ -137,6 +138,8 @@ bridge = new Bridge(
   new Models(claw, (agentId, body) => chips.putModel(agentId, body), log),
   new Heartbeats(claw, (agentId, body) => chips.putHeartbeat(agentId, body), log),
   new Windows(claw, (agentId, body) => chips.putWindow(agentId, body), log, join(config.stateDir, "context-windows.json")),
+  // Who each automation our agents schedule is for, kept across restarts (Chips ADR 0157).
+  new Automations(join(config.stateDir, "automations.json"), log),
 );
 
 /**

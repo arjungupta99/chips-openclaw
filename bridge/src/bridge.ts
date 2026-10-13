@@ -55,6 +55,11 @@
  * - An exec approval becomes an approval card, and the person's answer goes back as allow-once,
  *   allow-always or deny. An `ask_user` question becomes a question card. An ask answered in
  *   OpenClaw's own tools instead is settled in Chips, once, so its card cools (Chips ADR 0079).
+ * - What an agent schedules with OpenClaw's automations is said, when it fires, in the room whose
+ *   turn made it, as that room's agent, with an @ for the person who asked (Chips ADR 0157,
+ *   `automations.ts`): a job's run as a turn OpenClaw started on its own, its answer with the @, and
+ *   a `current` job's answer as OpenClaw commits it to the room's conversation when the bridge did
+ *   not see its run.
  *
  * Every Chips id is derived from OpenClaw's, so everything written again after a restart is the
  * same event and Chips answers it as a duplicate.
@@ -70,6 +75,7 @@ import { type ChangeFrame as BeatChange, checkInOf, type Heartbeats } from "./he
 import type { CompactFrame, LimitFrame, Session, Windows } from "./windows.ts";
 import { isMadeAgent, madeAgentId, type Workspaces } from "./own-agents.ts";
 import { filesLine, namedIn, ROOM_FILES, type RoomFile, roomFilesIn, STALE_FILE, staleIn } from "./room-files.ts";
+import { Automations, committedOf, forPerson, jobOf, jobOfSession, type Person, SPEAKING_LATER } from "./automations.ts";
 
 /** What the bridge needs of Chips; the `Chips` client, or a stand-in in the tests. */
 export interface ChipsPort {
@@ -157,6 +163,8 @@ interface Run {
   readonly agentId: string | undefined;
   /** Whether a message in the room asked for this turn, or OpenClaw started it on its own. */
   readonly asked: boolean;
+  /** The automation this turn is a run of (`automations.ts`), whose answer is for the person who asked for it. */
+  readonly job: string | undefined;
   /** Writes for one run go in order. */
   chain: Promise<void>;
   ended: boolean;
@@ -481,6 +489,41 @@ function noteFor(event: ChipsEvent, takerId: string): string | undefined {
   return note === undefined || note === "" ? undefined : note;
 }
 
+/** A room's people, each by the @ that reaches them, and the handles of everybody in it. */
+interface RoomPeople {
+  readonly people: readonly Person[];
+  readonly handles: readonly string[];
+}
+
+/** Who is in a room, from Chips's note on a message (ADR 0092); nothing from a Chips that sends none. */
+function peopleOf(event: ChipsEvent): RoomPeople | undefined {
+  const members = (event["room"] as Payload | undefined)?.["members"];
+  if (!Array.isArray(members)) return undefined;
+  const people: Person[] = [];
+  const handles: string[] = [];
+  for (const each of members as Payload[]) {
+    const id = str(each?.["participant_id"]);
+    const handle = str(each?.["handle"]);
+    if (id === undefined || handle === undefined || handle === "") continue;
+    handles.push(handle);
+    if (each["kind"] === "person") people.push({ id, handle });
+  }
+  return { people, handles };
+}
+
+/**
+ * The person who said a message, by the @ Chips's note gives them, else by their name as Chips makes
+ * a handle of it; nobody for an agent's words.
+ */
+function personOf(from: Payload, room: RoomPeople | undefined): Person | undefined {
+  const id = str(from["participant_id"]);
+  if (from["kind"] !== "person" || id === undefined) return undefined;
+  const noted = room?.people.find((each) => each.id === id);
+  if (noted !== undefined) return noted;
+  const name = (str(from["display_name"]) ?? "").replace(/\s+/g, "");
+  return name === "" ? undefined : { id, handle: `@${name}` };
+}
+
 /**
  * What Chips says of the agents' talk in a room, once it is worth a word (the referee): how many
  * messages they have sent each other since a person last acted, what was made and what repeats,
@@ -621,6 +664,12 @@ export class Bridge {
    */
   private readonly caughtUp = new Map<string, { readonly room: string; readonly lines: readonly unknown[] }>();
   private readonly lastHeard = new Map<string, { readonly room: string; readonly seq: number }>();
+  /**
+   * The person whose words each session's turn last answered, for whom what it schedules then is
+   * (ADR 0157); and each room's people and the handles of everybody in it, as Chips's note last said.
+   */
+  private readonly askers = new Map<string, Person>();
+  private readonly people = new Map<string, RoomPeople>();
   /** The OpenClaw agent a room with no other gets: `OPENCLAW_AGENT`, else the gateway's default. */
   private primary: string;
 
@@ -640,6 +689,8 @@ export class Bridge {
     private readonly heartbeats?: Heartbeats,
     /** Our agents' context windows in Chips (ADR 0146); none, and nothing is sent or compacted. */
     private readonly windows?: Windows,
+    /** What our agents schedule, and who each job is for (ADR 0157); kept in memory alone by default. */
+    private readonly automations: Automations = new Automations(),
   ) {
     this.primary = self.agent;
   }
@@ -1376,6 +1427,60 @@ export class Bridge {
       .catch((error: unknown) => this.log(`chips: a heartbeat check-in not posted: ${String(error)}`));
   }
 
+  /**
+   * Words a job says, for the person it is for (ADR 0157): the one who asked for it, else the room's
+   * only person; with their @ first unless the words @ somebody in the room already.
+   */
+  private forAsker(text: string, spaceId: string | undefined, asker: Person | undefined): string {
+    const room = spaceId === undefined ? undefined : this.people.get(spaceId);
+    const only = room?.people.length === 1 ? room.people[0] : undefined;
+    return forPerson(text, asker ?? only, room?.handles ?? []);
+  }
+
+  /**
+   * OpenClaw's word on an automation (its `cron` event, ADR 0157): a job made in a turn of one of our
+   * sessions is that session's room's, and, new, for the person whose words the turn answered, or,
+   * made in another job's run, for whom that job was. A job removed is forgotten.
+   */
+  private automation(p: Payload): void {
+    const jobId = str(p["jobId"]);
+    if (p["action"] === "removed") {
+      if (jobId !== undefined) this.automations.forget(jobId);
+      return;
+    }
+    const job = jobOf(p["job"]);
+    if (job === undefined || this.whereSaid(job.sessionKey) === undefined) return;
+    const known = this.automations.job(job.id) !== undefined;
+    const asker = this.askers.get(job.sessionKey) ?? this.automations.askerOf(jobOfSession(job.sessionKey));
+    this.automations.learn(job, p["action"] === "added" ? asker : undefined);
+    if (!known) this.log(`openclaw: automation ${job.id} (${job.name ?? "unnamed"}) answers in ${this.whereSaid(job.sessionKey)?.spaceId ?? "no room"}`);
+  }
+
+  /**
+   * What a `current` automation committed to the conversation it was made in (ADR 0157): posted in
+   * that conversation's room as its agent, for the person the job is for. Not when its run's answer
+   * was posted already, which is these words: on scratch (13 October 2026) the commit came half a
+   * second after the run's `chat` final, then the job's `finished` and, a one-shot, `removed`. A
+   * silent run commits nothing. OpenClaw's run id is `cron:<job>:<started at>`.
+   */
+  private committed(p: Payload): void {
+    const sessionKey = str(p["sessionKey"]);
+    const made = committedOf(p["message"]);
+    if (sessionKey === undefined || made === undefined || this.automations.takeSaid(made.jobId)) return;
+    const text = textOf(p["message"]).trim();
+    const where = this.whereSaid(sessionKey);
+    if (text === "" || isNoReply(text) || where === undefined) return;
+    void this.chips
+      .send({
+        type: "message.post",
+        ...(where.spaceId === undefined ? {} : { space_id: where.spaceId }),
+        text: this.forAsker(text, where.spaceId, this.automations.askerOf(made.jobId)),
+        ...(where.agentId === undefined ? {} : { actor: { kind: "agent", id: where.agentId } }),
+        idempotency_key: `openclaw-automation:${made.jobId}:${made.runId.replace(`cron:${made.jobId}:`, "")}`,
+      })
+      .catch((error: unknown) => this.log(`chips: automation ${made.jobId}'s answer not posted: ${String(error)}`));
+  }
+
   /** A room asked of this harness while the bridge was away (from `GET …/spaces`). */
   noteAsked(spaceId: string): void {
     this.asked.add(spaceId);
@@ -1483,6 +1588,10 @@ export class Bridge {
     const seq = num(event["seq"]);
     const takers = own ? this.othersThan(sayer, spaceId, await this.turnTakers(event, spaceId)) : await this.turnTakers(event, spaceId);
     const attachments = takers.length === 0 ? [] : await this.attachments(event);
+    // Who is here, and who asked: what a turn schedules is for them (ADR 0157).
+    const room = peopleOf(event);
+    if (room !== undefined) this.people.set(spaceId, room);
+    const asker = personOf(from, room ?? this.people.get(spaceId));
     for (const each of takers) {
       // The harness itself claims the room it was asked for, as the OpenClaw agent made for it; one
       // of our agents a message there is for answers as itself, in its own session, and claims nothing.
@@ -1491,6 +1600,7 @@ export class Bridge {
       const taker = claiming ? await this.claimer(spaceId, each) : each;
       if (taker === undefined) continue;
       await this.ensureSession(taker.sessionKey, words, taker.clawAgent);
+      if (asker !== undefined) this.askers.set(taker.sessionKey, asker);
       const agentId = claiming ? await this.claim(spaceId, taker.sessionKey, words) : await this.speakerFor(spaceId, taker);
       const turn = this.turnOf(messageId, spaceId, taker);
       this.asks.set(turn, { words, spaceId, agentId });
@@ -1520,7 +1630,8 @@ export class Bridge {
       // left to OpenClaw's stored queue mode, which could make it wait for a turn after.
       const send: Payload = {
         sessionKey: taker.sessionKey,
-        message: [...chips, note, files.line, message].filter((part) => part !== undefined).join("\n\n"),
+        // How a file reaches the room, and how to speak in it later (ADR 0157), with every turn.
+        message: [...chips, note, files.line, SPEAKING_LATER, message].filter((part) => part !== undefined).join("\n\n"),
         idempotencyKey: turn,
         queueMode: "steer",
         ...(sent.length === 0 ? {} : { attachments: sent }),
@@ -1784,7 +1895,11 @@ export class Bridge {
       case "agent":
         return this.agent(p);
       case "session.message":
-        return this.heartbeatSaid(p);
+        this.heartbeatSaid(p);
+        return this.committed(p);
+      // An automation added, started, finished or removed (ADR 0157).
+      case "cron":
+        return this.automation(p);
       case "sessions.changed":
         return this.sessionChanged(p);
       case "exec.approval.requested":
@@ -1860,12 +1975,16 @@ export class Bridge {
     const asked = this.asks.get(clawRun);
     const where = asked ?? this.whereSaid(sessionKey);
     if (where === undefined) return undefined;
+    // An automation's run (ADR 0157), said where its job was made: its goal is the job's name.
+    const jobId = asked === undefined ? jobOfSession(sessionKey) : undefined;
+    const job = jobId === undefined ? undefined : this.automations.job(jobId);
     const run: Run = {
       chipsRun: chipsId("run", `openclaw-run:${clawRun}`),
       spaceId: where.spaceId,
       sessionKey,
       agentId: where.agentId,
       asked: asked !== undefined,
+      job: jobId,
       chain: Promise.resolve(),
       ended: false,
       media: [],
@@ -1880,7 +1999,13 @@ export class Bridge {
     this.runByChips.set(run.chipsRun, run);
     this.asks.delete(clawRun);
     const latest = this.latest.get(sessionKey);
-    const goal = asked?.words ?? (latest === undefined ? "Answer in the room." : `Following up: ${latest}`);
+    const goal =
+      asked?.words ??
+      (jobId !== undefined
+        ? `Scheduled: ${job?.name ?? "an automation"}`
+        : latest === undefined
+          ? "Answer in the room."
+          : `Following up: ${latest}`);
     this.write(run, {
       type: "run.started",
       run_id: run.chipsRun,
@@ -1903,8 +2028,15 @@ export class Bridge {
    * primary agent says there on its own (a heartbeat's alert, a background job's report, an answer
    * to words said to it in OpenClaw's web app) is said there. Any other session of ours is an OpenClaw agent's in
    * one room, named from both: its own agent's there, or the default agent's where its name says.
+   *
+   * An automation's run is said where the turn that made its job was (ADR 0157).
    */
   private whereSaid(sessionKey: string): { spaceId: string | undefined; agentId: string | undefined } | undefined {
+    const jobId = jobOfSession(sessionKey);
+    if (jobId !== undefined) {
+      const job = this.automations.job(jobId);
+      return job === undefined || jobOfSession(job.sessionKey) === jobId ? undefined : this.whereSaid(job.sessionKey);
+    }
     const agentId = this.agentOfSession(sessionKey);
     if (agentId !== undefined) return { spaceId: this.roomOf.get(agentId) ?? undefined, agentId };
     const spaceId = this.spaceFor(sessionKey);
@@ -1935,8 +2067,10 @@ export class Bridge {
       return;
     }
     const run = this.runFor(clawRun, sessionKey);
-    if (run === undefined || run.ended) return;
     const state = str(p["state"]);
+    // A turn in none of our rooms (OpenClaw's own work, an automation made elsewhere) holds nothing past its end.
+    if (run === undefined && (state === "final" || state === "error" || state === "aborted")) this.early.delete(clawRun);
+    if (run === undefined || run.ended) return;
     if (state === "error" && this.againAfterReload(run, clawRun, p)) return;
     if (state === "final" || state === "error" || state === "aborted") this.sends.delete(clawRun);
     if (state === "final") return this.finish(run, clawRun, p);
@@ -1991,7 +2125,13 @@ export class Bridge {
     // chat, so the bridge says it, and Chips makes the post the turn's pass, which the room never
     // shows. Without it the run ended on "Answered together with other words, in one reply."
     const said = textOf(p["message"]).trim();
-    const text = said === "" && run.media.length === 0 && isNoReply(run.said ?? "") ? NO_REPLY : said;
+    const passed = said === "" && run.media.length === 0 && isNoReply(run.said ?? "") ? NO_REPLY : said;
+    // An automation's answer is for the person who asked for it (ADR 0157), and is these words when
+    // OpenClaw commits them to the room's conversation after.
+    const job = run.job;
+    const forJob = job !== undefined && passed !== "" && !isNoReply(passed);
+    if (forJob) this.automations.said(job);
+    const text = forJob ? this.forAsker(passed, run.spaceId, this.automations.askerOf(job)) : passed;
     // No `to`, even for an answer to another harness: it acts on the words only when they @ it.
     // Sending it back by itself kept Jacobian and OpenClaw trading thanks until Chips's guard
     // held the fifth (the live test, 27 September 2026).
@@ -2081,7 +2221,8 @@ export class Bridge {
     const notes: string[] = [];
     const replaces: Record<string, string> = {};
     const has = run.spaceId === undefined ? undefined : this.versions.get(`${run.sessionKey} ${run.spaceId}`);
-    const clawAgent = this.agentFor(run.sessionKey);
+    // The agent whose turn it was: an automation's run is in a session of its own (ADR 0157).
+    const clawAgent = this.agentFor(run.sessionKey) ?? /^agent:([^:]+):/.exec(run.sessionKey)?.[1];
     const workspace = isMadeAgent(clawAgent) && clawAgent !== undefined ? this.workspaces.of(clawAgent) : undefined;
     for (const reference of run.media) {
       const media = await this.files.read(reference, workspace);
@@ -2124,7 +2265,10 @@ export class Bridge {
     const sessionKey = str(p["sessionKey"]);
     const run = this.runs.get(clawRun) ?? (sessionKey === undefined ? undefined : this.runFor(clawRun, sessionKey));
     if (run === undefined) {
-      this.early.set(clawRun, [...(this.early.get(clawRun) ?? []), p]);
+      // Held only while the event names no session. A turn in a session that is none of ours
+      // (OpenClaw's own background work, a job made elsewhere) never becomes a run, and its events,
+      // held, were never let go (ADR 0157).
+      if (sessionKey === undefined) this.early.set(clawRun, [...(this.early.get(clawRun) ?? []), p]);
       return;
     }
     this.stream(run, p);

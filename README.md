@@ -31,7 +31,8 @@ Everything OpenClaw and the bridge keep is under `~/chips-openclaw/`:
 - `secrets/`: its sign-in
 - `.env`: the gateway token
 - `bridge/`: the bridge's device key, one cursor per Chips harness, its log, `chips.env` (the scratch
-  harness) and `live.env` (4431's harness address; its token stays in the login keychain)
+  harness) and `live.env` (4431's harness address; its token stays in the login keychain), and
+  `automations.json`: who each automation an agent scheduled from a room is for (Chips ADR 0157)
 - `chips/`: the scratch Chips server's database
 
 The uninstall deletes that folder, the container and the image. This repository stays. On 4431,
