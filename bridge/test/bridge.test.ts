@@ -2256,6 +2256,8 @@ describe("automations answer in the room they were asked in (Chips ADR 0157)", (
     const message = String(calls.findLast(([method]) => method === "chat.send")?.[1]["message"]);
     assert.ok(message.includes(SPEAKING_LATER));
     assert.match(SPEAKING_LATER, /sessionTarget "current"/);
+    // An isolated job's announce has no route here: OpenClaw would keep it disabled after it ran.
+    assert.match(SPEAKING_LATER, /"isolated" with delivery \{mode: "none"\}/);
     assert.match(SPEAKING_LATER, /without one is read as UTC/);
   });
 });
