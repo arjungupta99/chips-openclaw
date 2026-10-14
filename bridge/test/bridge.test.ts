@@ -80,6 +80,7 @@ function agentIn(agentId: string, key: string, room: string | null, name = "Open
 }
 
 const chips: ChipsPort = {
+  forget: () => undefined,
   send: async (event) => {
     // A room named the harness's home, kept apart from what is said in rooms (Chips ADR 0069).
     if (event.type === "space.updated" && event["home"] === true) {

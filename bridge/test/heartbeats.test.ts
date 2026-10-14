@@ -6,9 +6,11 @@
 
 import assert from "node:assert/strict";
 import { beforeEach, describe, it } from "node:test";
+import type { Settings } from "@chips/harness";
 import type { ClawPort } from "../src/bridge.ts";
 import { Bridge, type ChipsPort } from "../src/bridge.ts";
 import type { ChipsAgent, ChipsEvent } from "../src/chips.ts";
+import { settingsFor } from "./settings-rig.ts";
 import {
   beatOf,
   CHOICES,
@@ -112,6 +114,11 @@ describe("a person's change of the heartbeat", () => {
     },
   };
   let beats: Heartbeats;
+  let settings: Settings;
+  /** A person's change from Chips, made by the module and answered by the SDK. */
+  const change = async (frame: { change_id: string; agent_id: string; on: boolean; every: number }): Promise<void> => {
+    await settings.hear({ frame: "heartbeat.change", ...frame });
+  };
 
   beforeEach(() => {
     config = { agents: { defaults: { heartbeat: { agentId: "main" } } } };
@@ -119,25 +126,28 @@ describe("a person's change of the heartbeat", () => {
     calls = [];
     refusePatch = undefined;
     puts = [];
-    beats = new Heartbeats(claw, async (agentId, body) => void puts.push([agentId, body]), () => undefined, async () => undefined);
+    settings = settingsFor((agentId, body) => void puts.push([agentId, body]), {
+      heartbeats: async (frame) => (await beats.change(frame, "main")) as never,
+    });
+    beats = new Heartbeats(claw, (agentId, copy) => settings.heartbeat(agentId, copy as never), () => undefined, async () => undefined);
   });
 
   it("turns it on every hour, and answers with the copy as it is now", async () => {
-    await beats.change({ change_id: "chg_1", agent_id: "agt_main", on: true, every: 60 }, "main");
+    await change({ change_id: "chg_1", agent_id: "agt_main", on: true, every: 60 });
     assert.deepEqual(config.agents.entries?.["main"]?.heartbeat, { every: "60m", target: "none" });
     assert.deepEqual(puts, [["agt_main", { on: true, every: 60, choices: [...CHOICES], editable: true, answers: "chg_1" }]]);
   });
 
   it("turns it off and remembers the interval it beat at for the copy", async () => {
-    await beats.change({ change_id: "chg_1", agent_id: "agt_main", on: true, every: 120 }, "main");
-    await beats.change({ change_id: "chg_2", agent_id: "agt_main", on: false, every: 120 }, "main");
+    await change({ change_id: "chg_1", agent_id: "agt_main", on: true, every: 120 });
+    await change({ change_id: "chg_2", agent_id: "agt_main", on: false, every: 120 });
     assert.deepEqual(config.agents.entries?.["main"]?.heartbeat, { every: "0m", target: "none" });
     assert.deepEqual(puts.at(-1), ["agt_main", { on: false, every: 120, choices: [...CHOICES], editable: true, answers: "chg_2" }]);
   });
 
   it("refuses with OpenClaw's words when it won't write, and says what holds", async () => {
     refusePatch = "rate limited";
-    await beats.change({ change_id: "chg_1", agent_id: "agt_main", on: true, every: 60 }, "main");
+    await change({ change_id: "chg_1", agent_id: "agt_main", on: true, every: 60 });
     assert.deepEqual(puts, [
       ["agt_main", { on: false, every: 30, choices: [...CHOICES], editable: true, refuses: { change_id: "chg_1", message: "rate limited" } }],
     ]);
@@ -159,6 +169,7 @@ describe("the Main agent's heartbeat through the bridge", () => {
   let calls: [string, Record<string, unknown>][];
   let agents: ChipsAgent[];
   let bridge: Bridge;
+  let settings: Settings;
 
   const chips: ChipsPort = {
     send: async (event) => void sent.push(event),
@@ -170,6 +181,7 @@ describe("the Main agent's heartbeat through the bridge", () => {
     openSpace: async () => MAIN_ROOM,
     attach: async () => true,
     roomContext: async () => ({ lines: [] }),
+    forget: (agentId) => settings.forget(agentId),
   };
   const claw: ClawPort = {
     request: async <T>(method: string, params: Record<string, unknown>) => {
@@ -187,7 +199,10 @@ describe("the Main agent's heartbeat through the bridge", () => {
       { agent_id: MAIN, key: "agent:main:chips-main", name: "OpenClaw", lead: true, state: "active", spaces: [MAIN_ROOM], room: MAIN_ROOM },
       { agent_id: "agt_scout", key: "scout", name: "Scout", lead: false, state: "active", spaces: [], room: null },
     ];
-    const beats = new Heartbeats(claw, async (agentId, body) => void puts.push([agentId, body]), () => undefined, async () => undefined);
+    settings = settingsFor((agentId, body) => void puts.push([agentId, body]), {
+      heartbeats: async (frame) => (await bridge.onHeartbeatChange({ ...frame })) as never,
+    });
+    const beats = new Heartbeats(claw, (agentId, copy) => settings.heartbeat(agentId, copy as never), () => undefined, async () => undefined);
     bridge = new Bridge(chips, claw, { harnessId: ME, agent: "main" }, () => undefined, undefined, Date.now, undefined, undefined, undefined, beats);
     await bridge.adoptAgents({ defaultId: "main", agents: [{ id: "main" }, { id: "scout" }] });
     sent = [];
@@ -265,8 +280,8 @@ describe("the Main agent's heartbeat through the bridge", () => {
   });
 
   it("changes the Main agent's heartbeat from Chips, and leaves another's unanswered", async () => {
-    await bridge.onHeartbeatChange({ frame: "heartbeat.change", change_id: "chg_1", agent_id: MAIN, on: true, every: 15 });
-    await bridge.onHeartbeatChange({ frame: "heartbeat.change", change_id: "chg_2", agent_id: "agt_scout", on: true, every: 15 });
+    await settings.hear({ frame: "heartbeat.change", change_id: "chg_1", agent_id: MAIN, on: true, every: 15 });
+    await settings.hear({ frame: "heartbeat.change", change_id: "chg_2", agent_id: "agt_scout", on: true, every: 15 });
     await bridge.settled();
     const patches = calls.filter(([method]) => method === "config.patch").map(([, params]) => JSON.parse(String(params["raw"])));
     assert.deepEqual(patches, [{ agents: { entries: { main: { heartbeat: { every: "15m", target: "none" } } } } }]);

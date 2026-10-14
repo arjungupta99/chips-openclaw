@@ -21,6 +21,7 @@
  * a heartbeat's turn; the bridge reads the call from the session's `session.message` events.
  */
 
+import { Refuse } from "@chips/harness";
 import type { ClawPort } from "./bridge.ts";
 
 type Payload = Record<string, unknown>;
@@ -51,9 +52,6 @@ export interface ClawAgents {
 }
 
 /** What a copy says of a person's change: made, or not and why. */
-export type Answer =
-  | { readonly answers: string }
-  | { readonly refuses: { readonly change_id: string; readonly message?: string } };
 
 /** The `heartbeat.change` frame Chips sends down the socket (Chips ADR 0143). */
 export interface ChangeFrame {
@@ -165,20 +163,18 @@ const APPLIED_TRIES = 10;
 const APPLIED_EVERY_MS = 200;
 
 /**
- * The copies Chips holds of our agents' heartbeats, kept current: each read from OpenClaw and sent
- * when it is not what was sent last, or when it answers a change. One agent's reads and sends go
- * one after another, so a later copy never lands before an earlier one.
+ * The copies Chips holds of our agents' heartbeats, kept current: each read from OpenClaw and handed
+ * to the SDK, which sends it when it is not what Chips took last. One agent's reads and sends go one
+ * after another, so a later copy never lands before an earlier one.
  */
 export class Heartbeats {
-  /** What was sent last for each agent. */
-  private readonly sent = new Map<string, string>();
   private readonly chains = new Map<string, Promise<void>>();
   /** The interval each agent beat at before it was turned off, as this bridge last saw or set it. */
   private readonly before = new Map<string, number>();
 
   constructor(
     private readonly claw: ClawPort,
-    private readonly put: (agentId: string, body: Payload) => Promise<void>,
+    private readonly put: (agentId: string, copy: Payload) => Promise<unknown>,
     private readonly log: (message: string) => void,
     private readonly sleep: (ms: number) => Promise<void> = (ms) => new Promise((done) => setTimeout(done, ms)),
   ) {}
@@ -192,48 +188,36 @@ export class Heartbeats {
     return copyOf(agents, clawAgent, this.before.get(clawAgent));
   }
 
-  /**
-   * One of our agents' copy, sent if it moved since the last, or to answer a change: once it shows
-   * the change `made`, or after a few reads, as it is.
-   */
-  agent(agentId: string, clawAgent: string, answer?: Answer, made?: ChangeFrame): Promise<void> {
+  /** One of our agents' copy, read and sent. */
+  agent(agentId: string, clawAgent: string): Promise<void> {
     return this.queue(agentId, async () => {
-      let body = await this.read(clawAgent);
-      for (let tries = 1; made !== undefined && !shows(body, made) && tries < APPLIED_TRIES; tries += 1) {
-        await this.sleep(APPLIED_EVERY_MS);
-        body = await this.read(clawAgent);
-      }
-      const print = JSON.stringify(body);
-      if (answer === undefined && this.sent.get(agentId) === print) return;
-      await this.put(agentId, { ...body, ...answer });
-      this.sent.set(agentId, print);
+      await this.put(agentId, await this.read(clawAgent));
     });
   }
 
   /**
-   * A person's change from Chips: written into the agent's block, then answered by the copy as it
-   * is now. A write OpenClaw refuses is refused with its words; the copy beside it says what holds.
+   * A person's change from Chips: written into the agent's block, and answered by the copy as it is
+   * now, once it shows the change or after a few reads. A write OpenClaw refuses is refused with its
+   * words; the copy beside it says what holds.
    */
-  async change(frame: ChangeFrame, clawAgent: string): Promise<void> {
-    let answer: Answer;
-    let made: ChangeFrame | undefined;
+  async change(frame: ChangeFrame, clawAgent: string): Promise<Payload> {
     try {
       await this.write(clawAgent, frame);
-      if (frame.on) this.before.set(clawAgent, frame.every);
-      answer = { answers: frame.change_id };
-      made = frame;
-      this.log(`openclaw: ${clawAgent}'s heartbeat ${frame.on ? `every ${frame.every} min` : "off"}, from Chips`);
     } catch (error) {
       const message = String((error as Error)?.message ?? error).slice(0, MESSAGE_MAX);
       this.log(`openclaw: ${clawAgent}'s heartbeat not changed from Chips: ${message}`);
-      answer = { refuses: { change_id: frame.change_id, ...(message === "" ? {} : { message }) } };
+      throw new Refuse(message, await this.read(clawAgent).catch(() => undefined));
     }
-    await this.agent(frame.agent_id, clawAgent, answer, made);
-  }
-
-  /** An agent deleted: nothing more is sent for it. */
-  forget(agentId: string): void {
-    this.sent.delete(agentId);
+    if (frame.on) this.before.set(clawAgent, frame.every);
+    this.log(`openclaw: ${clawAgent}'s heartbeat ${frame.on ? `every ${frame.every} min` : "off"}, from Chips`);
+    return this.inLine(frame.agent_id, async () => {
+      let body = await this.read(clawAgent);
+      for (let tries = 1; !shows(body, frame) && tries < APPLIED_TRIES; tries += 1) {
+        await this.sleep(APPLIED_EVERY_MS);
+        body = await this.read(clawAgent);
+      }
+      return body;
+    });
   }
 
   /** Every read and send asked for so far, done; for the tests and for a clean stop. */
@@ -256,10 +240,21 @@ export class Heartbeats {
   }
 
   private queue(id: string, work: () => Promise<void>): Promise<void> {
-    const next = (this.chains.get(id) ?? Promise.resolve()).then(work).catch((error: unknown) => {
+    return this.inLine(id, work).catch((error: unknown) => {
       this.log(`chips: ${id}'s heartbeat not sent: ${String(error)}`);
     });
-    this.chains.set(id, next);
-    return next;
+  }
+
+  /** Work for one agent, after what was asked for it before; its own result or failure. */
+  private inLine<T>(id: string, work: () => Promise<T>): Promise<T> {
+    const done = (this.chains.get(id) ?? Promise.resolve()).then(work);
+    this.chains.set(
+      id,
+      done.then(
+        () => undefined,
+        () => undefined,
+      ),
+    );
+    return done;
   }
 }

@@ -20,6 +20,7 @@
  * 0134's addendum), and a count, 0 included, as one agents read.
  */
 
+import { Refuse } from "@chips/harness";
 import type { ClawPort } from "./bridge.ts";
 import { PERSONA_FILES } from "./own-agents.ts";
 
@@ -53,10 +54,6 @@ export interface ClawFile {
 /** Whose set: one of our agents in Chips, or the harness's own. */
 export type Owner = { readonly agentId: string } | "harness";
 
-/** What a copy says of a person's edit: saved, or not and why. */
-export type Answer =
-  | { readonly answers: string }
-  | { readonly refuses: { readonly edit_id: string; readonly reason: "changed" | "failed"; readonly message?: string } };
 
 /** The `context.edit` frame Chips sends down the socket (Chips ADR 0134). */
 export interface EditFrame {
@@ -128,18 +125,16 @@ function conflicted(error: unknown): boolean {
 }
 
 /**
- * The copies Chips holds of our agents' context, kept current: each read from OpenClaw and sent
- * when it is not what was sent last, or when it answers an edit. One owner's reads and sends go one
+ * The copies Chips holds of our agents' context, kept current: each read from OpenClaw and handed to
+ * the SDK, which sends it when it is not what Chips took last. One owner's reads and sends go one
  * after another, so a later copy never lands before an earlier one.
  */
 export class Contexts {
-  /** What was sent last for each owner, as names and hashes. */
-  private readonly sent = new Map<string, string>();
   private readonly chains = new Map<string, Promise<void>>();
 
   constructor(
     private readonly claw: ClawPort,
-    private readonly put: (owner: Owner, body: Payload) => Promise<void>,
+    private readonly put: (owner: Owner, copy: Payload) => Promise<unknown>,
     private readonly log: (message: string) => void,
   ) {}
 
@@ -167,61 +162,46 @@ export class Contexts {
     return files;
   }
 
-  /** One of our agents' set, sent if it moved since the last, or to answer an edit. */
-  agent(agentId: string, clawAgent: string, answer?: Answer): Promise<void> {
+  /** One of our agents' set, read and sent. */
+  agent(agentId: string, clawAgent: string): Promise<void> {
     return this.queue(agentId, async () => {
-      const body = setOf(await this.read(clawAgent));
-      await this.send({ agentId }, agentId, body, answer);
+      await this.put({ agentId }, await this.copy({ agentId }, clawAgent));
     });
   }
 
   /** The harness's own set: the primary agent's persona, which each agent made begins with. */
-  harness(primary: string, answer?: Answer): Promise<void> {
+  harness(primary: string): Promise<void> {
     return this.queue("harness", async () => {
-      const body = ownSetOf(await this.read(primary, PERSONA_FILES));
-      await this.send("harness", "harness", body, answer);
+      await this.put("harness", await this.copy("harness", primary));
     });
   }
 
   /**
    * A person's edit from Chips: written to the agent's folder only if the file is still the version
-   * they changed, then answered by the copy as it is now. A write OpenClaw refuses as changed
-   * since is refused so, and any other failure as failed, the copy beside it saying what is there.
+   * they changed, and answered by the copy as it is now. A write OpenClaw refuses as changed since
+   * is refused so, and any other failure as failed, the copy beside it saying what is there.
    */
-  async edit(frame: EditFrame, clawAgent: string): Promise<void> {
+  async edit(frame: EditFrame, clawAgent: string): Promise<Payload> {
     const owner: Owner = frame.agent_id === undefined ? "harness" : { agentId: frame.agent_id };
-    let answer: Answer;
+    const now = () => this.inLine(owner === "harness" ? "harness" : owner.agentId, () => this.copy(owner, clawAgent));
     if (owner === "harness" && !(PERSONA_FILES as readonly string[]).includes(frame.name)) {
-      answer = { refuses: { edit_id: frame.edit_id, reason: "failed", message: `${frame.name} is not one a new agent starts with.` } };
-    } else {
-      try {
-        await this.claw.request("agents.files.set", {
-          agentId: clawAgent,
-          name: frame.name,
-          content: frame.text,
-          ...(frame.base_hash === null ? {} : { expectedHash: frame.base_hash }),
-        });
-        answer = { answers: frame.edit_id };
-        this.log(`openclaw: ${clawAgent}'s ${frame.name} saved from Chips`);
-      } catch (error) {
-        const changed = conflicted(error);
-        this.log(`openclaw: ${clawAgent}'s ${frame.name} not saved from Chips: ${String(error)}`);
-        answer = {
-          refuses: {
-            edit_id: frame.edit_id,
-            reason: changed ? "changed" : "failed",
-            ...(changed ? {} : { message: String((error as Error)?.message ?? error).slice(0, 300) }),
-          },
-        };
-      }
+      throw new Refuse(`${frame.name} is not one a new agent starts with.`, await now().catch(() => undefined), "failed");
     }
-    if (owner === "harness") await this.harness(clawAgent, answer);
-    else await this.agent(owner.agentId, clawAgent, answer);
-  }
-
-  /** An agent deleted: its copy goes with it in Chips, and nothing more is sent for it. */
-  forget(agentId: string): void {
-    this.sent.delete(agentId);
+    try {
+      await this.claw.request("agents.files.set", {
+        agentId: clawAgent,
+        name: frame.name,
+        content: frame.text,
+        ...(frame.base_hash === null ? {} : { expectedHash: frame.base_hash }),
+      });
+    } catch (error) {
+      const changed = conflicted(error);
+      this.log(`openclaw: ${clawAgent}'s ${frame.name} not saved from Chips: ${String(error)}`);
+      const message = changed ? "" : String((error as Error)?.message ?? error).slice(0, 300);
+      throw new Refuse(message, await now().catch(() => undefined), changed ? "changed" : "failed");
+    }
+    this.log(`openclaw: ${clawAgent}'s ${frame.name} saved from Chips`);
+    return now();
   }
 
   /** Every read and send asked for so far, done; for the tests and for a clean stop. */
@@ -229,19 +209,27 @@ export class Contexts {
     await Promise.all(this.chains.values());
   }
 
-  private async send(owner: Owner, id: string, body: Payload, answer: Answer | undefined): Promise<void> {
-    const files = (owner === "harness" ? body["shared"] : body["files"]) as Payload[];
-    const print = JSON.stringify([files.map((file) => [file["name"], file["hash"]]), body["not_shown"]]);
-    if (answer === undefined && this.sent.get(id) === print) return;
-    await this.put(owner, { ...body, ...answer });
-    this.sent.set(id, print);
+  /** An owner's copy as OpenClaw has it now: an agent's files, or the primary agent's persona. */
+  private async copy(owner: Owner, clawAgent: string): Promise<Payload> {
+    return owner === "harness" ? ownSetOf(await this.read(clawAgent, PERSONA_FILES)) : setOf(await this.read(clawAgent));
   }
 
   private queue(id: string, work: () => Promise<void>): Promise<void> {
-    const next = (this.chains.get(id) ?? Promise.resolve()).then(work).catch((error: unknown) => {
+    return this.inLine(id, work).catch((error: unknown) => {
       this.log(`chips: ${id === "harness" ? "the harness's" : `${id}'s`} context not sent: ${String(error)}`);
     });
-    this.chains.set(id, next);
-    return next;
+  }
+
+  /** Work for one owner, after what was asked for it before; its own result or failure. */
+  private inLine<T>(id: string, work: () => Promise<T>): Promise<T> {
+    const done = (this.chains.get(id) ?? Promise.resolve()).then(work);
+    this.chains.set(
+      id,
+      done.then(
+        () => undefined,
+        () => undefined,
+      ),
+    );
+    return done;
   }
 }

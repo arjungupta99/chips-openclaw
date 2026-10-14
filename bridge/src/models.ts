@@ -24,6 +24,7 @@
  * Chips holds no model's name: every label here is OpenClaw's, or this module's for its levels.
  */
 
+import { Refuse } from "@chips/harness";
 import type { ClawPort } from "./bridge.ts";
 
 type Payload = Record<string, unknown>;
@@ -92,11 +93,6 @@ export interface Whose {
   readonly clawAgent: string;
   readonly changeable: boolean;
 }
-
-/** What a copy says of a person's change: made, or not and why. */
-export type Answer =
-  | { readonly answers: string }
-  | { readonly refuses: { readonly change_id: string; readonly message?: string } };
 
 /** The `model.change` frame Chips sends down the socket (Chips ADR 0140). */
 export interface ChangeFrame {
@@ -227,18 +223,16 @@ export function shows(body: Payload, frame: Pick<ChangeFrame, "model" | "effort"
 }
 
 /**
- * The copies Chips holds of our agents' models, kept current: each read from OpenClaw and sent when
- * it is not what was sent last, or when it answers a change. One agent's reads and sends go one
+ * The copies Chips holds of our agents' models, kept current: each read from OpenClaw and handed to
+ * the SDK, which sends it when it is not what Chips took last. One agent's reads and sends go one
  * after another, so a later copy never lands before an earlier one.
  */
 export class Models {
-  /** What was sent last for each agent. */
-  private readonly sent = new Map<string, string>();
   private readonly chains = new Map<string, Promise<void>>();
 
   constructor(
     private readonly claw: ClawPort,
-    private readonly put: (agentId: string, body: Payload) => Promise<void>,
+    private readonly put: (agentId: string, copy: Payload) => Promise<unknown>,
     private readonly log: (message: string) => void,
     private readonly sleep: (ms: number) => Promise<void> = (ms) => new Promise((done) => setTimeout(done, ms)),
   ) {}
@@ -265,57 +259,44 @@ export class Models {
     });
   }
 
-  /**
-   * One of our agents' copy, sent if it moved since the last, or to answer a change: once it shows
-   * the change `made`, or after a few reads, as it is.
-   */
-  agent(agentId: string, whose: Whose, answer?: Answer, made?: ChangeFrame): Promise<void> {
+  /** One of our agents' copy, read and sent. */
+  agent(agentId: string, whose: Whose): Promise<void> {
     return this.queue(agentId, async () => {
-      let body = await this.read(whose);
-      for (let tries = 1; made !== undefined && body !== undefined && !shows(body, made) && tries < APPLIED_TRIES; tries += 1) {
-        await this.sleep(APPLIED_EVERY_MS);
-        body = await this.read(whose);
-      }
+      const body = await this.read(whose);
       if (body === undefined) {
         this.log(`chips: no model sent for ${agentId}: OpenClaw doesn't list ${whose.clawAgent}`);
         return;
       }
-      const print = JSON.stringify(body);
-      if (answer === undefined && this.sent.get(agentId) === print) return;
-      await this.put(agentId, { ...body, ...answer });
-      this.sent.set(agentId, print);
+      await this.put(agentId, body);
     });
   }
 
   /**
-   * A person's change from Chips: written into the agent's entry, then answered by the copy as it
-   * is now. An agent Chips may not change is refused, as is any write OpenClaw refuses, with
-   * its words; the copy beside the refusal says what the agent still runs on.
+   * A person's change from Chips: written into the agent's entry, and answered by the copy as it is
+   * now, once it shows the change or after a few reads. An agent Chips may not change is refused, as
+   * is any write OpenClaw refuses, with its words; the copy beside the refusal says what the agent
+   * still runs on.
    */
-  async change(frame: ChangeFrame, whose: Whose): Promise<void> {
-    let answer: Answer;
-    let made: ChangeFrame | undefined;
-    if (!whose.changeable) {
-      answer = { refuses: { change_id: frame.change_id, message: READ_ONLY_WHY } };
-    } else {
-      try {
-        await this.write(whose.clawAgent, frame);
-        answer = { answers: frame.change_id };
-        made = frame;
-        const now = frame.model === null ? "OpenClaw's default" : `${frame.model}${frame.effort === null ? "" : ` at ${frame.effort}`}`;
-        this.log(`openclaw: ${whose.clawAgent} runs on ${now}, from Chips`);
-      } catch (error) {
-        const message = String((error as Error)?.message ?? error).slice(0, MESSAGE_MAX);
-        this.log(`openclaw: ${whose.clawAgent}'s model not changed from Chips: ${message}`);
-        answer = { refuses: { change_id: frame.change_id, ...(message === "" ? {} : { message }) } };
-      }
+  async change(frame: ChangeFrame, whose: Whose): Promise<Payload> {
+    if (!whose.changeable) throw new Refuse(READ_ONLY_WHY, await this.read(whose).catch(() => undefined));
+    try {
+      await this.write(whose.clawAgent, frame);
+    } catch (error) {
+      const message = String((error as Error)?.message ?? error).slice(0, MESSAGE_MAX);
+      this.log(`openclaw: ${whose.clawAgent}'s model not changed from Chips: ${message}`);
+      throw new Refuse(message, await this.read(whose).catch(() => undefined));
     }
-    await this.agent(frame.agent_id, whose, answer, made);
-  }
-
-  /** An agent deleted: nothing more is sent for it. */
-  forget(agentId: string): void {
-    this.sent.delete(agentId);
+    const now = frame.model === null ? "OpenClaw's default" : `${frame.model}${frame.effort === null ? "" : ` at ${frame.effort}`}`;
+    this.log(`openclaw: ${whose.clawAgent} runs on ${now}, from Chips`);
+    return this.inLine(frame.agent_id, async () => {
+      let body = await this.read(whose);
+      for (let tries = 1; body !== undefined && !shows(body, frame) && tries < APPLIED_TRIES; tries += 1) {
+        await this.sleep(APPLIED_EVERY_MS);
+        body = await this.read(whose);
+      }
+      if (body === undefined) throw new Error(`OpenClaw doesn't list ${whose.clawAgent}`);
+      return body;
+    });
   }
 
   /** Every read and send asked for so far, done; for the tests and for a clean stop. */
@@ -338,10 +319,21 @@ export class Models {
   }
 
   private queue(id: string, work: () => Promise<void>): Promise<void> {
-    const next = (this.chains.get(id) ?? Promise.resolve()).then(work).catch((error: unknown) => {
+    return this.inLine(id, work).catch((error: unknown) => {
       this.log(`chips: ${id}'s model not sent: ${String(error)}`);
     });
-    this.chains.set(id, next);
-    return next;
+  }
+
+  /** Work for one agent, after what was asked for it before; its own result or failure. */
+  private inLine<T>(id: string, work: () => Promise<T>): Promise<T> {
+    const done = (this.chains.get(id) ?? Promise.resolve()).then(work);
+    this.chains.set(
+      id,
+      done.then(
+        () => undefined,
+        () => undefined,
+      ),
+    );
+    return done;
   }
 }

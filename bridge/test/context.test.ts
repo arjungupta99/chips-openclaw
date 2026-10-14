@@ -7,9 +7,11 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { beforeEach, describe, it } from "node:test";
+import type { Settings } from "@chips/harness";
 import { Bridge, type ChipsPort, type ClawPort } from "../src/bridge.ts";
 import type { ChipsAgent } from "../src/chips.ts";
-import { type ClawFile, Contexts, identityLine, type Owner, ownSetOf, setOf } from "../src/context.ts";
+import { type ClawFile, Contexts, type EditFrame, identityLine, type Owner, ownSetOf, setOf } from "../src/context.ts";
+import { settingsFor } from "./settings-rig.ts";
 
 const ME = "hrn_01K4ZQPX000000000000000004";
 const ROOM = "spc_01K4ZQPX000000000000000002";
@@ -97,6 +99,16 @@ const claw: ClawPort = {
 let names: Map<string, string>;
 
 let contexts: Contexts;
+let settings: Settings;
+/** What makes a person's edit: the module, for one OpenClaw agent, or the bridge in front of it. */
+let handle: (frame: Record<string, unknown>) => Promise<Record<string, unknown>>;
+let editing = MADE;
+
+/** A person's edit from Chips of `clawAgent`'s files, made by the module and answered by the SDK. */
+async function edit(frame: Omit<EditFrame, "agent_id"> & { agent_id?: string }, clawAgent: string): Promise<void> {
+  editing = clawAgent;
+  await settings.hear({ frame: "context.edit", ...frame });
+}
 
 beforeEach(() => {
   folders = new Map();
@@ -105,7 +117,15 @@ beforeEach(() => {
   puts = [];
   failWrites = false;
   logs = [];
-  contexts = new Contexts(claw, async (owner, body) => void puts.push([owner, body]), (message) => logs.push(message));
+  handle = (frame) => contexts.edit(frame as unknown as EditFrame, editing);
+  settings = settingsFor((whose, body) => void puts.push([whose === "harness" ? "harness" : { agentId: whose }, body]), {
+    context: async (frame) => (await handle({ ...frame })) as never,
+  });
+  contexts = new Contexts(
+    claw,
+    (owner, copy) => (owner === "harness" ? settings.harnessContext(copy as never) : settings.context(owner.agentId, copy as never)),
+    (message) => logs.push(message),
+  );
   for (const [name, text] of [
     ["SOUL.md", "# SOUL.md - Who You Are\n\n_You're not a chatbot._"],
     ["AGENTS.md", "# AGENTS.md\n\nRead SOUL.md first."],
@@ -223,7 +243,7 @@ describe("a person's edit from Chips", () => {
   beforeEach(() => folder(MADE).set("SOUL.md", "who"));
 
   it("is saved in the agent's folder from the version it was made from, and the copy answers it", async () => {
-    await contexts.edit(ask(), MADE);
+    await edit(ask(), MADE);
     assert.deepEqual(calls.find(([method]) => method === "agents.files.set")?.[1], {
       agentId: MADE,
       name: "SOUL.md",
@@ -239,7 +259,7 @@ describe("a person's edit from Chips", () => {
 
   it("is refused as changed when the file moved since, and the copy says what is there now", async () => {
     folder(MADE).set("SOUL.md", "changed by hand");
-    await contexts.edit(ask(), MADE);
+    await edit(ask(), MADE);
     assert.equal(folder(MADE).get("SOUL.md"), "changed by hand");
     const body = puts.at(-1)?.[1];
     assert.deepEqual(body?.["refuses"], { edit_id: EDIT, reason: "changed" });
@@ -248,7 +268,7 @@ describe("a person's edit from Chips", () => {
 
   it("is refused as failed, with OpenClaw's words, when the write fails otherwise", async () => {
     failWrites = true;
-    await contexts.edit(ask(), MADE);
+    await edit(ask(), MADE);
     assert.deepEqual(puts.at(-1)?.[1]?.["refuses"], {
       edit_id: EDIT,
       reason: "failed",
@@ -257,11 +277,11 @@ describe("a person's edit from Chips", () => {
   });
 
   it("saves one of the harness's own in the primary agent's folder, and refuses a file new agents do not start with", async () => {
-    await contexts.edit({ edit_id: EDIT, name: "USER.md", text: "- Name: Arjun G", base_hash: sha("# USER.md\n\n- Name: Arjun") }, "main");
+    await edit({ edit_id: EDIT, name: "USER.md", text: "- Name: Arjun G", base_hash: sha("# USER.md\n\n- Name: Arjun") }, "main");
     assert.equal(folder("main").get("USER.md"), "- Name: Arjun G");
     assert.deepEqual(puts.at(-1)?.[0], "harness");
     assert.equal(puts.at(-1)?.[1]?.["answers"], EDIT);
-    await contexts.edit({ edit_id: EDIT, name: "IDENTITY.md", text: "- Name: me", base_hash: sha(IDENTITY("main")) }, "main");
+    await edit({ edit_id: EDIT, name: "IDENTITY.md", text: "- Name: me", base_hash: sha(IDENTITY("main")) }, "main");
     assert.equal(folder("main").get("IDENTITY.md"), IDENTITY("main"));
     assert.equal((puts.at(-1)?.[1]?.["refuses"] as Record<string, unknown>)["reason"], "failed");
   });
@@ -297,6 +317,7 @@ describe("the bridge keeps the copies current", () => {
     },
     attach: async () => true,
     roomContext: async () => ({ lines: [] }),
+    forget: (agentId) => settings.forget(agentId),
   };
   let bridge: Bridge;
   const session = `agent:${MADE}:chips-${ROOM.toLowerCase()}`;
@@ -305,6 +326,7 @@ describe("the bridge keeps the copies current", () => {
     agents = [agentIn("agt_scout", session, ROOM, "Scout"), agentIn("agt_main", "main", null, "OpenClaw")];
     registered = [];
     bridge = new Bridge(chips, claw, { harnessId: ME, agent: "main" }, () => undefined, undefined, Date.now, undefined, contexts);
+    handle = (frame) => bridge.onContextEdit(frame);
     folder(MADE).set("SOUL.md", "who");
   });
 
@@ -357,16 +379,16 @@ describe("the bridge keeps the copies current", () => {
 
   it("saves an edit in the folder of the agent it is for, and the harness's in the primary agent's", async () => {
     await bridge.adoptAgents({ defaultId: "main", agents: [{ id: "main" }] });
-    await bridge.onContextEdit({ frame: "context.edit", edit_id: EDIT, harness_id: ME, agent_id: "agt_scout", name: "SOUL.md", text: "Careful.", base_hash: sha("who"), asked_by: ARJUN, asked_at: "2026-10-07T20:00:00.000Z" });
+    await settings.hear({ frame: "context.edit", edit_id: EDIT, harness_id: ME, agent_id: "agt_scout", name: "SOUL.md", text: "Careful.", base_hash: sha("who"), asked_by: ARJUN, asked_at: "2026-10-07T20:00:00.000Z" });
     assert.equal(folder(MADE).get("SOUL.md"), "Careful.");
-    await bridge.onContextEdit({ frame: "context.edit", edit_id: EDIT, harness_id: ME, name: "SOUL.md", text: "Main's.", base_hash: sha("# SOUL.md - Who You Are\n\n_You're not a chatbot._"), asked_by: ARJUN, asked_at: "2026-10-07T20:00:00.000Z" });
+    await settings.hear({ frame: "context.edit", edit_id: EDIT, harness_id: ME, name: "SOUL.md", text: "Main's.", base_hash: sha("# SOUL.md - Who You Are\n\n_You're not a chatbot._"), asked_by: ARJUN, asked_at: "2026-10-07T20:00:00.000Z" });
     assert.equal(folder("main").get("SOUL.md"), "Main's.");
     // The Main agent's are the primary agent's too.
-    await bridge.onContextEdit({ frame: "context.edit", edit_id: EDIT, harness_id: ME, agent_id: "agt_1", name: "SOUL.md", text: "The Main agent's.", base_hash: sha("Main's."), asked_by: ARJUN, asked_at: "2026-10-07T20:00:00.000Z" });
+    await settings.hear({ frame: "context.edit", edit_id: EDIT, harness_id: ME, agent_id: "agt_1", name: "SOUL.md", text: "The Main agent's.", base_hash: sha("Main's."), asked_by: ARJUN, asked_at: "2026-10-07T20:00:00.000Z" });
     assert.equal(folder("main").get("SOUL.md"), "The Main agent's.");
     // An agent with no OpenClaw agent of its own is not answered; Chips says the edit was missed.
     puts = [];
-    await bridge.onContextEdit({ frame: "context.edit", edit_id: EDIT, harness_id: ME, agent_id: "agt_main", name: "SOUL.md", text: "x", base_hash: sha("x"), asked_by: ARJUN, asked_at: "2026-10-07T20:00:00.000Z" });
+    await settings.hear({ frame: "context.edit", edit_id: EDIT, harness_id: ME, agent_id: "agt_main", name: "SOUL.md", text: "x", base_hash: sha("x"), asked_by: ARJUN, asked_at: "2026-10-07T20:00:00.000Z" });
     assert.deepEqual(puts, []);
   });
 });

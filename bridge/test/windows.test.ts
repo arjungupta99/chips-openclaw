@@ -10,9 +10,17 @@ import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { beforeEach, describe, it } from "node:test";
+import type { Settings } from "@chips/harness";
 import { Bridge, type ChipsPort, type ClawPort } from "../src/bridge.ts";
 import type { ChipsAgent, ChipsEvent } from "../src/chips.ts";
-import { fillOf, LIMITS, overLimit, type Session, Windows } from "../src/windows.ts";
+import { fillOf, LIMITS, overLimit, type Session, Windows, type WindowsPort } from "../src/windows.ts";
+import { settingsFor } from "./settings-rig.ts";
+
+/** The SDK's settings as the windows send copies through them. */
+const portOf = (settings: Settings): WindowsPort => ({
+  put: (agentId, copy) => settings.contextWindow(agentId, copy as never),
+  failed: (agentId, changeId, message, copy) => settings.contextWindowFailed(agentId, changeId, message, copy as never),
+});
 
 const NOW = Date.parse("2026-10-09T18:30:00.000Z");
 const HOME: Session = { key: "agent:main:main", clawAgent: "main" };
@@ -65,9 +73,28 @@ describe("an agent's context window", () => {
       return {} as T;
     },
   };
-  const windows = (file = state) =>
-    new Windows(claw, async (agentId, body) => void puts.push([agentId, body]), () => undefined, file, () => NOW, async () => undefined);
+  let settings: Settings;
+  let busy = false;
+  /** A restart: the bridge's windows and the SDK's settings, both new, with the state file kept. */
+  const windows = (file = state) => {
+    settings = settingsFor((agentId, body) => void puts.push([agentId, body]), {
+      contextWindows: {
+        compact: async (frame) => (await win.compact(frame, HOME, busy)) as never,
+        change: async (frame) => (await win.change(frame, HOME)) as never,
+      },
+    });
+    return new Windows(claw, portOf(settings), () => undefined, file, () => NOW, async () => undefined);
+  };
   let win: Windows;
+  /** A person's Compact now from Chips, while the bridge's turn runs in the session or not. */
+  const compact = async (changeId: string, during: boolean): Promise<void> => {
+    busy = during;
+    await settings.hear({ frame: "context_window.compact", change_id: changeId, agent_id: "agt_main" });
+  };
+  /** A person's limit from Chips. */
+  const change = async (changeId: string, at: number | null): Promise<void> => {
+    await settings.hear({ frame: "context_window.change", change_id: changeId, agent_id: "agt_main", at });
+  };
 
   beforeEach(() => {
     rows = new Map([[HOME.key, { totalTokens: 172_000, contextTokens: 272_000, model: "gpt-6-astra", updatedAt: NOW }]]);
@@ -105,11 +132,11 @@ describe("an agent's context window", () => {
 
   it("compacts now: taken and running, then what it came to, with the time OpenClaw takes", async () => {
     await win.agent("agt_main", HOME);
-    await win.compact({ change_id: "chg_1", agent_id: "agt_main" }, HOME, false);
+    await compact("chg_1", false);
     await win.settled();
-    const compact = calls.find(([method]) => method === "sessions.compact");
-    assert.deepEqual(compact?.[1], { key: "agent:main:main", agentId: "main" });
-    assert.equal(compact?.[2]?.timeoutMs, 200_000);
+    const asked = calls.find(([method]) => method === "sessions.compact");
+    assert.deepEqual(asked?.[1], { key: "agent:main:main", agentId: "main" });
+    assert.equal(asked?.[2]?.timeoutMs, 200_000);
     assert.deepEqual(puts.slice(1), [
       ["agt_main", copy({ compacting: "running", answers: "chg_1" })],
       [
@@ -120,7 +147,7 @@ describe("an agent's context window", () => {
   });
 
   it("waits for the bridge's turn in the session to end, then compacts", async () => {
-    await win.compact({ change_id: "chg_1", agent_id: "agt_main" }, HOME, true);
+    await compact("chg_1", true);
     assert.deepEqual(puts, [["agt_main", copy({ compacting: "queued", answers: "chg_1" })]]);
     assert.equal(calls.some(([method]) => method === "sessions.compact"), false);
     rows.set(HOME.key, { totalTokens: 190_000, contextTokens: 272_000, model: "gpt-6-astra", updatedAt: NOW });
@@ -135,7 +162,7 @@ describe("an agent's context window", () => {
 
   it("waits out OpenClaw's own work in the session, a try every ten seconds", async () => {
     busyFor = 2;
-    await win.compact({ change_id: "chg_1", agent_id: "agt_main" }, HOME, false);
+    await compact("chg_1", false);
     await win.settled();
     assert.equal(calls.filter(([method]) => method === "sessions.compact").length, 3);
     assert.equal(puts.at(-1)?.[1]?.["used"], 21_000);
@@ -143,26 +170,26 @@ describe("an agent's context window", () => {
 
   it("refuses with OpenClaw's words when it compacts nothing, or fails", async () => {
     compactAnswer = { ok: true, compacted: false, reason: "Too little to compact." };
-    await win.compact({ change_id: "chg_1", agent_id: "agt_main" }, HOME, false);
+    await compact("chg_1", false);
     await win.settled();
     assert.deepEqual(puts.at(-1), ["agt_main", copy({ refuses: { change_id: "chg_1", message: "Too little to compact." } })]);
 
     compactAnswer = new Error("the model is unavailable");
-    await win.compact({ change_id: "chg_2", agent_id: "agt_main" }, HOME, false);
+    await compact("chg_2", false);
     await win.settled();
     assert.deepEqual(puts.at(-1), ["agt_main", copy({ refuses: { change_id: "chg_2", message: "the model is unavailable" } })]);
   });
 
   it("keeps a limit, answers it, and refuses one it doesn't offer", async () => {
-    await win.change({ change_id: "chg_1", agent_id: "agt_main", at: 70 }, HOME);
+    await change("chg_1", 70);
     assert.deepEqual(puts.at(-1), ["agt_main", copy({ limit: limit(70), answers: "chg_1" })]);
-    await win.change({ change_id: "chg_2", agent_id: "agt_main", at: 75 }, HOME);
+    await change("chg_2", 75);
     assert.deepEqual(puts.at(-1)?.[1]?.["refuses"], { change_id: "chg_2", message: "That limit isn't one OpenClaw's bridge offers." });
     assert.deepEqual(JSON.parse(readFileSync(state, "utf8")).limits, { agt_main: 70 });
   });
 
   it("compacts itself after a turn that ends past its limit, and not before", async () => {
-    await win.change({ change_id: "chg_1", agent_id: "agt_main", at: 70 }, HOME);
+    await change("chg_1", 70);
     await win.turnEnded("agt_main", HOME);
     await win.settled();
     assert.equal(calls.some(([method]) => method === "sessions.compact"), false);
@@ -193,8 +220,8 @@ describe("an agent's context window", () => {
   });
 
   it("keeps its limits and last compactions across a restart, and forgets a deleted agent's", async () => {
-    await win.change({ change_id: "chg_1", agent_id: "agt_main", at: 80 }, HOME);
-    await win.compact({ change_id: "chg_2", agent_id: "agt_main" }, HOME, false);
+    await change("chg_1", 80);
+    await compact("chg_2", false);
     await win.settled();
     puts = [];
     const again = windows();
@@ -214,6 +241,7 @@ describe("context windows through the bridge", () => {
   let calls: [string, Record<string, unknown>][];
   let agents: ChipsAgent[];
   let bridge: Bridge;
+  let settings: Settings;
 
   const chips: ChipsPort = {
     send: async (_event: ChipsEvent) => undefined,
@@ -225,6 +253,7 @@ describe("context windows through the bridge", () => {
     openSpace: async () => MAIN_ROOM,
     attach: async () => true,
     roomContext: async () => ({ lines: [] }),
+    forget: (agentId) => settings.forget(agentId),
   };
   const claw: ClawPort = {
     request: async <T>(method: string, params: Record<string, unknown>) => {
@@ -244,7 +273,13 @@ describe("context windows through the bridge", () => {
       { agent_id: MAIN, key: "agent:main:chips-main", name: "OpenClaw", lead: true, state: "active", spaces: [MAIN_ROOM], room: MAIN_ROOM },
       { agent_id: "agt_scout", key: "scout", name: "Scout", lead: false, state: "active", spaces: [], room: null },
     ];
-    const windows = new Windows(claw, async (agentId, body) => void puts.push([agentId, body]), () => undefined, undefined, () => NOW, async () => undefined);
+    settings = settingsFor((agentId, body) => void puts.push([agentId, body]), {
+      contextWindows: {
+        compact: async (frame) => (await bridge.onWindowCompact({ ...frame })) as never,
+        change: async (frame) => (await bridge.onWindowChange({ ...frame })) as never,
+      },
+    });
+    const windows = new Windows(claw, portOf(settings), () => undefined, undefined, () => NOW, async () => undefined);
     bridge = new Bridge(chips, claw, { harnessId: ME, agent: "main" }, () => undefined, undefined, Date.now, undefined, undefined, undefined, undefined, windows);
     await bridge.adoptAgents({ defaultId: "main", agents: [{ id: "main" }, { id: "scout" }] });
   });
@@ -257,8 +292,8 @@ describe("context windows through the bridge", () => {
   });
 
   it("compacts the Main agent's Home from Chips, and leaves an agent with no session unanswered", async () => {
-    await bridge.onWindowCompact({ frame: "context_window.compact", change_id: "chg_1", agent_id: MAIN });
-    await bridge.onWindowCompact({ frame: "context_window.compact", change_id: "chg_2", agent_id: "agt_scout" });
+    await settings.hear({ frame: "context_window.compact", change_id: "chg_1", agent_id: MAIN });
+    await settings.hear({ frame: "context_window.compact", change_id: "chg_2", agent_id: "agt_scout" });
     await bridge.settled();
     const compacts = calls.filter(([method]) => method === "sessions.compact").map(([, params]) => params);
     assert.deepEqual(compacts, [{ key: "agent:main:main", agentId: "main" }]);
@@ -267,7 +302,7 @@ describe("context windows through the bridge", () => {
   });
 
   it("takes a limit from Chips for the Main agent", async () => {
-    await bridge.onWindowChange({ frame: "context_window.change", change_id: "chg_1", agent_id: MAIN, at: 60 });
+    await settings.hear({ frame: "context_window.change", change_id: "chg_1", agent_id: MAIN, at: 60 });
     await bridge.settled();
     assert.deepEqual(puts.at(-1)?.[1]?.["limit"], { at: 60, choices: [...LIMITS], default: null, may_turn_off: true });
     assert.equal(puts.at(-1)?.[1]?.["answers"], "chg_1");

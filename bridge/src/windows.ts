@@ -15,6 +15,7 @@
  */
 
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { Refuse } from "@chips/harness";
 import type { ClawPort } from "./bridge.ts";
 
 type Payload = Record<string, unknown>;
@@ -68,10 +69,11 @@ export interface LimitFrame {
   readonly at: number | null;
 }
 
-/** What a copy says of a person's ask: taken or made, or not and why. */
-export type Answer =
-  | { readonly answers: string }
-  | { readonly refuses: { readonly change_id: string; readonly message?: string } };
+/** What the windows send Chips: a copy, and a Compact now refused after it was taken. */
+export interface WindowsPort {
+  readonly put: (agentId: string, copy: Payload) => Promise<unknown>;
+  readonly failed: (agentId: string, changeId: string, message: string, copy?: Payload) => Promise<unknown>;
+}
 
 const num = (value: unknown): number | undefined =>
   typeof value === "number" && Number.isFinite(value) ? value : undefined;
@@ -105,12 +107,11 @@ interface Kept {
 }
 
 /**
- * The copies Chips holds of our agents' context windows, kept current: each read from OpenClaw
- * and sent when it is not what was sent last, or when it answers an ask. One agent's reads and
+ * The copies Chips holds of our agents' context windows, kept current: each read from OpenClaw and
+ * handed to the SDK, which sends it when it is not what Chips took last. One agent's reads and
  * sends go one after another, so a later copy never lands before an earlier one.
  */
 export class Windows {
-  private readonly sent = new Map<string, string>();
   private readonly chains = new Map<string, Promise<void>>();
   private readonly fills = new Map<string, Fill>();
   private readonly compacting = new Map<string, "queued" | "running">();
@@ -122,7 +123,7 @@ export class Windows {
 
   constructor(
     private readonly claw: ClawPort,
-    private readonly put: (agentId: string, body: Payload) => Promise<void>,
+    private readonly chips: WindowsPort,
     private readonly log: (message: string) => void,
     /** Where the limits and last compactions are kept; none, and they last as long as the process. */
     private readonly stateFile?: string,
@@ -167,13 +168,11 @@ export class Windows {
     return fill ?? this.fills.get(agentId);
   }
 
-  /** One of our agents' copy, read and sent if it moved since the last, or to answer an ask. */
-  agent(agentId: string, session: Session, answer?: Answer): Promise<void> {
+  /** One of our agents' copy, read and sent. */
+  agent(agentId: string, session: Session): Promise<void> {
     return this.queue(agentId, async () => {
-      await this.read(agentId, session).catch((error: unknown) => {
-        this.log(`openclaw: ${session.key} not read for its context window: ${said(error)}`);
-      });
-      await this.send(agentId, answer);
+      await this.readSaying(agentId, session);
+      await this.send(agentId);
     });
   }
 
@@ -196,37 +195,45 @@ export class Windows {
   }
 
   /**
-   * A person's Compact now from Chips. Taken at once and done now, or, while one of the bridge's
-   * turns runs in the session, when the turn ends. OpenClaw's own work in the session (a heartbeat,
-   * a channel's message) is waited out as it goes.
+   * A person's Compact now from Chips, answered as soon as it is taken by the copy that says so,
+   * and done now, or, while one of the bridge's turns runs in the session, when the turn ends.
+   * OpenClaw's own work in the session (a heartbeat, a channel's message) is waited out as it goes.
    */
-  async compact(frame: CompactFrame, session: Session, busy: boolean): Promise<void> {
+  async compact(frame: CompactFrame, session: Session, busy: boolean): Promise<Payload> {
     const agentId = frame.agent_id;
     if (this.compacting.has(agentId)) {
-      await this.agent(agentId, session, { refuses: { change_id: frame.change_id, message: "It is compacting already." } });
-      return;
+      throw new Refuse("It is compacting already.", await this.current(agentId, session).catch(() => undefined));
+    }
+    this.compacting.set(agentId, busy ? "queued" : "running");
+    let copy: Payload;
+    try {
+      copy = await this.current(agentId, session);
+    } catch (error) {
+      this.compacting.delete(agentId);
+      throw error;
     }
     if (busy) {
-      this.compacting.set(agentId, "queued");
       this.waiting.set(agentId, session);
       this.log(`openclaw: ${session.key} compacts when its turn ends, from Chips`);
-      await this.agent(agentId, session, { answers: frame.change_id });
-      return;
+    } else {
+      this.track(this.run(agentId, session, "asked", frame.change_id));
     }
-    await this.run(agentId, session, "asked", frame.change_id);
+    return copy;
   }
 
   /** A person's limit from Chips: kept, and answered by the copy that shows it. */
-  async change(frame: LimitFrame, session: Session): Promise<void> {
+  async change(frame: LimitFrame, session: Session): Promise<Payload> {
     const agentId = frame.agent_id;
     if (frame.at !== null && !LIMITS.includes(frame.at)) {
-      await this.agent(agentId, session, { refuses: { change_id: frame.change_id, message: "That limit isn't one OpenClaw's bridge offers." } });
-      return;
+      throw new Refuse(
+        "That limit isn't one OpenClaw's bridge offers.",
+        await this.current(agentId, session).catch(() => undefined),
+      );
     }
     this.kept.limits[agentId] = frame.at;
     this.save();
     this.log(`openclaw: ${session.key} compacts itself ${frame.at === null ? "only when asked" : `at ${frame.at}%`}, from Chips`);
-    await this.agent(agentId, session, { answers: frame.change_id });
+    return this.current(agentId, session);
   }
 
   /**
@@ -257,7 +264,6 @@ export class Windows {
 
   /** An agent deleted: nothing more is sent for it, and its limit and last compaction go. */
   forget(agentId: string): void {
-    this.sent.delete(agentId);
     this.fills.delete(agentId);
     this.waiting.delete(agentId);
     clearTimeout(this.settling.get(agentId));
@@ -289,12 +295,12 @@ export class Windows {
   }
 
   /**
-   * Compact the session now: the copy says so first (answering the ask, when one is named), then
+   * Compact the session now: the copy says so first (unless it answered the ask already), then
    * says what it came to, or refuses the ask with OpenClaw's words.
    */
   private async run(agentId: string, session: Session, by: Last["by"], changeId?: string): Promise<void> {
     this.compacting.set(agentId, "running");
-    await this.agent(agentId, session, changeId === undefined ? undefined : { answers: changeId });
+    if (changeId === undefined) await this.agent(agentId, session);
     const before = this.usedOf(agentId);
     try {
       const answer = await this.compactSession(session);
@@ -302,7 +308,7 @@ export class Windows {
       if (answer["compacted"] === false) {
         const reason = typeof answer["reason"] === "string" ? answer["reason"] : "OpenClaw found nothing to compact.";
         this.log(`openclaw: ${session.key} not compacted: ${reason}`);
-        await this.agent(agentId, session, changeId === undefined ? undefined : { refuses: { change_id: changeId, message: reason.slice(0, MESSAGE_MAX) } });
+        await this.notDone(agentId, session, changeId, reason);
         return;
       }
       const result = (answer["result"] ?? {}) as Payload;
@@ -320,8 +326,34 @@ export class Windows {
     } catch (error) {
       this.compacting.delete(agentId);
       this.log(`openclaw: ${session.key} not compacted: ${said(error)}`);
-      await this.agent(agentId, session, changeId === undefined ? undefined : { refuses: { change_id: changeId, message: said(error) } });
+      await this.notDone(agentId, session, changeId, said(error));
     }
+  }
+
+  /** A compaction that didn't happen: the ask it took refused with why, or the copy sent as it is. */
+  private notDone(agentId: string, session: Session, changeId: string | undefined, why: string): Promise<void> {
+    if (changeId === undefined) return this.agent(agentId, session);
+    return this.queue(agentId, async () => {
+      await this.readSaying(agentId, session);
+      await this.chips.failed(agentId, changeId, why.slice(0, MESSAGE_MAX), this.copyOf(agentId));
+    });
+  }
+
+  /** The agent's copy as it is now, read in its turn; one with nothing known of it yet is a failure. */
+  private current(agentId: string, session: Session): Promise<Payload> {
+    return this.inLine(agentId, async () => {
+      await this.readSaying(agentId, session);
+      const copy = this.copyOf(agentId);
+      if (copy === undefined) throw new Error(`nothing is known yet of ${session.key}'s context window`);
+      return copy;
+    });
+  }
+
+  /** The session read, and a failure said rather than thrown: the copy goes on as last known. */
+  private async readSaying(agentId: string, session: Session): Promise<void> {
+    await this.read(agentId, session).catch((error: unknown) => {
+      this.log(`openclaw: ${session.key} not read for its context window: ${said(error)}`);
+    });
   }
 
   /** `sessions.compact`, given its time, and tried again while OpenClaw's own work holds the session. */
@@ -346,17 +378,13 @@ export class Windows {
     this.save();
   }
 
-  /** The copy put, when it moved since the last or answers an ask. */
-  private async send(agentId: string, answer?: Answer): Promise<void> {
+  /** The copy as now known, sent. */
+  private async send(agentId: string): Promise<void> {
     const body = this.copyOf(agentId);
     if (body === undefined) return;
-    const print = JSON.stringify(body);
-    if (answer === undefined && this.sent.get(agentId) === print) return;
-    this.sent.set(agentId, print);
     try {
-      await this.put(agentId, { ...body, ...answer });
+      await this.chips.put(agentId, body);
     } catch (error) {
-      this.sent.delete(agentId);
       this.log(`chips: ${agentId}'s context window not sent: ${said(error)}`);
     }
   }
@@ -368,11 +396,22 @@ export class Windows {
   }
 
   private queue(id: string, work: () => Promise<void>): Promise<void> {
-    const next = (this.chains.get(id) ?? Promise.resolve()).then(work).catch((error: unknown) => {
+    return this.inLine(id, work).catch((error: unknown) => {
       this.log(`chips: ${id}'s context window not sent: ${said(error)}`);
     });
-    this.chains.set(id, next);
-    return next;
+  }
+
+  /** Work for one agent, after what was asked for it before; its own result or failure. */
+  private inLine<T>(id: string, work: () => Promise<T>): Promise<T> {
+    const done = (this.chains.get(id) ?? Promise.resolve()).then(work);
+    this.chains.set(
+      id,
+      done.then(
+        () => undefined,
+        () => undefined,
+      ),
+    );
+    return done;
   }
 
   private load(): Kept {

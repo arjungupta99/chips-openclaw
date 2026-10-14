@@ -65,6 +65,7 @@
  * same event and Chips answers it as a duplicate.
  */
 
+import { Refuse } from "@chips/harness";
 import { type ChipsAgent, type ChipsEvent, ChipsRefusal, type NewAgent, type Placed, type Taken } from "./chips.ts";
 import { chipsId } from "./ids.ts";
 import type { Media } from "./media.ts";
@@ -91,6 +92,8 @@ export interface ChipsPort {
   openSpace(key: string): Promise<string>;
   attach(agentId: string, spaceId: string, replacing: string): Promise<boolean>;
   roomContext(spaceId: string, before: number, limit: number): Promise<unknown>;
+  /** An agent deleted: nothing more is remembered of the copies sent for it. */
+  forget(agentId: string): void;
 }
 
 /** One agent as the gateway lists it (`agents.list`). */
@@ -1021,9 +1024,7 @@ export class Bridge {
     this.caughtUp.delete(agentId);
     this.lastHeard.delete(agentId);
     this.log(`chips: ${key} was deleted`);
-    this.contexts?.forget(agentId);
-    this.models?.forget(agentId);
-    this.heartbeats?.forget(agentId);
+    this.chips.forget(agentId);
     this.windows?.forget(agentId);
     const clawAgent = this.agentFor(key);
     if (clawAgent !== undefined && isMadeAgent(clawAgent)) await this.removeClawAgent(clawAgent);
@@ -1241,18 +1242,19 @@ export class Bridge {
 
   /**
    * A person's edit of a context file from Chips (ADR 0134): one of an agent's the bridge made, in
-   * its folder, or of the harness's own set or the Main agent's, in the primary agent's. One for
-   * any other agent is not answered, and Chips tells the person it was missed.
+   * its folder, or of the harness's own set or the Main agent's, in the primary agent's; answered
+   * by the copy as it is now. One for any other agent was sent no copy, so it goes unanswered, and
+   * Chips tells the person it was missed.
    */
-  async onContextEdit(frame: Payload): Promise<void> {
-    if (this.contexts === undefined) return;
+  async onContextEdit(frame: Payload): Promise<Payload> {
+    if (this.contexts === undefined) throw new Refuse("This bridge keeps no context files.");
     const edit = frame as unknown as EditFrame;
     if (edit.agent_id === undefined) return this.contexts.edit(edit, this.primary);
     if (!this.keyOf.has(edit.agent_id)) this.learn(await this.chips.agents());
     const clawAgent = this.filesClawAgentOf(edit.agent_id);
     if (clawAgent === undefined) {
       this.log(`chips: an edit of ${edit.name} for ${edit.agent_id}, which has no OpenClaw agent of its own`);
-      return;
+      throw new Refuse(`${edit.agent_id} has no OpenClaw agent of its own.`);
     }
     return this.contexts.edit(edit, clawAgent);
   }
@@ -1275,17 +1277,17 @@ export class Bridge {
   /**
    * A person's change of an agent's model or effort from Chips (ADR 0140): written into the OpenClaw
    * agent the bridge made for it, or the primary agent for the Main agent, and refused for any other
-   * with OpenClaw's own words for why. One for an agent the bridge doesn't know is not answered, and
-   * Chips tells the person it was missed.
+   * with OpenClaw's own words for why. One for an agent the bridge doesn't know was sent no copy,
+   * so it goes unanswered, and Chips tells the person it was missed.
    */
-  async onModelChange(frame: Payload): Promise<void> {
-    if (this.models === undefined) return;
+  async onModelChange(frame: Payload): Promise<Payload> {
+    if (this.models === undefined) throw new Refuse("This bridge keeps no models.");
     const change = frame as unknown as ChangeFrame;
     if (!this.keyOf.has(change.agent_id)) this.learn(await this.chips.agents());
     const whose = this.modelOwnerOf(change.agent_id);
     if (whose === undefined) {
       this.log(`chips: a model change for ${change.agent_id}, which is none of this bridge's agents`);
-      return;
+      throw new Refuse(`${change.agent_id} is none of this bridge's agents.`);
     }
     return this.models.change(change, whose);
   }
@@ -1308,16 +1310,16 @@ export class Bridge {
 
   /**
    * A person's change of an agent's heartbeat from Chips (ADR 0143): written into the primary
-   * agent's block for the Main agent. One for any other agent, which was sent no copy, is not
-   * answered, and Chips tells the person it was missed.
+   * agent's block for the Main agent. One for any other agent, which was sent no copy, goes
+   * unanswered, and Chips tells the person it was missed.
    */
-  async onHeartbeatChange(frame: Payload): Promise<void> {
-    if (this.heartbeats === undefined) return;
+  async onHeartbeatChange(frame: Payload): Promise<Payload> {
+    if (this.heartbeats === undefined) throw new Refuse("This bridge keeps no heartbeats.");
     const change = frame as unknown as BeatChange;
     if (!this.keyOf.has(change.agent_id)) this.learn(await this.chips.agents());
     if (change.agent_id !== this.beatingAgent()) {
       this.log(`chips: a heartbeat change for ${change.agent_id}, which is not the Main agent`);
-      return;
+      throw new Refuse(`${change.agent_id} is not the Main agent.`);
     }
     return this.heartbeats.change(change, this.primary);
   }
@@ -1356,33 +1358,37 @@ export class Bridge {
     await Promise.all(sends);
   }
 
-  /** The session a Compact now or a limit from Chips is for: one of ours, learnt again if need be. */
-  private async windowFor(agentId: string, what: string): Promise<Session | undefined> {
+  /**
+   * The session a Compact now or a limit from Chips is for: one of ours, learnt again if need be. One
+   * for an agent with no session of ours was sent no copy, so it goes unanswered, and Chips tells
+   * the person it was missed.
+   */
+  private async windowFor(agentId: string, what: string): Promise<Session> {
     if (!this.keyOf.has(agentId)) this.learn(await this.chips.agents());
     const session = this.windowSessionOf(agentId);
-    if (session === undefined) this.log(`chips: ${what} for ${agentId}, which has no OpenClaw session of ours now`);
+    if (session === undefined) {
+      this.log(`chips: ${what} for ${agentId}, which has no OpenClaw session of ours now`);
+      throw new Refuse(`${agentId} has no OpenClaw session of this bridge's now.`);
+    }
     return session;
   }
 
   /**
-   * A person's Compact now from Chips (ADR 0146): done in the agent's session now, or when the
-   * bridge's turn there ends. One for an agent with no session of ours is not answered, and Chips
-   * tells the person it was missed.
+   * A person's Compact now from Chips (ADR 0146): taken at once, and done in the agent's session
+   * now, or when the bridge's turn there ends.
    */
-  async onWindowCompact(frame: Payload): Promise<void> {
-    if (this.windows === undefined) return;
+  async onWindowCompact(frame: Payload): Promise<Payload> {
+    if (this.windows === undefined) throw new Refuse("This bridge keeps no context windows.");
     const ask = frame as unknown as CompactFrame;
     const session = await this.windowFor(ask.agent_id, "a Compact now");
-    if (session === undefined) return;
     return this.windows.compact(ask, session, this.turnIn(session.key));
   }
 
   /** A person's change of the limit an agent compacts itself at, from Chips (ADR 0146). */
-  async onWindowChange(frame: Payload): Promise<void> {
-    if (this.windows === undefined) return;
+  async onWindowChange(frame: Payload): Promise<Payload> {
+    if (this.windows === undefined) throw new Refuse("This bridge keeps no context windows.");
     const change = frame as unknown as LimitFrame;
     const session = await this.windowFor(change.agent_id, "a context window limit");
-    if (session === undefined) return;
     return this.windows.change(change, session);
   }
 

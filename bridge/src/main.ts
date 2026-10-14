@@ -7,6 +7,7 @@ import { spawn } from "node:child_process";
 import { rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import type { AgentContextCopy, AgentContextWindowCopy, AgentHeartbeatCopy, AgentModelCopy } from "@chips/harness";
 import { Automations } from "./automations.ts";
 import { Bridge } from "./bridge.ts";
 import { Chips, type ChipsEvent } from "./chips.ts";
@@ -28,6 +29,14 @@ const pidFile = join(config.stateDir, "bridge.pid");
 writeFileSync(pidFile, String(process.pid));
 
 let restart: Restarter | undefined;
+let bridge: Bridge | undefined;
+/** The bridge, for a person's change from Chips: one that comes before it is made is refused. */
+const active = (): Bridge => {
+  if (bridge === undefined) throw new Error("The bridge is still starting.");
+  return bridge;
+};
+// What a person changes from an agent's page is made in OpenClaw and answered with the copy as it
+// is now; the SDK sends the answer, or the refusal when one of these throws.
 const chips = new Chips({
   url: config.chipsUrl,
   harnessId: config.harnessId,
@@ -35,18 +44,16 @@ const chips = new Chips({
   stateDir: config.stateDir,
   log,
   onRestart: (ask) => void restart?.restart(ask),
-  onContextEdit: (frame) =>
-    void bridge?.onContextEdit(frame).catch((error) => log(`chips: a context edit failed: ${String(error)}`)),
-  onModelChange: (frame) =>
-    void bridge?.onModelChange(frame).catch((error) => log(`chips: a model change failed: ${String(error)}`)),
-  onHeartbeatChange: (frame) =>
-    void bridge?.onHeartbeatChange(frame).catch((error) => log(`chips: a heartbeat change failed: ${String(error)}`)),
-  onWindowCompact: (frame) =>
-    void bridge?.onWindowCompact(frame).catch((error) => log(`chips: a Compact now failed: ${String(error)}`)),
-  onWindowChange: (frame) =>
-    void bridge?.onWindowChange(frame).catch((error) => log(`chips: a context window limit failed: ${String(error)}`)),
+  settings: {
+    context: async (edit) => (await active().onContextEdit({ ...edit })) as unknown as AgentContextCopy,
+    models: async (change) => (await active().onModelChange({ ...change })) as unknown as AgentModelCopy,
+    heartbeats: async (change) => (await active().onHeartbeatChange({ ...change })) as unknown as AgentHeartbeatCopy,
+    contextWindows: {
+      compact: async (ask) => (await active().onWindowCompact({ ...ask })) as unknown as AgentContextWindowCopy,
+      change: async (ask) => (await active().onWindowChange({ ...ask })) as unknown as AgentContextWindowCopy,
+    },
+  },
 });
-let bridge: Bridge | undefined;
 
 /** Whoever waits for the gateway's next hello: a restart, to say it is up. */
 const upWaiters: (() => void)[] = [];
@@ -137,7 +144,15 @@ bridge = new Bridge(
   new Contexts(claw, (owner, body) => chips.putContext(owner, body), log),
   new Models(claw, (agentId, body) => chips.putModel(agentId, body), log),
   new Heartbeats(claw, (agentId, body) => chips.putHeartbeat(agentId, body), log),
-  new Windows(claw, (agentId, body) => chips.putWindow(agentId, body), log, join(config.stateDir, "context-windows.json")),
+  new Windows(
+    claw,
+    {
+      put: (agentId, copy) => chips.putWindow(agentId, copy),
+      failed: (agentId, changeId, message, copy) => chips.compactFailed(agentId, changeId, message, copy),
+    },
+    log,
+    join(config.stateDir, "context-windows.json"),
+  ),
   // Who each automation our agents schedule is for, kept across restarts (Chips ADR 0157).
   new Automations(join(config.stateDir, "automations.json"), log),
 );
@@ -202,6 +217,7 @@ async function main(): Promise<void> {
   log(
     `bridge: harness ${config.harnessId} is ${config.agent === undefined ? "every OpenClaw agent" : `OpenClaw agent "${config.agent}"`}`,
   );
+  await chips.open();
   await claw.start();
   await claw.request("sessions.subscribe", {});
   await adopt(active);
