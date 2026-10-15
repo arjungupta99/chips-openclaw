@@ -27,6 +27,21 @@ harness's bridge would be (Chips's `docs/proposals/open-source-harnesses-plan.md
 | `scripts/uninstall.sh` | take it all away and prove it |
 | `bridge/` | the bridge between OpenClaw and Chips (Phase 4 of the plan) |
 
+## Joining a Chips from a link
+
+Chips's gallery has an OpenClaw card (Chips ADR 0171). Its link, made in Chips under **Agents → Add
+an agent → OpenClaw**, is all the bridge needs: with OpenClaw up (`scripts/up.sh`),
+
+```sh
+cd bridge && npm run connect -- 'http://192.168.1.20:4431/j/chips_j_…'
+```
+
+or `CHIPS_JOIN_LINK='…' npm start`, as the card's command says it. The bridge takes the link up
+through the SDK's `join()` (Chips ADR 0122), keeps the key the SDK is handed, writes the address to
+`bridge/joined.env`, and starts. After that, `npm start` comes back to the same Chips with the same
+key; a token in the environment (`scripts/bridge.sh start live`) still wins. The card's
+`npx chips-openclaw` waits for this to be published, which nothing here is yet.
+
 ## Where things are kept
 
 Everything OpenClaw and the bridge keep is under `~/chips-openclaw/`:
@@ -35,7 +50,8 @@ Everything OpenClaw and the bridge keep is under `~/chips-openclaw/`:
 - `secrets/`: its sign-in
 - `.env`: the gateway token
 - `bridge/`: the bridge's device key, one cursor per Chips harness, its log, `chips.env` (the scratch
-  harness) and `live.env` (4431's harness address; its token stays in the login keychain), and
+  harness), `live.env` (4431's harness address; its token stays in the login keychain), `joined.env`
+  (the address of a Chips it joined from a link; the key is the SDK's, in the login keychain), and
   `automations.json`: who each automation an agent scheduled from a room is for (Chips ADR 0157)
 - `chips/`: the scratch Chips server's database
 

@@ -1,6 +1,7 @@
 /**
  * The bridge's process: OpenClaw's gateway on one side, Chips on the other, the mapping between.
- * Run by hand (`npm start`), stopped by the PID it leaves in ~/chips-openclaw/bridge/bridge.pid.
+ * Run by hand (`npm start`, or `npm run connect -- <link>` the first time), stopped by the PID it
+ * leaves in ~/chips-openclaw/bridge/bridge.pid.
  */
 
 import { spawn } from "node:child_process";
@@ -24,7 +25,8 @@ import { type Restarter, restarter } from "./restart.ts";
 
 const log = (message: string): void => console.log(`${new Date().toISOString()} ${message}`);
 
-const config = loadConfig();
+// `connect <link>`: a link a person made in Chips, taken up before anything else starts.
+const config = await loadConfig({ link: process.argv[2] === "connect" ? process.argv[3] : undefined, log });
 const pidFile = join(config.stateDir, "bridge.pid");
 writeFileSync(pidFile, String(process.pid));
 
