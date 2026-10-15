@@ -32,11 +32,13 @@ const str = (value: unknown): string | undefined => (typeof value === "string" &
  * What every turn in a room is told of speaking later (ADR 0157): OpenClaw reads an `at` with no
  * offset as UTC, and the room's people live in the zone Chips's note gives. An isolated job's
  * default delivery (`announce`) has no route here, so OpenClaw counts its run failed and keeps a
- * one-shot disabled after it (scratch, 13 October 2026), though the bridge posts its answer.
+ * one-shot disabled after it (scratch, 13 October 2026), though the bridge posts its answer. A
+ * reminder is said to be set, and said when it fires, with ⏰ (Arjun, 14 October 2026).
  */
 export const SPEAKING_LATER =
   'To remind someone or to do something later, use automations with sessionTarget "current", or "isolated" with delivery {mode: "none"}: what it says then is posted in this room either way. ' +
-  "Write a time with the UTC offset Chips's note gives; an `at` without one is read as UTC.";
+  "Write a time with the UTC offset Chips's note gives; an `at` without one is read as UTC. " +
+  "When you set one, say so in one line that begins with ⏰ and gives the time it fires, in the person's time, and have what it says when it fires begin with ⏰ too.";
 
 /** A job's run, a turn in a session of its own: the OpenClaw agent, and the job. */
 const CRON_SESSION = /^agent:([^:]+):cron:([^:]+)(?::run:.+)?$/;
