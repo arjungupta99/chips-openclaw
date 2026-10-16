@@ -6,7 +6,7 @@
 
 import assert from "node:assert/strict";
 import { beforeEach, describe, it } from "node:test";
-import type { Settings } from "@chips/harness";
+import type { Settings } from "@chipschat/harness";
 import type { ClawPort } from "../src/bridge.ts";
 import { Bridge, type ChipsPort } from "../src/bridge.ts";
 import type { ChipsAgent, ChipsEvent } from "../src/chips.ts";

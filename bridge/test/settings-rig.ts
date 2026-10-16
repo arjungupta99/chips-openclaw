@@ -4,7 +4,7 @@
  * copy, and the SDK sends the answer, or the refusal. Each `PUT` it makes is kept as `[whose, body]`.
  */
 
-import { Settings, type SettingsHandlers } from "@chips/harness";
+import { Settings, type SettingsHandlers } from "@chipschat/harness";
 
 /** Whose a `PUT` is: the agent's id, or `harness` for the harness's own set of files. */
 export function whoseOf(path: string): string {

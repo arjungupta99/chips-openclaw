@@ -1,5 +1,5 @@
 /**
- * The bridge's side of Chips, on `@chips/harness`, against the conformance kit's fake Chips: the
+ * The bridge's side of Chips, on `@chipschat/harness`, against the conformance kit's fake Chips: the
  * wire as Chips speaks it, every event checked against the protocol's schemas. What the bridge adds
  * to the SDK is tested here: events held until the bridge is ready, handed over one at a time, and
  * the cursor kept once each is handled, so a restart hears what it had not finished; events sent
@@ -12,7 +12,7 @@ import { existsSync, mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, it } from "node:test";
-import { type FakeChips, startFakeChips } from "@chips/conformance";
+import { type FakeChips, startFakeChips } from "@chipschat/conformance";
 import { Chips, type ChipsEvent, ChipsRefusal } from "../src/chips.ts";
 
 let fake: FakeChips;

@@ -8,7 +8,7 @@
 
 import assert from "node:assert/strict";
 import { beforeEach, describe, it } from "node:test";
-import type { Settings } from "@chips/harness";
+import type { Settings } from "@chipschat/harness";
 import { Bridge, type ChipsPort, type ClawPort } from "../src/bridge.ts";
 import type { ChipsAgent } from "../src/chips.ts";
 import {

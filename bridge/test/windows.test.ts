@@ -10,7 +10,7 @@ import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { beforeEach, describe, it } from "node:test";
-import type { Settings } from "@chips/harness";
+import type { Settings } from "@chipschat/harness";
 import { Bridge, type ChipsPort, type ClawPort } from "../src/bridge.ts";
 import type { ChipsAgent, ChipsEvent } from "../src/chips.ts";
 import { fillOf, LIMITS, overLimit, type Session, Windows, type WindowsPort } from "../src/windows.ts";

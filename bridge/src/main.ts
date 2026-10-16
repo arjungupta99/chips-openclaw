@@ -8,11 +8,11 @@ import { spawn } from "node:child_process";
 import { rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import type { AgentContextCopy, AgentContextWindowCopy, AgentHeartbeatCopy, AgentModelCopy } from "@chips/harness";
+import type { AgentContextCopy, AgentContextWindowCopy, AgentHeartbeatCopy, AgentModelCopy } from "@chipschat/harness";
 import { Automations } from "./automations.ts";
 import { Bridge } from "./bridge.ts";
 import { Chips, type ChipsEvent } from "./chips.ts";
-import { loadConfig } from "./config.ts";
+import { loadConfig, SetupError } from "./config.ts";
 import { Contexts } from "./context.ts";
 import { Heartbeats } from "./heartbeats.ts";
 import { Windows } from "./windows.ts";
@@ -26,7 +26,14 @@ import { type Restarter, restarter } from "./restart.ts";
 const log = (message: string): void => console.log(`${new Date().toISOString()} ${message}`);
 
 // `connect <link>`: a link a person made in Chips, taken up before anything else starts.
-const config = await loadConfig({ link: process.argv[2] === "connect" ? process.argv[3] : undefined, log });
+// What OpenClaw's side needs is checked first, and stops it with what to do: a link works once.
+const config = await loadConfig({ link: process.argv[2] === "connect" ? process.argv[3] : undefined, log }).catch(
+  (error: unknown) => {
+    if (!(error instanceof SetupError)) throw error;
+    console.error(error.message);
+    process.exit(1);
+  },
+);
 const pidFile = join(config.stateDir, "bridge.pid");
 writeFileSync(pidFile, String(process.pid));
 
@@ -233,6 +240,17 @@ async function main(): Promise<void> {
   await active.sendWindows();
   await catchUp(active);
   chips.stream((event) => active.onChips(event));
+  // Its first words in the room it joined, once: the card that followed its link waits for them.
+  await config
+    .hello?.((spaceId) =>
+      chips.send({
+        type: "message.post",
+        space_id: spaceId,
+        text: "Hi, OpenClaw here, connected to Chips. Ask me anything.",
+        idempotency_key: `openclaw-hello:${spaceId}`,
+      }),
+    )
+    .catch((error: unknown) => log(`chips: hello not said: ${String(error)}`));
 }
 
 function stop(): void {

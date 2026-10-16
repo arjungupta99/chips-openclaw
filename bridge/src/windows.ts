@@ -15,7 +15,7 @@
  */
 
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
-import { Refuse } from "@chips/harness";
+import { Refuse } from "@chipschat/harness";
 import type { ClawPort } from "./bridge.ts";
 
 type Payload = Record<string, unknown>;

@@ -1,5 +1,5 @@
 /**
- * Chips, through `@chips/harness`: the socket (hello, subscribe, pings, reconnects), every event
+ * Chips, through `@chipschat/harness`: the socket (hello, subscribe, pings, reconnects), every event
  * written over it with its idempotency key and answered by an ack, uploads in pieces, signed
  * downloads, the trouble said again after a reconnect, a person's Restart, and the changes a
  * person makes from an agent's page, each answered for the bridge. What is left here is the
@@ -19,7 +19,7 @@ import {
   type HarnessContextCopy,
   RefusedError,
   type SettingsHandlers,
-} from "@chips/harness";
+} from "@chipschat/harness";
 
 export type ChipsEvent = Record<string, unknown> & { readonly type: string };
 

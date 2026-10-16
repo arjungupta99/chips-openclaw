@@ -5,7 +5,7 @@ The plan, the phases and the tests are in Chips's `docs/proposals/openclaw-test-
 
 **Chips depends on nothing here.** Chips's own guard fails if anything of OpenClaw appears in Chips.
 This repository depends on Chips through its public wire and, since 14 October 2026, its SDK:
-`@chips/harness` and `@chips/protocol` (and `@chips/conformance` for the tests), packed from a Chips
+`@chipschat/harness` and `@chipschat/protocol` (and `@chipschat/conformance` for the tests), packed from a Chips
 checkout into `bridge/vendor/` by `scripts/vendor.sh`, since nothing of Chips is published yet. Until
 then the bridge was written from Chips's docs alone, which proved the docs; now it is what another
 harness's bridge would be (Chips's `docs/proposals/open-source-harnesses-plan.md`, Phase 2).
@@ -36,11 +36,15 @@ an agent → OpenClaw**, is all the bridge needs: with OpenClaw up (`scripts/up.
 cd bridge && npm run connect -- 'http://192.168.1.20:4431/j/chips_j_…'
 ```
 
-or `CHIPS_JOIN_LINK='…' npm start`, as the card's command says it. The bridge takes the link up
-through the SDK's `join()` (Chips ADR 0122), keeps the key the SDK is handed, writes the address to
-`bridge/joined.env`, and starts. After that, `npm start` comes back to the same Chips with the same
-key; a token in the environment (`scripts/bridge.sh start live`) still wins. The card's
-`npx chips-openclaw` waits for this to be published, which nothing here is yet.
+or `CHIPS_JOIN_LINK='…' npm start`; the card gives the first, from `~/Work/chips-openclaw/bridge`.
+Before it takes the link up, which works once, it checks OpenClaw's side: the gateway's token (in
+`~/chips-openclaw/.env`, made by `scripts/up.sh`) and the gateway answering. Anything missing stops
+it with what to do, and the link is still good. Then it takes the link up through the SDK's
+`join()` (Chips ADR 0122), keeps the key the SDK is handed, writes the address to
+`bridge/joined.env`, starts, and says hello in its room once, which the card waits for. After that,
+`npm start` comes back to the same Chips with the same key, and a new link from Chips replaces it; a
+token in the environment (`scripts/bridge.sh start live`) still wins, and says no hello. A package
+an agent could fetch (`@chipschat/openclaw`) waits for publishing, which nothing here is yet.
 
 ## Where things are kept
 

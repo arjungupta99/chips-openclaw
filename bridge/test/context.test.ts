@@ -7,7 +7,7 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { beforeEach, describe, it } from "node:test";
-import type { Settings } from "@chips/harness";
+import type { Settings } from "@chipschat/harness";
 import { Bridge, type ChipsPort, type ClawPort } from "../src/bridge.ts";
 import type { ChipsAgent } from "../src/chips.ts";
 import { type ClawFile, Contexts, type EditFrame, identityLine, type Owner, ownSetOf, setOf } from "../src/context.ts";

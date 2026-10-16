@@ -12,9 +12,10 @@
  */
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { connect as tcp } from "node:net";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { type Joined, type JoinOptions, join as joinChips } from "@chips/harness";
+import { filledIn, helloOnce, type Joined, type JoinOptions, join as joinChips } from "@chipschat/harness";
 
 export interface Config {
   readonly chipsUrl: string;
@@ -32,7 +33,19 @@ export interface Config {
   /** Everything OpenClaw and the bridge keep (`$CHIPS_OPENCLAW_DIR`): OpenClaw's state is under it. */
   readonly sandbox: string;
   readonly stateDir: string;
+  /**
+   * Its first words in the room it joined, once (the SDK's `helloOnce`), when it came in by
+   * `join()`: the card that followed its link waits for them. A bridge started on a token has none.
+   */
+  readonly hello: ((say: (spaceId: string) => Promise<unknown>) => Promise<boolean>) | undefined;
 }
+
+/** Something to put right before the bridge starts, said so a person can. */
+export class SetupError extends Error {
+  override readonly name = "SetupError";
+}
+
+export const STILL_GOOD = "The link is still good: run the same command again once that's done.";
 
 /** `KEY=value` lines, as `.env` files and `chips connect` write them. */
 function readEnvFile(path: string): Record<string, string> {
@@ -62,7 +75,7 @@ export const JOIN_NAME = "OpenClaw";
 /** Where the address of the Chips it joined is written: never its key, which the SDK keeps. */
 export const JOINED_FILE = "joined.env";
 
-type ChipsSide = Pick<Config, "chipsUrl" | "harnessId" | "harnessToken" | "spaceId">;
+type ChipsSide = Pick<Config, "chipsUrl" | "harnessId" | "harnessToken" | "spaceId" | "hello">;
 
 export interface LoadOptions {
   readonly env?: NodeJS.ProcessEnv;
@@ -70,7 +83,25 @@ export interface LoadOptions {
   readonly link?: string | undefined;
   /** The SDK's `join()`, unless a test plays it. */
   readonly join?: (options: JoinOptions) => Promise<Joined>;
+  /** Whether OpenClaw's gateway answers at its address, unless a test says. */
+  readonly reach?: (url: string) => Promise<boolean>;
   readonly log?: (message: string) => void;
+}
+
+/** Whether something answers at a `ws:` or `http:` address: a connection, and nothing sent. */
+export function reachable(url: string, ms = 1500): Promise<boolean> {
+  const parsed = new URL(url.replace(/^ws/, "http"));
+  const port = Number(parsed.port || (parsed.protocol === "https:" ? 443 : 80));
+  return new Promise((resolve) => {
+    const socket = tcp({ host: parsed.hostname, port });
+    const done = (answered: boolean) => {
+      socket.destroy();
+      resolve(answered);
+    };
+    socket.setTimeout(ms, () => done(false));
+    socket.once("connect", () => done(true));
+    socket.once("error", () => done(false));
+  });
 }
 
 function given(values: Record<string, string | undefined>): ChipsSide {
@@ -79,6 +110,7 @@ function given(values: Record<string, string | undefined>): ChipsSide {
     harnessId: required(values, "CHIPS_HARNESS_ID"),
     harnessToken: required(values, "CHIPS_HARNESS_TOKEN"),
     spaceId: values["CHIPS_SPACE_ID"] || undefined,
+    hello: undefined,
   };
 }
 
@@ -104,15 +136,22 @@ async function chipsSide(
     }
     return given(values);
   }
+  const name = values["CHIPS_HARNESS_NAME"] || JOIN_NAME;
   const answer = await (options.join ?? joinChips)({
     ...(link === undefined ? { url: joined } : { link }),
-    name: values["CHIPS_HARNESS_NAME"] || JOIN_NAME,
+    name,
     software: "OpenClaw",
     env: values,
   });
   writeFileSync(join(stateDir, JOINED_FILE), `CHIPS_URL=${answer.url}\n`, { mode: 0o600 });
   if (link !== undefined) options.log?.(`chips: joined ${answer.url} as harness ${answer.harnessId}`);
-  return { chipsUrl: answer.url, harnessId: answer.harnessId, harnessToken: answer.token, spaceId: answer.spaceId };
+  return {
+    chipsUrl: answer.url,
+    harnessId: answer.harnessId,
+    harnessToken: answer.token,
+    spaceId: answer.spaceId,
+    hello: (say) => helloOnce(answer, { name, env: values, say }),
+  };
 }
 
 export async function loadConfig(options: LoadOptions = {}): Promise<Config> {
@@ -122,10 +161,23 @@ export async function loadConfig(options: LoadOptions = {}): Promise<Config> {
   mkdirSync(stateDir, { recursive: true, mode: 0o700 });
   const files = { ...readEnvFile(join(sandbox, ".env")), ...readEnvFile(join(stateDir, "chips.env")) };
   const values = { ...files, ...env };
+  // OpenClaw's side, checked before Chips's: a link works once, and is spent by the join.
+  const link = options.link ?? (env["CHIPS_JOIN_LINK"] || undefined);
+  const still = link === undefined ? "" : ` ${STILL_GOOD}`;
+  const gatewayUrl = values["OPENCLAW_URL"] ?? "ws://127.0.0.1:18789";
+  const gatewayToken = values["OPENCLAW_GATEWAY_TOKEN"];
+  if (!filledIn(gatewayToken)) {
+    throw new SetupError(
+      `OPENCLAW_GATEWAY_TOKEN isn't set: scripts/up.sh makes it, in ${join(sandbox, ".env")}, when it first starts OpenClaw.${still}`,
+    );
+  }
+  if (link !== undefined && !(await (options.reach ?? reachable)(gatewayUrl))) {
+    throw new SetupError(`OpenClaw's gateway isn't answering at ${gatewayUrl}: start OpenClaw with scripts/up.sh.${still}`);
+  }
   return {
     ...(await chipsSide(files, env, stateDir, options)),
-    gatewayUrl: values["OPENCLAW_URL"] ?? "ws://127.0.0.1:18789",
-    gatewayToken: required(values, "OPENCLAW_GATEWAY_TOKEN"),
+    gatewayUrl,
+    gatewayToken,
     agent: values["OPENCLAW_AGENT"] || undefined,
     sandbox,
     stateDir,

@@ -20,7 +20,7 @@
  * 0134's addendum), and a count, 0 included, as one agents read.
  */
 
-import { Refuse } from "@chips/harness";
+import { Refuse } from "@chipschat/harness";
 import type { ClawPort } from "./bridge.ts";
 import { PERSONA_FILES } from "./own-agents.ts";
 

@@ -24,7 +24,7 @@
  * Chips holds no model's name: every label here is OpenClaw's, or this module's for its levels.
  */
 
-import { Refuse } from "@chips/harness";
+import { Refuse } from "@chipschat/harness";
 import type { ClawPort } from "./bridge.ts";
 
 type Payload = Record<string, unknown>;

@@ -21,7 +21,7 @@
  * a heartbeat's turn; the bridge reads the call from the session's `session.message` events.
  */
 
-import { Refuse } from "@chips/harness";
+import { Refuse } from "@chipschat/harness";
 import type { ClawPort } from "./bridge.ts";
 
 type Payload = Record<string, unknown>;

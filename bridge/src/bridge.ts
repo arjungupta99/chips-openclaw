@@ -65,7 +65,7 @@
  * same event and Chips answers it as a duplicate.
  */
 
-import { Refuse } from "@chips/harness";
+import { Refuse } from "@chipschat/harness";
 import { type ChipsAgent, type ChipsEvent, ChipsRefusal, type NewAgent, type Placed, type Taken } from "./chips.ts";
 import { chipsId } from "./ids.ts";
 import type { Media } from "./media.ts";
