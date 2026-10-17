@@ -573,6 +573,28 @@ describe("an answer's files", () => {
     assert.deepEqual(post?.["upload_ids"], ["att_01K4ZQPX000000000000000001"]);
   });
 
+  it("sends a file the turn sent with OpenClaw's message tool once it went, and not one it refused", async () => {
+    // OpenClaw's `message` tool sends to its own web chat, not the room (the Tic Tac Toe runs,
+    // 17 October 2026, TT-6): its allowlist refused the page, and the zip sent after never came.
+    await bridge.onChips(said("Build a game"));
+    bridge.onClaw({ event: "chat", payload: { runId: R1, sessionKey: key(), seq: 1, state: "status" } });
+    const committed = (message: Record<string, unknown>): void =>
+      bridge.onClaw({ event: "session.message", payload: { sessionKey: key(), message } });
+    const sends = (id: string, name: string, isError: boolean): void => {
+      const args = { action: "send", media: `/home/node/.openclaw/chips/a/${name}`, filename: name, message: "Open it." };
+      committed({ role: "assistant", content: [{ type: "toolCall", id, name: "message", arguments: args }] });
+      committed({ role: "toolResult", toolCallId: id, toolName: "message", isError, content: [{ type: "text", text: "…" }] });
+    };
+    sends("exec-1", "tic-tac-toe.html", true);
+    sends("exec-2", "tic-tac-toe.zip", false);
+    answers("Sent as tic-tac-toe.zip.", []);
+    await bridge.settled();
+    assert.deepEqual(uploads, [["tic-tac-toe.zip", "bytes of tic-tac-toe.zip"]]);
+    const post = sent.find((event) => event.type === "message.post");
+    assert.equal(post?.["text"], "Sent as tic-tac-toe.zip.");
+    assert.deepEqual(post?.["upload_ids"], ["att_01K4ZQPX000000000000000001"]);
+  });
+
   it("leaves a line that only mentions MEDIA: in the words", async () => {
     await bridge.onChips(said("How do you send a file?"));
     answers("I put a line like MEDIA:<path> on its own.", []);

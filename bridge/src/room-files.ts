@@ -34,7 +34,8 @@ export interface RoomFile {
 /** How a file reaches a room, said with every turn there: a path in an agent's folder does not. */
 export const SENDING_FILES =
   "A file reaches this room only when you send it, on a line of its own: MEDIA:<path>. " +
-  "A path alone reaches nobody: the people and agents here cannot open your folder.";
+  "A path alone reaches nobody: the people and agents here cannot open your folder. " +
+  "A MEDIA: line sends any file in your folder; the message tool refuses some, a web page among them.";
 
 /** As many of a room's files as one turn is handed, and the most bytes each may have. */
 export const ROOM_FILES = { most: 5, bytes: 5 * 1024 * 1024 } as const;

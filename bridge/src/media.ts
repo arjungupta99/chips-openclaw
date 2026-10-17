@@ -38,6 +38,26 @@ export function mediaLinesIn(text: string): { readonly words: string; readonly n
   return { words: kept.join("\n").replace(/\n{3,}/g, "\n\n").trim(), named };
 }
 
+/**
+ * The files a turn sent with OpenClaw's `message` tool, by tool call: its `send` with `media`, as the
+ * session commits the call. OpenClaw sends them to its own web chat, not the room, and an agent told
+ * of `MEDIA:` lines may still reach for the tool (the Tic Tac Toe runs, 17 October 2026: a zip the
+ * room never got, finding TT-6).
+ */
+export function sentWithTool(message: unknown): { readonly id: string; readonly media: readonly string[] }[] {
+  const content = (message as { content?: unknown } | null | undefined)?.content;
+  if (!Array.isArray(content)) return [];
+  return content.flatMap((item: unknown) => {
+    const call = (item ?? {}) as Record<string, unknown>;
+    const args = (call["arguments"] ?? {}) as Record<string, unknown>;
+    if (call["type"] !== "toolCall" || call["name"] !== "message" || typeof call["id"] !== "string") return [];
+    if (args["action"] !== undefined && args["action"] !== "send") return [];
+    const named = Array.isArray(args["media"]) ? (args["media"] as unknown[]) : [args["media"]];
+    const media = named.filter((each): each is string => typeof each === "string" && each.trim() !== "").map((each) => each.trim());
+    return media.length === 0 ? [] : [{ id: call["id"], media }];
+  });
+}
+
 /** The bridge holds a file whole while it sends it; Chips judges the size again by what the file is. */
 export const MAX_FILE_BYTES = 100 * 1024 * 1024;
 

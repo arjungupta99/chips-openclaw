@@ -68,7 +68,7 @@
 import { Refuse } from "@chipschat/harness";
 import { type ChipsAgent, type ChipsEvent, ChipsRefusal, type NewAgent, type Placed, type Taken } from "./chips.ts";
 import { chipsId } from "./ids.ts";
-import { type Media, mediaLinesIn } from "./media.ts";
+import { type Media, mediaLinesIn, sentWithTool } from "./media.ts";
 import type { ClawEvent } from "./openclaw.ts";
 import { Contexts, type EditFrame } from "./context.ts";
 import type { ChangeFrame, Models, Whose as ModelOwner } from "./models.ts";
@@ -615,6 +615,8 @@ export class Bridge {
   private readonly asked = new Set<string>();
   private readonly sessions = new Set<string>();
   private readonly runs = new Map<string, Run>();
+  /** The files a `message` tool call is sending, by the call, until OpenClaw says how it went (TT-6). */
+  private readonly toolSends = new Map<string, readonly string[]>();
   private readonly runByChips = new Map<string, Run>();
   /**
    * The turns the bridge asked for, by the idempotency key OpenClaw names each turn after: the
@@ -1521,6 +1523,29 @@ export class Bridge {
       .catch((error: unknown) => this.log(`chips: automation ${made.jobId}'s answer not posted: ${String(error)}`));
   }
 
+  /**
+   * A file a turn sent with OpenClaw's `message` tool (TT-6), which goes to OpenClaw's own web chat:
+   * once the tool says it was sent, the file goes with the turn's answer, as a `MEDIA:` line's
+   * does. One OpenClaw refused (a page, by its attachment allowlist) does not: the agent was told it
+   * failed, and its answer says what it did instead.
+   */
+  private sentByTool(p: Payload): void {
+    const sessionKey = str(p["sessionKey"]);
+    const message = (p["message"] ?? {}) as Payload;
+    if (sessionKey === undefined) return;
+    if (message["role"] === "assistant") {
+      for (const call of sentWithTool(message)) this.toolSends.set(call.id, call.media);
+      return;
+    }
+    const callId = str(message["toolCallId"]);
+    const media = callId === undefined ? undefined : this.toolSends.get(callId);
+    if (message["role"] !== "toolResult" || callId === undefined || media === undefined) return;
+    this.toolSends.delete(callId);
+    const run = [...this.runs.values()].find((each) => each.sessionKey === sessionKey && !each.ended);
+    if (message["isError"] === true || run === undefined) return;
+    for (const reference of media) if (!run.media.includes(reference)) run.media.push(reference);
+  }
+
   /** A room asked of this harness while the bridge was away (from `GET …/spaces`). */
   noteAsked(spaceId: string): void {
     this.asked.add(spaceId);
@@ -1936,6 +1961,7 @@ export class Bridge {
         return this.agent(p);
       case "session.message":
         this.heartbeatSaid(p);
+        this.sentByTool(p);
         return this.committed(p);
       // An automation added, started, finished or removed (ADR 0157).
       case "cron":
