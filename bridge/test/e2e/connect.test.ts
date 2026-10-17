@@ -89,6 +89,10 @@ describe("OpenClaw's card, from a link to its hello", { skip, timeout: 180_000 }
         kept().map((each) => each.harnessId),
         [request.harness_id],
       );
+      // One agent, as its Main: the default agent the join made, with no "2" beside it (Chips ON-10).
+      const agents = await chips.agents(request.harness_id);
+      assert.deepEqual(agents.map((each) => each.lead), [true], JSON.stringify(agents));
+      assert.doesNotMatch(agents[0]?.name ?? "", / \d+$/);
     } finally {
       await running.stop();
     }

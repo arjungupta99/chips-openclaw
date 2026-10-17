@@ -145,7 +145,8 @@ const roots = rootsFor(config.sandbox);
 bridge = new Bridge(
   chips,
   claw,
-  { harnessId: config.harnessId, agent: config.agent ?? "main" },
+  // Its own room from the join: where the default agent Chips made is its Main (Chips ADR 0183).
+  { harnessId: config.harnessId, agent: config.agent ?? "main", home: config.spaceId },
   log,
   { read: (reference, workspace) => readMedia(reference, roots, workspace) },
   Date.now,

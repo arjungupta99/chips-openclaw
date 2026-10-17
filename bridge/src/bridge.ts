@@ -675,11 +675,18 @@ export class Bridge {
   private readonly people = new Map<string, RoomPeople>();
   /** The OpenClaw agent a room with no other gets: `OPENCLAW_AGENT`, else the gateway's default. */
   private primary: string;
+  /** The key the Main agent is registered under in Chips, once it is seated (`seatMain`). */
+  private seatedKey: string | undefined;
 
   constructor(
     private readonly chips: ChipsPort,
     private readonly claw: ClawPort,
-    private readonly self: { readonly harnessId: string; readonly agent: string },
+    private readonly self: {
+      readonly harnessId: string;
+      readonly agent: string;
+      /** The room the join opened, its own direct room, when it joined by a link or a code. */
+      readonly home?: string | undefined;
+    },
     private readonly log: (message: string) => void,
     private readonly files: FilesPort = NO_FILES,
     private readonly now: () => number = Date.now,
@@ -724,10 +731,22 @@ export class Bridge {
   /**
    * The key the Main agent is registered under and its Main room opened by (Chips ADR 0087), named
    * as a session of the primary agent's in a room called `main`, which no Chips room is. Its turns
-   * are in Home (`homeKey`), not in a session of that name: the key stays, as Chips keeps it.
+   * are in Home (`homeKey`), not in a session of that name: the key stays, as Chips keeps it. One
+   * that joined since Chips ADR 0183 has its default agent as its Main instead, keyed by the
+   * harness's own id (`mainAgentKey`).
    */
   mainKey(): string {
     return `agent:${this.primary}:chips-main`;
+  }
+
+  /** The key the Main agent is registered under in Chips: the one it was seated by, else `mainKey`. */
+  private mainAgentKey(): string {
+    return this.seatedKey ?? this.mainKey();
+  }
+
+  /** Whether a key of ours in Chips is the Main agent's. */
+  private isMain(key: string | undefined): boolean {
+    return key !== undefined && key === this.mainAgentKey();
   }
 
   /**
@@ -742,12 +761,12 @@ export class Bridge {
 
   /** The session one of ours speaks in, by its key: the key's own, and Home for the Main agent. */
   private sessionOfKey(key: string): string {
-    return key === this.mainKey() ? this.homeKey() : key;
+    return this.isMain(key) ? this.homeKey() : key;
   }
 
   /** Which of ours a session is: the one keyed by it, and the Main agent for Home. */
   private agentOfSession(sessionKey: string): string | undefined {
-    return this.agentByKey.get(sessionKey === this.homeKey() ? this.mainKey() : sessionKey);
+    return this.agentByKey.get(sessionKey === this.homeKey() ? this.mainAgentKey() : sessionKey);
   }
 
   /** The room a session is, when it is one of this bridge's. */
@@ -824,16 +843,22 @@ export class Bridge {
   }
 
   /**
-   * The primary agent as this harness's Main agent (Chips ADR 0087, rule 7), as Jacobian's J is:
+   * The primary agent as this harness's Main agent (Chips ADR 0087, rule 7), as Jacobian's J is,
+   * in a room named the harness's home (ADR 0069), which nobody archives or deletes. A harness that
+   * joined since Chips ADR 0183 has it as the default agent Chips made at the join, in the room the
+   * join opened, so it is called what the harness is and has no second beside it. Otherwise it is
    * registered under `mainKey` as the lead, in a room opened by the same key, which Chips puts it
-   * in, and that room named the harness's home (ADR 0069), which nobody archives or deletes. A
-   * Main agent Chips has already is kept, under whatever key, in its room; one with no room is
-   * given its room again. Each step is the same asked twice, so a start does them all again.
+   * in. A Main agent Chips has already is kept, under whatever key, in its room; one with no room
+   * is given its room again. Each step is the same asked twice, so a start does them all again.
    */
   private async seatMain(known: readonly ChipsAgent[], name: string): Promise<void> {
     try {
       const had = known.find((each) => each.lead);
-      const main = had ?? (await this.chips.registerAgent({ key: this.mainKey(), name, lead: true }));
+      const made = known.find((each) => each.key === this.self.harnessId);
+      const joined = this.self.home !== undefined && made?.room === this.self.home;
+      const key = joined ? this.self.harnessId : this.mainKey();
+      const main = had ?? (await this.chips.registerAgent({ key, name, lead: true }));
+      this.seatedKey = main.key;
       const room = main.room ?? main.spaces[0] ?? (await this.chips.openSpace(main.key));
       await this.chips.send({
         type: "space.updated",
@@ -1048,7 +1073,7 @@ export class Bridge {
    * (ADR 0134): the one the bridge made for it, or the primary agent for the Main agent.
    */
   private filesClawAgentOf(agentId: string): string | undefined {
-    return this.keyOf.get(agentId) === this.mainKey() ? this.primary : this.madeClawAgentOf(agentId);
+    return this.isMain(this.keyOf.get(agentId)) ? this.primary : this.madeClawAgentOf(agentId);
   }
 
   /** The OpenClaw agent the bridge made for one of our agents in Chips, if it made one. */
@@ -1069,7 +1094,7 @@ export class Bridge {
     if (key === undefined) return undefined;
     const made = this.madeClawAgentOf(agentId);
     if (made !== undefined) return { clawAgent: made, changeable: true };
-    if (key === this.mainKey() || key === this.self.harnessId) return { clawAgent: this.primary, changeable: true };
+    if (this.isMain(key) || key === this.self.harnessId) return { clawAgent: this.primary, changeable: true };
     return { clawAgent: this.agentFor(key) ?? key, changeable: false };
   }
 
@@ -1101,6 +1126,8 @@ export class Bridge {
    */
   private takerFor(agentId: string | undefined, room: string): Taker {
     const key = agentId === undefined ? undefined : this.keyOf.get(agentId);
+    // The Main agent speaks in Home, whichever key it was seated by (Chips ADR 0183).
+    if (this.isMain(key)) return { agentId, clawAgent: this.primary, sessionKey: this.homeKey() };
     const clawAgent = key === undefined ? undefined : this.agentFor(key);
     if (key !== undefined && clawAgent !== undefined) return { agentId, clawAgent, sessionKey: this.sessionOfKey(key) };
     if (agentId === undefined && this.asked.has(room)) {
@@ -1298,7 +1325,7 @@ export class Bridge {
    * shows, so they are sent no copy.
    */
   private beatingAgent(): string | undefined {
-    return this.agentByKey.get(this.mainKey());
+    return this.agentByKey.get(this.mainAgentKey());
   }
 
   /** The Main agent's heartbeat, sent to Chips at start (ADR 0143). */
@@ -1334,7 +1361,7 @@ export class Bridge {
     if (key === undefined) return undefined;
     const clawAgent = this.agentFor(key);
     if (clawAgent !== undefined) return { key: this.sessionOfKey(key), clawAgent };
-    if (key === this.mainKey()) return { key: this.homeKey(), clawAgent: this.primary };
+    if (this.isMain(key)) return { key: this.homeKey(), clawAgent: this.primary };
     const room = this.roomOf.get(agentId);
     if (room === undefined || room === null) return undefined;
     const taker = this.takerFor(agentId, room);

@@ -114,7 +114,9 @@ const chips: ChipsPort = {
     // As Chips answers a new agent registered for the room it was asked for (ADR 0108): put in it.
     const room = wanted.made_for !== undefined ? (wanted.space_id ?? null) : (had?.room ?? null);
     const agent: ChipsAgent =
-      had === undefined ? { ...agentIn(`agt_${key}`, key, room, name), lead: wanted.lead === true } : { ...had, name };
+      had === undefined
+        ? { ...agentIn(`agt_${key}`, key, room, name), lead: wanted.lead === true }
+        : { ...had, name, ...(wanted.lead === true ? { lead: true } : {}) };
     agents = [...agents.filter((each) => each.key !== key), agent];
     return { ...agent, ...(wanted.made_for === undefined ? {} : { attached: had === undefined }) };
   },
@@ -1309,6 +1311,57 @@ describe("OpenClaw's agents as agents in Chips (Chips ADR 0087)", () => {
     assert.deepEqual(sent.map((event) => event.type), ["run.started", "message.post", "run.completed"]);
     assert.equal(sent[0]?.["space_id"], MAIN_ROOM);
     for (const event of sent) assert.deepEqual(event["actor"], { kind: "agent", id: "agt_agent:main:chips-main" });
+  });
+
+  describe("a harness that joined since Chips ADR 0183", () => {
+    // Its join made the default agent, in the room it opened: that one is its Main, not a second.
+    const joined = () => new Bridge(chips, claw, { harnessId: ME, agent: "main", home: ROOM }, () => undefined);
+
+    it("seats the default agent as its Main, in the join's room, named the harness's home", async () => {
+      const fresh = joined();
+      await fresh.adoptAgents({ defaultId: "main", agents: [{ id: "main" }, { id: "scout", identity: { name: "Scout" } }] });
+      assert.deepEqual(registered[0], { key: ME, name: "OpenClaw", lead: true });
+      assert.equal(registered.some((each) => each["key"] === fresh.mainKey()), false);
+      assert.deepEqual(opened, []);
+      assert.deepEqual(homes.map((event) => [event["space_id"], event["actor"]]), [[ROOM, { kind: "agent", id: "agt_fallback" }]]);
+      assert.deepEqual(
+        agents.map((each) => [each.key, each.lead]),
+        [[ME, true], ["scout", false]],
+      );
+    });
+
+    it("answers in its own room as the primary agent, in Home, said as the default agent", async () => {
+      const fresh = joined();
+      await fresh.adoptAgents({ defaultId: "main", agents: [{ id: "main" }] });
+      calls = [];
+      await fresh.onChips(said("Which channels are set up?", { addressed_to: ["agt_fallback"], for: ["agt_fallback"] }));
+      const send = calls.find(([method]) => method === "chat.send")?.[1];
+      assert.equal(send?.["sessionKey"], fresh.homeKey());
+      fresh.onClaw({
+        event: "chat",
+        payload: { runId: String(send?.["idempotencyKey"]), sessionKey: fresh.homeKey(), seq: 1, state: "final", message: "None yet." },
+      });
+      await fresh.settled();
+      assert.deepEqual(sent.map((event) => event.type), ["run.started", "message.post", "run.completed"]);
+      for (const event of sent) assert.deepEqual(event["actor"], { kind: "agent", id: "agt_fallback" });
+    });
+
+    it("says what the primary agent says on its own in Home in its own room", async () => {
+      const fresh = joined();
+      await fresh.adoptAgents({ defaultId: "main", agents: [{ id: "main" }] });
+      fresh.onClaw({ event: "chat", payload: { runId: "heartbeat-1", sessionKey: fresh.homeKey(), seq: 1, state: "final", message: "The build finished." } });
+      await fresh.settled();
+      assert.equal(sent[0]?.["space_id"], ROOM);
+      for (const event of sent) assert.deepEqual(event["actor"], { kind: "agent", id: "agt_fallback" });
+    });
+
+    it("keeps to the primary agent's own key when the default agent is not in the join's room", async () => {
+      agents = [agentIn("agt_fallback", ME, OTHER_ROOM)];
+      const fresh = joined();
+      await fresh.adoptAgents({ defaultId: "main", agents: [{ id: "main" }] });
+      assert.deepEqual(registered[0], { key: fresh.mainKey(), name: "OpenClaw", lead: true });
+      assert.deepEqual(opened, [fresh.mainKey()]);
+    });
   });
 
   it("registers the other agents when Chips will not take a Main agent", async () => {
