@@ -2130,6 +2130,20 @@ describe("an OpenClaw agent of its own for each agent Chips asks for", () => {
     assert.equal(sent[2]?.["run_id"], sent[0]?.["run_id"]);
   });
 
+  it("sends a turn again, once, when its model timed out as OpenClaw took in a config change", async () => {
+    // The Tic Tac Toe runs, 17 October 2026: a made agent's first turn began as the gateway took in
+    // its name, and the Codex harness's model list timed out during the reload.
+    const R1 = "msg_01K4ZQPX0000000000000000A1";
+    await bridge.onChips(said("Build a game"));
+    bridge.onClaw({ event: "chat", payload: { runId: R1, sessionKey: key(), seq: 1, state: "error", errorMessage: "Error: codex app-server request timed out" } });
+    await new Promise((resolve) => setTimeout(resolve, 1_100));
+    const sends = calls.filter(([method]) => method === "chat.send").map(([, params]) => params);
+    assert.deepEqual(sends.map((params) => params["idempotencyKey"]), [R1, `${R1}:again`]);
+    bridge.onClaw({ event: "chat", payload: { runId: `${R1}:again`, sessionKey: key(), seq: 1, state: "final", message: "Done." } });
+    await bridge.settled();
+    assert.deepEqual(sent.map((event) => event.type), ["run.started", "message.post", "run.completed"]);
+  });
+
   it("fails a turn refused for a config change a second time, and any other failure at once", async () => {
     const R1 = "msg_01K4ZQPX0000000000000000A1";
     const replaced = "PreparedModelCatalogConfigReplacedError: prepared model catalog owner config was replaced during the read (x)";

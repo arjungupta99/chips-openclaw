@@ -149,9 +149,12 @@ const AGENT_KNOWN_EVERY_MS = 200;
 /**
  * A turn that began while the gateway took in a config change (an agent made, renamed or deleted)
  * is refused before it does anything (the scratch run, 7 October 2026: a made agent's first turn,
- * sent as its rename was applied). It is sent again once, this long after, as the same run.
+ * sent as its rename was applied). It is sent again once, this long after, as the same run. Under
+ * the Codex harness the same race fails the turn as its model list timing out mid-reload (the Tic
+ * Tac Toe runs, 17 October 2026: an agent's first turn, two seconds after it was made).
  */
-const CONFIG_REPLACED = /PreparedModelCatalogConfigReplacedError|model catalog owner config was replaced/;
+const CONFIG_REPLACED =
+  /PreparedModelCatalogConfigReplacedError|model catalog owner config was replaced|codex app-server request timed out/;
 const AGAIN_AFTER_MS = 1_000;
 
 interface Run {
