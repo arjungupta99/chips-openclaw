@@ -22,6 +22,22 @@ export type Media =
   | { readonly kind: "link"; readonly url: string }
   | { readonly kind: "refused"; readonly name: string; readonly why: string };
 
+/**
+ * The `MEDIA:` lines still in an answer's words, taken out of them. The gateway takes them out and
+ * reports them itself, but a turn its Codex harness runs keeps them in the words and reports none
+ * (the Tic Tac Toe runs, 17 October 2026), and the room got a path and no file.
+ */
+export function mediaLinesIn(text: string): { readonly words: string; readonly named: readonly string[] } {
+  const named: string[] = [];
+  const kept = text.split("\n").filter((line) => {
+    const media = /^\s*MEDIA:\s*(\S.*?)\s*$/.exec(line);
+    if (media?.[1] === undefined) return true;
+    named.push(media[1]);
+    return false;
+  });
+  return { words: kept.join("\n").replace(/\n{3,}/g, "\n\n").trim(), named };
+}
+
 /** The bridge holds a file whole while it sends it; Chips judges the size again by what the file is. */
 export const MAX_FILE_BYTES = 100 * 1024 * 1024;
 

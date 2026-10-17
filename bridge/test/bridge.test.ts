@@ -561,6 +561,26 @@ describe("an answer's files", () => {
     assert.equal(sent[2]?.["summary"], "@Hello, added F–J. Updated HTML attached.");
   });
 
+  it("takes a MEDIA: line the gateway left in the words as a file the answer names", async () => {
+    // A turn run by OpenClaw's Codex harness keeps its `MEDIA:` line in the words and reports no
+    // `mediaUrls` (the Tic Tac Toe runs, 17 October 2026): the room got the path and no file.
+    await bridge.onChips(said("Build a game"));
+    answers(`Ready. Open the attached file.\n\nMEDIA:${WORKSPACE}/tic-tac-toe.html`, []);
+    await bridge.settled();
+    assert.deepEqual(uploads, [["tic-tac-toe.html", "bytes of tic-tac-toe.html"]]);
+    const post = sent.find((event) => event.type === "message.post");
+    assert.equal(post?.["text"], "Ready. Open the attached file.");
+    assert.deepEqual(post?.["upload_ids"], ["att_01K4ZQPX000000000000000001"]);
+  });
+
+  it("leaves a line that only mentions MEDIA: in the words", async () => {
+    await bridge.onChips(said("How do you send a file?"));
+    answers("I put a line like MEDIA:<path> on its own.", []);
+    await bridge.settled();
+    assert.deepEqual(uploads, []);
+    assert.equal(sent.find((event) => event.type === "message.post")?.["text"], "I put a line like MEDIA:<path> on its own.");
+  });
+
   it("uploads a file named twice in the turn's stream once", async () => {
     await bridge.onChips(said("Draw a cat"));
     bridge.onClaw({ event: "agent", payload: { runId: R1, sessionKey: key(), stream: "assistant", seq: 1, data: { mediaUrls: ["cat.png"] } } });

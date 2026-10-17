@@ -68,7 +68,7 @@
 import { Refuse } from "@chipschat/harness";
 import { type ChipsAgent, type ChipsEvent, ChipsRefusal, type NewAgent, type Placed, type Taken } from "./chips.ts";
 import { chipsId } from "./ids.ts";
-import type { Media } from "./media.ts";
+import { type Media, mediaLinesIn } from "./media.ts";
 import type { ClawEvent } from "./openclaw.ts";
 import { Contexts, type EditFrame } from "./context.ts";
 import type { ChangeFrame, Models, Whose as ModelOwner } from "./models.ts";
@@ -2161,7 +2161,9 @@ export class Bridge {
     // A turn that answered `NO_REPLY` passed (Chips ADR 0105): OpenClaw leaves the word out of its
     // chat, so the bridge says it, and Chips makes the post the turn's pass, which the room never
     // shows. Without it the run ended on "Answered together with other words, in one reply."
-    const said = textOf(p["message"]).trim();
+    const answer = mediaLinesIn(textOf(p["message"]));
+    for (const reference of answer.named) if (!run.media.includes(reference)) run.media.push(reference);
+    const said = answer.words;
     const passed = said === "" && run.media.length === 0 && isNoReply(run.said ?? "") ? NO_REPLY : said;
     // An automation's answer is for the person who asked for it (ADR 0157), and is these words when
     // OpenClaw commits them to the room's conversation after.
