@@ -11,6 +11,7 @@
     "start": "tsx src/main.ts",
     "connect": "tsx src/main.ts connect",
     "test": "node --import tsx --test test/*.test.ts",
+    "e2e": "node --import tsx --test test/e2e/*.test.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

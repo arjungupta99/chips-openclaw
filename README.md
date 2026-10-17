@@ -46,6 +46,13 @@ it with what to do, and the link is still good. Then it takes the link up throug
 token in the environment (`scripts/bridge.sh start live`) still wins, and says no hello. A package
 an agent could fetch (`@chipschat/openclaw`) waits for publishing, which nothing here is yet.
 
+`npm run e2e` in `bridge/` runs the card that way against a scratch Chips from a Chips checkout
+(`CHIPS_REPO`, `~/Work/Chips` unless set; skipped without one) and a fake gateway
+(`bridge/test/fake-gateway.ts`): each thing not set up stops it with the link still good; then it
+joins with what the card grants, says hello once, says nothing more started again, and takes up a
+new link in place of the key it kept. The scratch Chips, the link and the run come from Chips's
+`tools/connect-kit`; `npm test` there runs the bridge's own tests.
+
 ## Where things are kept
 
 Everything OpenClaw and the bridge keep is under `~/chips-openclaw/`:
