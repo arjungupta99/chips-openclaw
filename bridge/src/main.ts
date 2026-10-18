@@ -1,7 +1,9 @@
 /**
  * The bridge's process: OpenClaw's gateway on one side, Chips on the other, the mapping between.
  * Run by hand (`npm start`, or `npm run connect -- <link>` the first time), stopped by the PID it
- * leaves in ~/chips-openclaw/bridge/bridge.pid.
+ * leaves in its state folder's bridge.pid. `npm run keep`, with `CHIPS_JOIN_LINK` or without, is
+ * the same, then keeps it running from login (`keep.ts`): for a person's own OpenClaw; the test
+ * rig's bridge is `scripts/bridge.sh`'s.
  */
 
 import { spawn } from "node:child_process";
@@ -18,12 +20,15 @@ import { Heartbeats } from "./heartbeats.ts";
 import { Windows } from "./windows.ts";
 import { Models } from "./models.ts";
 import { health } from "./health.ts";
-import { readMedia, rootsFor } from "./media.ts";
+import { readMedia } from "./media.ts";
 import { workspacesIn } from "./own-agents.ts";
 import { OpenClaw } from "./openclaw.ts";
+import { keepIfAsked, stopIfAsked } from "./keep.ts";
 import { type Restarter, restarter } from "./restart.ts";
 
 const log = (message: string): void => console.log(`${new Date().toISOString()} ${message}`);
+const LABEL = "chat.chips.openclaw";
+stopIfAsked(LABEL);
 
 // `connect <link>`: a link a person made in Chips, taken up before anything else starts.
 // What OpenClaw's side needs is checked first, and stops it with what to do: a link works once.
@@ -33,6 +38,13 @@ const config = await loadConfig({ link: process.argv[2] === "connect" ? process.
     console.error(error.message);
     process.exit(1);
   },
+);
+// Joined, `npm run keep` hands over to a copy kept running, which says the hello.
+keepIfAsked(
+  LABEL,
+  config.chipsUrl,
+  ["OPENCLAW_GATEWAY_TOKEN", "OPENCLAW_URL", "OPENCLAW_STATE_DIR", "OPENCLAW_CONFIG_PATH", "OPENCLAW_AGENT", "CHIPS_OPENCLAW_DIR"],
+  log,
 );
 const pidFile = join(config.stateDir, "bridge.pid");
 writeFileSync(pidFile, String(process.pid));
@@ -97,10 +109,14 @@ const claw = new OpenClaw({
 const RESTART_SCRIPT = join(dirname(fileURLToPath(import.meta.url)), "../../scripts/restart.sh");
 const RESTART_LIMIT_MS = 6 * 60_000;
 
-/** Run scripts/restart.sh, its output into the bridge's log, keeping the last of it for a failure. */
+/**
+ * Run scripts/restart.sh, or a person's own OpenClaw's `openclaw gateway restart`, its output into
+ * the bridge's log, keeping the last of it for a failure.
+ */
 function runRestartScript(): Promise<{ code: number | null; tail: string }> {
   return new Promise((resolve) => {
-    const child = spawn("bash", [RESTART_SCRIPT], { stdio: ["ignore", "pipe", "pipe"] });
+    const [program, ...args] = config.own ? ["openclaw", "gateway", "restart"] : ["bash", RESTART_SCRIPT];
+    const child = spawn(program ?? "bash", args, { stdio: ["ignore", "pipe", "pipe"] });
     let tail = "";
     const keep = (data: Buffer): void => {
       const text = String(data);
@@ -141,7 +157,7 @@ restart = restarter({
   log,
 });
 
-const roots = rootsFor(config.sandbox);
+const { roots } = config;
 bridge = new Bridge(
   chips,
   claw,

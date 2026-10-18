@@ -1,7 +1,8 @@
 # chips-openclaw
 
-OpenClaw, run to test [Chips](../Chips) as a second harness beside Jacobian, and taken away after.
-The plan, the phases and the tests are in Chips's `docs/proposals/openclaw-test-plan.md`.
+OpenClaw as a [Chips](../Chips) harness: a person's own OpenClaw on this machine ("Your own
+OpenClaw"), or the test rig here, OpenClaw in a container of its own, run to test Chips beside
+Jacobian. The rig's plan, phases and tests are in Chips's `docs/proposals/openclaw-test-plan.md`.
 
 **Chips depends on nothing here.** Chips's own guard fails if anything of OpenClaw appears in Chips.
 This repository depends on Chips through its public wire and, since 14 October 2026, its SDK:
@@ -27,28 +28,53 @@ harness's bridge would be (Chips's `docs/proposals/open-source-harnesses-plan.md
 | `scripts/uninstall.sh` | take it all away and prove it |
 | `bridge/` | the bridge between OpenClaw and Chips (Phase 4 of the plan) |
 
-## Joining a Chips from a link
+## Your own OpenClaw
 
-Chips's gallery has an OpenClaw card (Chips ADR 0171). Its link, made in Chips under **Agents → Add
-an agent → OpenClaw**, is all the bridge needs: with OpenClaw up (`scripts/up.sh`),
+The bridge serves an OpenClaw installed on this machine as well as the test rig below (Chips's
+setup audit HS-7). With OpenClaw set up (`openclaw onboard`) and its gateway running, Chips's
+gallery card (Chips ADR 0171; **Agents → Add an agent → OpenClaw**) gives this line, run once:
+
+```sh
+cd ~/Work/chips-openclaw/bridge && npm install && CHIPS_JOIN_LINK='<link>' npm run keep
+```
+
+Before it takes the link up, which works once, it reads OpenClaw's own `~/.openclaw/openclaw.json`
+(`OPENCLAW_STATE_DIR` or `OPENCLAW_CONFIG_PATH` say otherwise): the gateway's `gateway.port`
+(18789 unless said) and its token, `gateway.auth.token`, there or named as an environment variable
+(`{ "source": "env", "id": … }`), found in the environment or OpenClaw's own `.env`. Then it checks
+the gateway answers. Anything missing stops it with what to do, and the link is still good.
+`OPENCLAW_URL` and `OPENCLAW_GATEWAY_TOKEN` override what the config says. Its files are this
+machine's, so an agent's `MEDIA:` path is read where it is; its agents' folders are under
+`~/.openclaw/chips/`; the bridge's own state is in `~/.chips-openclaw`. Restart on OpenClaw's page in
+Chips runs `openclaw gateway restart`.
+
+Joined, `npm run keep` writes a launch agent (`~/Library/LaunchAgents/chat.chips.openclaw.plist`;
+a systemd user unit on Linux) that runs the bridge from login and again whenever it stops, and
+ends; the kept copy says hello in its room once, which the card waits for. `npm run keep -- --stop`
+stops it and removes the file; `npm start` runs it in the terminal only. A new link from Chips
+replaces the key it kept.
+
+## Joining a Chips from a link, on the test rig
+
+With the rig's OpenClaw up (`scripts/up.sh`), the same line works, or
 
 ```sh
 cd bridge && npm run connect -- 'http://192.168.1.20:4431/j/chips_j_…'
 ```
 
-or `CHIPS_JOIN_LINK='…' npm start`; the card gives the first, from `~/Work/chips-openclaw/bridge`.
-Before it takes the link up, which works once, it checks OpenClaw's side: the gateway's token (in
-`~/chips-openclaw/.env`, made by `scripts/up.sh`) and the gateway answering. Anything missing stops
-it with what to do, and the link is still good. Then it takes the link up through the SDK's
-`join()` (Chips ADR 0122), keeps the key the SDK is handed, writes the address to
-`bridge/joined.env`, starts, and says hello in its room once, which the card waits for. After that,
-`npm start` comes back to the same Chips with the same key, and a new link from Chips replaces it; a
-token in the environment (`scripts/bridge.sh start live`) still wins, and says no hello. A package
-an agent could fetch (`@chipschat/openclaw`) waits for publishing, which nothing here is yet.
+The rig is the one when `~/chips-openclaw/.env` is there (`scripts/up.sh` writes it) or
+`CHIPS_OPENCLAW_DIR` is set. Before it takes the link up it checks OpenClaw's side: the gateway's
+token (in `~/chips-openclaw/.env`) and the gateway answering. Then it takes the link up through
+the SDK's `join()` (Chips ADR 0122), keeps the key the SDK is handed, writes the address to
+`bridge/joined.env`, starts, and says hello in its room once. After that, `npm start` comes back to
+the same Chips with the same key, and a new link from Chips replaces it; a token in the environment
+(`scripts/bridge.sh start live`) still wins, and says no hello. On the rig the bridge is
+`scripts/bridge.sh`'s to start and stop, not `npm run keep`'s. A package an agent could fetch
+(`@chipschat/openclaw`) waits for publishing, which nothing here is yet.
 
-`npm run e2e` in `bridge/` runs the card that way against a scratch Chips from a Chips checkout
-(`CHIPS_REPO`, `~/Work/Chips` unless set; skipped without one) and a fake gateway
-(`bridge/test/fake-gateway.ts`): each thing not set up stops it with the link still good; then it
+`npm run e2e` in `bridge/` runs the card as a person with their own OpenClaw runs it, against a
+scratch Chips from a Chips checkout (`CHIPS_REPO`, `~/Work/Chips` unless set; skipped without one)
+and a fake gateway (`bridge/test/fake-gateway.ts`): each thing not set up stops it with the link still good; then it
 joins with what the card grants, says hello once, says nothing more started again, and takes up a
 new link in place of the key it kept. The scratch Chips, the link and the run come from Chips's
 `tools/connect-kit`; `npm test` there runs the bridge's own tests.

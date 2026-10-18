@@ -7,8 +7,14 @@
  * kept where the SDK keeps keys, the login keychain here, and only the address is written down
  * (`joined.env`), so the next start finds the key again. Or the four lines `chips connect custom`
  * prints (CHIPS_URL, CHIPS_HARNESS_ID, CHIPS_HARNESS_TOKEN, CHIPS_SPACE_ID), from the environment or
- * from `chips.env` beside the bridge's state. OpenClaw's side is the gateway on loopback and the
- * token `scripts/up.sh` made.
+ * from `chips.env` beside the bridge's state.
+ *
+ * OpenClaw's side is one of two too. The test rig: OpenClaw in the container `scripts/up.sh` runs,
+ * its token in `~/chips-openclaw/.env`, its paths the container's. Or a person's own OpenClaw on
+ * this machine (Chips's setup audit HS-7): its gateway's port and token read from its own
+ * `~/.openclaw/openclaw.json` (a token there, or named as an environment variable, found in the
+ * environment or OpenClaw's own `.env`), its paths this machine's, and the bridge's state in
+ * `~/.chips-openclaw`. The rig is the one when `CHIPS_OPENCLAW_DIR` is set or its `.env` is there.
  */
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -16,6 +22,7 @@ import { connect as tcp } from "node:net";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { filledIn, helloOnce, type Joined, type JoinOptions, join as joinChips } from "@chipschat/harness";
+import { type MediaRoots, rootsFor } from "./media.ts";
 
 export interface Config {
   readonly chipsUrl: string;
@@ -30,9 +37,14 @@ export interface Config {
    * lists is one of this harness's agents in Chips, all on the one token.
    */
   readonly agent: string | undefined;
-  /** Everything OpenClaw and the bridge keep (`$CHIPS_OPENCLAW_DIR`): OpenClaw's state is under it. */
-  readonly sandbox: string;
+  /** The test rig's folder (`$CHIPS_OPENCLAW_DIR`), OpenClaw's state under it; none for a person's own. */
+  readonly sandbox: string | undefined;
+  /** Where the bridge keeps what it keeps. */
   readonly stateDir: string;
+  /** OpenClaw's files, as the gateway names them and on this machine. */
+  readonly roots: MediaRoots;
+  /** A person's own OpenClaw on this machine, not the test rig's container. */
+  readonly own: boolean;
   /**
    * Its first words in the room it joined, once (the SDK's `helloOnce`), when it came in by
    * `join()`: the card that followed its link waits for them. A bridge started on a token has none.
@@ -56,7 +68,8 @@ function readEnvFile(path: string): Record<string, string> {
     .filter((line) => line !== "" && !line.startsWith("#"))
     .map((line) => {
       const at = line.indexOf("=");
-      return [line.slice(0, at).trim(), line.slice(at + 1).trim()] as const;
+      // A value may be quoted, as `.env` files allow.
+      return [line.slice(0, at).trim().replace(/^export\s+/, ""), line.slice(at + 1).trim().replace(/^(["'])(.*)\1$/, "$2")] as const;
     });
   return Object.fromEntries(entries);
 }
@@ -154,32 +167,126 @@ async function chipsSide(
   };
 }
 
+/** JSON, with the comments and trailing commas a person may leave in a hand-edited file. */
+export function parseLoose(text: string): unknown {
+  try {
+    return JSON.parse(text);
+  } catch {
+    let out = "";
+    let quote: string | undefined;
+    for (let at = 0; at < text.length; at += 1) {
+      const char = text[at] ?? "";
+      if (quote !== undefined) {
+        out += char;
+        if (char === "\\") out += text[++at] ?? "";
+        else if (char === quote) quote = undefined;
+      } else if (char === '"' || char === "'") {
+        quote = char;
+        out += char;
+      } else if (char === "/" && text[at + 1] === "/") {
+        while (at < text.length && text[at] !== "\n") at += 1;
+      } else if (char === "/" && text[at + 1] === "*") {
+        at = text.indexOf("*/", at + 2);
+        if (at < 0) break;
+        at += 1;
+      } else out += char;
+    }
+    return JSON.parse(out.replace(/,(\s*[}\]])/g, "$1"));
+  }
+}
+
+const tildeIn = (home: string) => (path: string) => (path.startsWith("~/") ? join(home, path.slice(2)) : path);
+
+/** A person's own OpenClaw: where its config says its gateway is, and its token. */
+function ownGateway(
+  values: Record<string, string | undefined>,
+  userHome: string,
+  still: string,
+): { url: string; token: string; roots: MediaRoots } {
+  const tilde = tildeIn(userHome);
+  const home = tilde(values["OPENCLAW_STATE_DIR"] || join(userHome, ".openclaw"));
+  const path = tilde(values["OPENCLAW_CONFIG_PATH"] || join(home, "openclaw.json"));
+  if (!existsSync(path)) {
+    throw new SetupError(
+      `OpenClaw isn't set up on this machine: there is no ${path}. Install OpenClaw (openclaw.ai) and run \`openclaw onboard\`.${still}`,
+    );
+  }
+  let config: Record<string, unknown>;
+  try {
+    config = parseLoose(readFileSync(path, "utf8")) as Record<string, unknown>;
+  } catch (error) {
+    throw new SetupError(
+      `${path} couldn't be read (${(error as Error).message}): set OPENCLAW_GATEWAY_TOKEN, and OPENCLAW_URL if its gateway isn't on 18789.${still}`,
+    );
+  }
+  const gateway = (config["gateway"] ?? {}) as Record<string, unknown>;
+  const auth = (gateway["auth"] ?? {}) as Record<string, unknown>;
+  const port = typeof gateway["port"] === "number" ? gateway["port"] : 18789;
+  // A token in the config, or the name of the environment variable it is in, as OpenClaw allows.
+  const said = auth["token"];
+  const named = typeof said === "object" && said !== null ? (said as Record<string, unknown>) : undefined;
+  const fromEnv = named?.["source"] === "env" && typeof named["id"] === "string" ? named["id"] : undefined;
+  const token =
+    values["OPENCLAW_GATEWAY_TOKEN"] ??
+    (typeof said === "string" ? said : fromEnv === undefined ? undefined : (values[fromEnv] ?? readEnvFile(join(home, ".env"))[fromEnv]));
+  if (!filledIn(token)) {
+    throw new SetupError(
+      `OpenClaw's gateway token isn't in ${path} (gateway.auth.token)${fromEnv === undefined ? "" : ` or $${fromEnv}`}: run \`openclaw onboard\`, or set OPENCLAW_GATEWAY_TOKEN.${still}`,
+    );
+  }
+  const agents = (config["agents"] ?? {}) as Record<string, unknown>;
+  const defaults = (agents["defaults"] ?? {}) as Record<string, unknown>;
+  const workspace = typeof defaults["workspace"] === "string" ? tilde(defaults["workspace"]) : join(home, "workspace");
+  return {
+    url: values["OPENCLAW_URL"] ?? `ws://127.0.0.1:${port}`,
+    token,
+    // The gateway runs on this machine: its paths are this machine's.
+    roots: { gatewayStateDir: home, gatewayWorkspaceDir: workspace, stateDir: home },
+  };
+}
+
 export async function loadConfig(options: LoadOptions = {}): Promise<Config> {
   const env = options.env ?? process.env;
-  const sandbox = env["CHIPS_OPENCLAW_DIR"] ?? join(homedir(), "chips-openclaw");
-  const stateDir = join(sandbox, "bridge");
+  const userHome = env["HOME"] || homedir();
+  const rigDir = env["CHIPS_OPENCLAW_DIR"] ?? join(userHome, "chips-openclaw");
+  // The test rig when it is named or its `.env` is there; else a person's own OpenClaw.
+  const own = env["CHIPS_OPENCLAW_DIR"] === undefined && !existsSync(join(rigDir, ".env"));
+  const sandbox = own ? undefined : rigDir;
+  const stateDir = own ? join(userHome, ".chips-openclaw") : join(rigDir, "bridge");
   mkdirSync(stateDir, { recursive: true, mode: 0o700 });
-  const files = { ...readEnvFile(join(sandbox, ".env")), ...readEnvFile(join(stateDir, "chips.env")) };
+  const files = { ...(own ? {} : readEnvFile(join(rigDir, ".env"))), ...readEnvFile(join(stateDir, "chips.env")) };
   const values = { ...files, ...env };
   // OpenClaw's side, checked before Chips's: a link works once, and is spent by the join.
   const link = options.link ?? (env["CHIPS_JOIN_LINK"] || undefined);
   const still = link === undefined ? "" : ` ${STILL_GOOD}`;
-  const gatewayUrl = values["OPENCLAW_URL"] ?? "ws://127.0.0.1:18789";
-  const gatewayToken = values["OPENCLAW_GATEWAY_TOKEN"];
-  if (!filledIn(gatewayToken)) {
-    throw new SetupError(
-      `OPENCLAW_GATEWAY_TOKEN isn't set: scripts/up.sh makes it, in ${join(sandbox, ".env")}, when it first starts OpenClaw.${still}`,
-    );
+  let gatewayUrl: string;
+  let gatewayToken: string | undefined;
+  let roots: MediaRoots;
+  if (own) {
+    ({ url: gatewayUrl, token: gatewayToken, roots } = ownGateway(values, userHome, still));
+  } else {
+    gatewayUrl = values["OPENCLAW_URL"] ?? "ws://127.0.0.1:18789";
+    gatewayToken = values["OPENCLAW_GATEWAY_TOKEN"];
+    roots = rootsFor(rigDir);
+    if (!filledIn(gatewayToken)) {
+      throw new SetupError(
+        `OPENCLAW_GATEWAY_TOKEN isn't set: scripts/up.sh makes it, in ${join(rigDir, ".env")}, when it first starts OpenClaw.${still}`,
+      );
+    }
   }
   if (link !== undefined && !(await (options.reach ?? reachable)(gatewayUrl))) {
-    throw new SetupError(`OpenClaw's gateway isn't answering at ${gatewayUrl}: start OpenClaw with scripts/up.sh.${still}`);
+    throw new SetupError(
+      `OpenClaw's gateway isn't answering at ${gatewayUrl}: ${own ? "start it (`openclaw gateway`)" : "start OpenClaw with scripts/up.sh"}.${still}`,
+    );
   }
   return {
     ...(await chipsSide(files, env, stateDir, options)),
     gatewayUrl,
-    gatewayToken,
+    gatewayToken: gatewayToken as string,
     agent: values["OPENCLAW_AGENT"] || undefined,
     sandbox,
     stateDir,
+    roots,
+    own,
   };
 }

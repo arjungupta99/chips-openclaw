@@ -3,6 +3,10 @@
  * (Chips ADRs 0122, 0171; its findings' ON-8): what isn't set up stops it before the link is
  * spent; then it joins with what the card grants and says hello once; started again it says
  * nothing more; and a new link is taken up in place of the key it kept.
+ *
+ * The OpenClaw is a person's own, as the card's line finds it (Chips's setup audit HS-7): its
+ * gateway's port and token in `~/.openclaw/openclaw.json`, no container. The line keeps the bridge
+ * running (`npm run keep`, HS-15); the kit's `CHIPS_KEEP=off` keeps it in the foreground here.
  */
 
 import { strict as assert } from "node:assert";
@@ -60,14 +64,17 @@ describe("OpenClaw's card, from a link to its hello", { skip, timeout: 180_000 }
   });
 
   it("stops on each thing not set up, and leaves the link good", async () => {
-    await stopped(card.command, /OPENCLAW_GATEWAY_TOKEN isn't set: scripts\/up\.sh makes it, in .*chips-openclaw\/\.env/);
-    // What scripts/up.sh writes when it first starts OpenClaw, but OpenClaw not started.
-    mkdirSync(join(home, "chips-openclaw"), { recursive: true });
+    await stopped(card.command, /OpenClaw isn't set up on this machine: there is no .*\.openclaw\/openclaw\.json\. Install OpenClaw \(openclaw\.ai\) and run `openclaw onboard`/);
+    // What `openclaw onboard` writes, its token named as an environment variable in OpenClaw's
+    // own .env, but its gateway not started.
+    mkdirSync(join(home, ".openclaw"), { recursive: true });
     writeFileSync(
-      join(home, "chips-openclaw", ".env"),
-      `OPENCLAW_GATEWAY_TOKEN=gateway-test-token\nOPENCLAW_URL=ws://127.0.0.1:${port}\n`,
+      join(home, ".openclaw", "openclaw.json"),
+      JSON.stringify({ gateway: { port, auth: { mode: "token", token: { source: "env", provider: "default", id: "GW_TOKEN" } } } }),
     );
-    await stopped(card.command, new RegExp(`OpenClaw's gateway isn't answering at ws://127\\.0\\.0\\.1:${port}`));
+    await stopped(card.command, /gateway token isn't in .*openclaw\.json \(gateway\.auth\.token\) or \$GW_TOKEN/);
+    writeFileSync(join(home, ".openclaw", ".env"), "GW_TOKEN=gateway-test-token\n");
+    await stopped(card.command, new RegExp(`OpenClaw's gateway isn't answering at ws://127\\.0\\.0\\.1:${port}: start it \\(\`openclaw gateway\`\\)`));
   });
 
   it("joins with what the card grants, and says hello once in its room", async () => {

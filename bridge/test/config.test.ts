@@ -134,3 +134,69 @@ describe("the bridge's Chips side", () => {
     assert.equal(await reachable(`ws://127.0.0.1:${port}`), false);
   });
 });
+
+// Chips's setup audit HS-7: OpenClaw installed on this machine, with no container and no up.sh.
+describe("a person's own OpenClaw", () => {
+  /** A home with OpenClaw's own config in it, and no test rig. */
+  function own(openclaw?: unknown, dotEnv?: string): { home: string; env: NodeJS.ProcessEnv } {
+    const home = mkdtempSync(join(tmpdir(), "bridge-own-"));
+    if (openclaw !== undefined) {
+      mkdirSync(join(home, ".openclaw"));
+      writeFileSync(join(home, ".openclaw", "openclaw.json"), typeof openclaw === "string" ? openclaw : JSON.stringify(openclaw));
+      if (dotEnv !== undefined) writeFileSync(join(home, ".openclaw", ".env"), dotEnv);
+    }
+    return { home, env: { HOME: home, CHIPS_NO_KEYCHAIN: "true" } };
+  }
+
+  it("finds its gateway's port and token in its own config, its files at their own paths, and keeps its state apart", async () => {
+    const { home, env } = own({ gateway: { port: 19001, auth: { mode: "token", token: "tok-own" } } });
+    const config = await loadConfig({ env, link: LINK, join: player().join, reach: up });
+    assert.equal(config.own, true);
+    assert.equal(config.gatewayUrl, "ws://127.0.0.1:19001");
+    assert.equal(config.gatewayToken, "tok-own");
+    assert.equal(config.sandbox, undefined);
+    assert.equal(config.stateDir, join(home, ".chips-openclaw"));
+    assert.deepEqual(config.roots, {
+      gatewayStateDir: join(home, ".openclaw"),
+      gatewayWorkspaceDir: join(home, ".openclaw", "workspace"),
+      stateDir: join(home, ".openclaw"),
+    });
+  });
+
+  it("reads a token named as an environment variable from the environment, else OpenClaw's .env, in a file with comments", async () => {
+    const ref = `{
+      // as \`openclaw onboard\` may leave it
+      "gateway": { "auth": { "token": { "source": "env", "provider": "default", "id": "MY_GW_TOKEN" } }, },
+      "agents": { "defaults": { "workspace": "~/claw-work" } },
+    }`;
+    const fromFile = own(ref, 'MY_GW_TOKEN="tok-file"\n');
+    const config = await loadConfig({ env: fromFile.env, link: LINK, join: player().join, reach: up });
+    assert.equal(config.gatewayToken, "tok-file");
+    assert.equal(config.gatewayUrl, "ws://127.0.0.1:18789");
+    assert.equal(config.roots.gatewayWorkspaceDir, join(fromFile.home, "claw-work"));
+    const fromEnv = own(ref, "MY_GW_TOKEN=tok-file\n");
+    const again = await loadConfig({ env: { ...fromEnv.env, MY_GW_TOKEN: "tok-env" }, link: LINK, join: player().join, reach: up });
+    assert.equal(again.gatewayToken, "tok-env");
+  });
+
+  it("says what to do, and keeps the link good, when OpenClaw isn't set up, has no token, or its gateway isn't answering", async () => {
+    const played = player();
+    const fails = async (env: NodeJS.ProcessEnv, says: RegExp, reach = up) =>
+      assert.rejects(
+        loadConfig({ env, link: LINK, join: played.join, reach }),
+        (error: unknown) => error instanceof SetupError && says.test(error.message) && error.message.includes(STILL_GOOD),
+      );
+    await fails(own().env, /OpenClaw isn't set up on this machine: there is no .*openclaw\.json\. Install OpenClaw \(openclaw\.ai\) and run `openclaw onboard`/);
+    await fails(own({ gateway: { auth: { token: { source: "env", id: "NOPE" } } } }).env, /gateway token isn't in .*openclaw\.json \(gateway\.auth\.token\) or \$NOPE: run `openclaw onboard`/);
+    await fails(own({ gateway: { auth: { token: "t" } } }).env, /gateway isn't answering at ws:\/\/127\.0\.0\.1:18789: start it \(`openclaw gateway`\)/, async () => false);
+    assert.equal(played.asked.length, 0, "no link taken up");
+  });
+
+  it("is the test rig instead when its .env is there", async () => {
+    const { home, env } = own({ gateway: { auth: { token: "own" } } });
+    mkdirSync(join(home, "chips-openclaw"));
+    writeFileSync(join(home, "chips-openclaw", ".env"), "OPENCLAW_GATEWAY_TOKEN=rig\n");
+    const config = await loadConfig({ env, link: LINK, join: player().join, reach: up });
+    assert.deepEqual([config.own, config.gatewayToken, config.sandbox], [false, "rig", join(home, "chips-openclaw")]);
+  });
+});
