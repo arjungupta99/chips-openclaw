@@ -11,6 +11,7 @@ import { rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { AgentContextCopy, AgentContextWindowCopy, AgentHeartbeatCopy, AgentModelCopy } from "@chipschat/harness";
+import { JoinError } from "@chipschat/harness";
 import { Automations } from "./automations.ts";
 import { Bridge } from "./bridge.ts";
 import { Chips, type ChipsEvent } from "./chips.ts";
@@ -34,7 +35,8 @@ stopIfAsked(LABEL);
 // What OpenClaw's side needs is checked first, and stops it with what to do: a link works once.
 const config = await loadConfig({ link: process.argv[2] === "connect" ? process.argv[3] : undefined, log }).catch(
   (error: unknown) => {
-    if (!(error instanceof SetupError)) throw error;
+    // What isn't set up, or a link Chips refuses (spent, expired, not a link): its words, no stack.
+    if (!(error instanceof SetupError) && !(error instanceof JoinError)) throw error;
     console.error(error.message);
     process.exit(1);
   },

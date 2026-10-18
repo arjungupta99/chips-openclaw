@@ -1,11 +1,22 @@
 {
-  "name": "chips-openclaw-bridge",
+  "name": "@chipschat/openclaw",
   "version": "0.1.0",
-  "private": true,
   "description": "OpenClaw as a Chips harness: one operator connection to the OpenClaw gateway, Chips's public wire on the other side.",
+  "license": "Apache-2.0",
   "type": "module",
   "engines": {
     "node": ">=22.19.0"
+  },
+  "bin": {
+    "chips-openclaw": "dist/main.js"
+  },
+  "files": [
+    "dist",
+    "LICENSE",
+    "README.md"
+  ],
+  "publishConfig": {
+    "access": "public"
   },
   "scripts": {
     "start": "tsx src/main.ts",
@@ -13,19 +24,22 @@
     "keep": "tsx src/main.ts --keep",
     "test": "node --import tsx --test test/*.test.ts",
     "e2e": "node --import tsx --test test/e2e/*.test.ts",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "build": "esbuild src/main.ts --bundle --platform=node --target=node22 --format=esm --outfile=dist/main.js --log-level=warning --external:@openclaw/gateway-client --external:@openclaw/gateway-protocol --external:ws --banner:js='#!/usr/bin/env node'",
+    "prepack": "npm run build"
   },
   "dependencies": {
-    "@chipschat/harness": "file:vendor/chipschat-harness-0.0.0.tgz",
-    "@chipschat/protocol": "file:vendor/chipschat-protocol-0.0.0.tgz",
     "@openclaw/gateway-client": "2026.9.6",
     "@openclaw/gateway-protocol": "2026.9.6",
     "ws": "8.21.3"
   },
   "devDependencies": {
     "@chipschat/conformance": "file:vendor/chipschat-conformance-0.0.0.tgz",
+    "@chipschat/harness": "file:vendor/chipschat-harness-0.0.0.tgz",
+    "@chipschat/protocol": "file:vendor/chipschat-protocol-0.0.0.tgz",
     "@types/node": "22.19.0",
     "@types/ws": "8.18.1",
+    "esbuild": "0.27.7",
     "tsx": "4.21.0",
     "typescript": "5.9.3"
   }
