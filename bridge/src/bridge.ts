@@ -40,6 +40,11 @@
  *   Chips's own word to the agent (the referee): that it held what the agent last said there, and
  *   how the agents' talk in the room stands. Every send steers (`queueMode: "steer"`): words that
  *   arrive while the session's turn runs join it, and words between turns start one.
+ * - A reply a person says was not right (Chips ADR 0200: a `feedback` correction, or a 👎 from an
+ *   older device) is a turn by the agent who said it, in the session its turns in that room go to,
+ *   once per feedback: the reply quoted back with what was wrong, and asked to look again. Who
+ *   said it is read from the room's lines, by the message's id. A 👍, or any other reaction, is
+ *   nothing.
  * - OpenClaw's `chat` events for a turn become a run: started on the first, answered and completed
  *   on `final`, failed on `error` or `aborted`. Its tool events become steps.
  * - A file the answer sends (a `MEDIA:` line of its own, which the gateway takes out of the words
@@ -557,6 +562,60 @@ export function heldNoteOf(taken: Taken | undefined): string | undefined {
   );
 }
 
+/** Words cut with an ellipsis to `most` characters, the ellipsis among them. */
+function cutTo(text: string, most: number): string {
+  return text.length <= most ? text : `${text.slice(0, most - 1)}…`;
+}
+
+/** How much of a reply a second look hands back to the agent that said it (Chips ADR 0200). */
+const REPLY_QUOTED = 1_500;
+
+/**
+ * How far back a second look reads a room for the reply it is about: pages of as many lines as
+ * Chips's pull route gives at once (its ceiling), a few at most, since a person says a reply was
+ * not right about one they can see.
+ */
+const LOOK_BACK = { lines: 200, pages: 5 } as const;
+
+/** How many feedback ids the bridge keeps as answered, so one said again asks nothing again. */
+const FEEDBACK_KEPT = 1_000;
+
+/**
+ * What a person says was not right in a reply (Chips ADR 0200): a correction's note, or no note for
+ * a bare 👎 from a device older than the ADR. Nothing for a 👍, or any other reaction, which asks
+ * for nothing.
+ */
+function notRightOf(event: ChipsEvent): { readonly note: string | undefined } | undefined {
+  if (event["kind"] === "correction") {
+    const note = str(event["text"])?.trim();
+    return note === undefined || note === "" ? undefined : { note };
+  }
+  return event["kind"] === "reaction" && event["reaction"] === "👎" ? { note: undefined } : undefined;
+}
+
+/** A second look's goal, as the thinking bubble says it: the note's first line, or that there was none. */
+function lookAgainGoal(note: string | undefined): string {
+  if (note === undefined) return "Looking again at its reply";
+  const first = note.split("\n").find((line) => line.trim() !== "")?.trim() ?? note;
+  return cutTo(`Looking again: ${first}`, 120);
+}
+
+/**
+ * What a second look hands the agent (Chips ADR 0200): who says its reply was not right, the reply
+ * when the room's lines still have it, what was wrong, and to answer again properly or ask in one
+ * line. A bare 👎 says nothing of what, and the agent is asked to find it.
+ */
+function lookAgainPrompt(name: string, reply: string | undefined, note: string | undefined): string {
+  return [
+    `${name} says your reply in this room wasn't right.`,
+    reply === undefined ? undefined : `Your reply:\n«${cutTo(reply, REPLY_QUOTED)}»`,
+    note === undefined ? "They didn't say what. Read your reply again and find what was wrong." : `What wasn't right: «${note}»`,
+    "Look at it again and answer properly in its place. If it is not clear what was wrong, ask them in one short line. Say plainly what you changed.",
+  ]
+    .filter((part) => part !== undefined)
+    .join("\n\n");
+}
+
 /** The files a message carries, as Chips describes them. */
 function attachmentsOf(event: ChipsEvent): Payload[] {
   return Array.isArray(event["attachments"]) ? (event["attachments"] as Payload[]) : [];
@@ -621,10 +680,16 @@ export class Bridge {
   /**
    * The turns the bridge asked for, by the idempotency key OpenClaw names each turn after: the
    * words, the room and the agent it is said as, since a session that came with an agent from
-   * another room names the wrong one. And the latest words in each session, for a follow-up turn
-   * OpenClaw starts on its own.
+   * another room names the wrong one; and `ownGoal` for a turn whose words are the bridge's, not a
+   * message in the room (a second look, Chips ADR 0200). And the latest words in each session, for
+   * a follow-up turn OpenClaw starts on its own.
    */
-  private readonly asks = new Map<string, { readonly words: string; readonly spaceId: string; readonly agentId: string | undefined }>();
+  private readonly asks = new Map<
+    string,
+    { readonly words: string; readonly spaceId: string; readonly agentId: string | undefined; readonly ownGoal?: true }
+  >();
+  /** The feedback a second look was asked for, by its event's id, the newest `FEEDBACK_KEPT`. */
+  private readonly lookedAgain = new Set<string>();
   /** What each turn the bridge asked for was sent with, until it ends: to send it again once. */
   private readonly sends = new Map<string, Payload>();
   private readonly latest = new Map<string, string>();
@@ -1587,6 +1652,9 @@ export class Bridge {
         return this.decided(event);
       case "question.answered":
         return this.answered(event);
+      // A person says one of our agents' replies was not right (Chips ADR 0200).
+      case "feedback":
+        return this.lookAgain(event);
       // A room's job at 80% of its spend ceiling, or at it (Chips ADR 0118). OpenClaw runs a turn
       // per message and chains none of its own, so there is nothing to stop: Chips holds what our
       // agents say to each other there, and a person's next word is a new job. Said in the log.
@@ -1705,6 +1773,81 @@ export class Bridge {
       await this.claw.request("chat.send", send);
       files.took();
     }
+  }
+
+  /**
+   * A person says one of our agents' replies was not right (Chips ADR 0200), as Jacobian answers
+   * it: a turn by the agent who said it, in the session its turns in that room go to, handed the
+   * reply and what was wrong, whose answer is posted as any turn's. Chips sends feedback only to
+   * the harness whose message it is, and draws the note under the bubble itself, so nothing else
+   * is said in the room. Chips names the message and not who said it, so that is read from the
+   * room's lines; a message they no longer have is the room's own agent's, as a message for nobody
+   * is. Once per feedback: what the bridge missed is handed again when it reconnects, and the turn
+   * is keyed by the feedback, apart from any message's, so OpenClaw takes it once after a restart.
+   */
+  private async lookAgain(event: ChipsEvent): Promise<void> {
+    const id = str(event["id"]);
+    const spaceId = str(event["space_id"]);
+    const messageId = str(event["message_id"]);
+    const from = event["from"] as Payload | undefined;
+    const wrong = notRightOf(event);
+    if (id === undefined || spaceId === undefined || messageId === undefined || wrong === undefined) return;
+    if (from?.["kind"] !== "person" || this.lookedAgain.has(id)) return;
+    this.lookedAgain.add(id);
+    for (const old of this.lookedAgain) {
+      if (this.lookedAgain.size <= FEEDBACK_KEPT) break;
+      this.lookedAgain.delete(old);
+    }
+    const line = await this.lineIn(spaceId, messageId, num(event["seq"]));
+    const author = str((line?.["from"] as Payload | undefined)?.["id"]);
+    if (author !== undefined && !this.isOwn(author)) this.learn(await this.chips.agents());
+    const taker =
+      author !== undefined && this.isOwn(author)
+        ? this.takerFor(author === this.self.harnessId ? undefined : author, spaceId)
+        : (await this.turnTakers(event, spaceId))[0];
+    if (taker === undefined) return;
+    const goal = lookAgainGoal(wrong.note);
+    const turn = `feedback:${id}`;
+    await this.ensureSession(taker.sessionKey, goal, taker.clawAgent);
+    const asker = personOf(from, this.people.get(spaceId));
+    if (asker !== undefined) this.askers.set(taker.sessionKey, asker);
+    // Its goal is no message in the room, so Chips says it on the run (no `goal_from`).
+    this.asks.set(turn, { words: goal, spaceId, agentId: taker.agentId, ownGoal: true });
+    const reply = str(line?.["text"])?.trim();
+    // Steered, as every send is: a turn of its own when the session is between turns, and into
+    // the turn that is going when one is, which answers it with the rest.
+    const send: Payload = {
+      sessionKey: taker.sessionKey,
+      message: lookAgainPrompt(str(from["display_name"]) ?? "Someone", reply === "" ? undefined : reply, wrong.note),
+      idempotencyKey: turn,
+      queueMode: "steer",
+    };
+    this.sends.set(turn, send);
+    await this.claw.request("chat.send", send);
+  }
+
+  /**
+   * A message's line in a room, from Chips's pull route (ADR 0088): the newest lines before the
+   * feedback on it, then older pages while Chips says there are more, `LOOK_BACK` at most. Nothing
+   * when the room cannot be read or the message is not among them.
+   */
+  private async lineIn(spaceId: string, messageId: string, before: number | undefined): Promise<Payload | undefined> {
+    for (let at = before, page = 0; at !== undefined && page < LOOK_BACK.pages; page += 1) {
+      let read: unknown;
+      try {
+        read = await this.chips.roomContext(spaceId, at, LOOK_BACK.lines);
+      } catch (error) {
+        this.log(`chips: could not read ${spaceId}'s lines: ${String(error)}`);
+        return undefined;
+      }
+      const lines = linesIn(read).filter((each): each is Payload => typeof each === "object" && each !== null);
+      const line = lines.find((each) => each["message_id"] === messageId);
+      if (line !== undefined) return line;
+      const oldest = num(lines[0]?.["seq"]);
+      if ((read as Payload | null | undefined)?.["truncated"] !== true || oldest === undefined || oldest >= at) return undefined;
+      at = oldest;
+    }
+    return undefined;
   }
 
   /**
@@ -2078,8 +2221,9 @@ export class Bridge {
       space_id: where.spaceId,
       goal: goal.slice(0, 500),
       // A turn asked by a message is that message, already in the room, so Chips does not say it
-      // again beside it; a turn OpenClaw started on its own has a goal nobody typed.
-      ...(asked === undefined ? {} : { goal_from: "chips" }),
+      // again beside it; a turn OpenClaw started on its own, or a second look the bridge asked
+      // for, has a goal nobody typed.
+      ...(asked === undefined || asked.ownGoal === true ? {} : { goal_from: "chips" }),
       idempotency_key: `openclaw-run:${clawRun}:started`,
     });
     for (const early of this.early.get(clawRun) ?? []) this.stream(run, early);

@@ -506,6 +506,116 @@ describe("a turn as a run", () => {
   });
 });
 
+describe("a reply that was not right (Chips ADR 0200)", () => {
+  const OTHER_ROOM = "spc_01K4ZQPX000000000000000077";
+  const SCOUT = { id: "agt_scout", kind: "agent", name: "Scout" };
+  const REPLY = "msg_01K4ZQPX0000000000000000B1";
+  const NOTE = "Missed what I asked. Sunday is our flight home.";
+  const LAST =
+    "Look at it again and answer properly in its place. If it is not clear what was wrong, ask them in one short line. Say plainly what you changed.";
+
+  /** Feedback on a message, as Chips hands it to the harness whose message it is. */
+  function feedback(extra: Record<string, unknown>): ChipsEvent {
+    return { type: "feedback", id: "evt_01K4ZQPX0000000000000000F1", seq: 9, space_id: ROOM, message_id: REPLY, from: ARJUN, ...extra };
+  }
+
+  beforeEach(async () => {
+    agents = [agentIn("agt_fallback", ME, OTHER_ROOM), agentIn("agt_main", "main", ROOM), agentIn("agt_scout", "scout", ROOM, "Scout")];
+    await bridge.adoptAgents({ defaultId: "main", agents: [{ id: "main" }, { id: "scout", name: "Scout" }] });
+    roomLines = [
+      { seq: 4, kind: "said", from: ARJUN_FROM, message_id: "msg_01K4ZQPX0000000000000000A1", text: "Plan Sunday for us" },
+      { seq: 6, kind: "said", from: SCOUT, message_id: REPLY, text: "Sunday: a hike at dawn,\nthen brunch." },
+    ];
+    calls = [];
+  });
+
+  it("asks the agent who said it for a second look, in its session in the room, and posts its answer as a run", async () => {
+    await bridge.onChips(feedback({ kind: "correction", text: NOTE }));
+    assert.deepEqual(calls.filter(([method]) => method === "chat.send"), [
+      [
+        "chat.send",
+        {
+          sessionKey: bridge.keyFor(ROOM, "scout"),
+          message: [
+            "Arjun says your reply in this room wasn't right.",
+            "Your reply:\n«Sunday: a hike at dawn,\nthen brunch.»",
+            `What wasn't right: «${NOTE}»`,
+            LAST,
+          ].join("\n\n"),
+          // Keyed by the feedback, apart from the turn on any message.
+          idempotencyKey: "feedback:evt_01K4ZQPX0000000000000000F1",
+          queueMode: "steer",
+        },
+      ],
+    ]);
+    // Who said it is read from the room's lines before the feedback.
+    assert.deepEqual(pulls, [[ROOM, 9, 200]]);
+    const turn = { runId: "feedback:evt_01K4ZQPX0000000000000000F1", sessionKey: bridge.keyFor(ROOM, "scout") };
+    bridge.onClaw({ event: "chat", payload: { ...turn, seq: 1, state: "status" } });
+    bridge.onClaw({ event: "chat", payload: { ...turn, seq: 2, state: "final", message: "Brunch near the airport instead: I moved the plan to fit your flight." } });
+    await bridge.settled();
+    assert.deepEqual(sent.map((event) => event.type), ["run.started", "message.post", "run.completed"]);
+    assert.equal(sent[0]?.["goal"], `Looking again: ${NOTE}`);
+    // Its goal is no message in the room, so Chips says it.
+    assert.equal(sent[0]?.["goal_from"], undefined);
+    assert.equal(sent[0]?.["space_id"], ROOM);
+    assert.equal(sent[1]?.["text"], "Brunch near the airport instead: I moved the plan to fit your flight.");
+    for (const event of sent) assert.deepEqual(event["actor"], { kind: "agent", id: "agt_scout" });
+  });
+
+  it("asks nothing for a 👍, another reaction, an empty note, or feedback from an agent", async () => {
+    await bridge.onChips(feedback({ kind: "reaction", reaction: "👍" }));
+    await bridge.onChips(feedback({ id: "evt_01K4ZQPX0000000000000000F2", kind: "reaction", reaction: "🎉" }));
+    await bridge.onChips(feedback({ id: "evt_01K4ZQPX0000000000000000F3", kind: "correction", text: "   " }));
+    await bridge.onChips(feedback({ id: "evt_01K4ZQPX0000000000000000F4", kind: "correction", text: NOTE, from: { ...ARJUN, kind: "agent" } }));
+    await bridge.settled();
+    assert.deepEqual(calls, []);
+    assert.deepEqual(sent, []);
+  });
+
+  it("asks for a second look on a bare 👎 from an older device, saying the person did not say what", async () => {
+    await bridge.onChips(feedback({ kind: "reaction", reaction: "👎" }));
+    const send = calls.find(([method]) => method === "chat.send")?.[1];
+    assert.equal(
+      send?.["message"],
+      [
+        "Arjun says your reply in this room wasn't right.",
+        "Your reply:\n«Sunday: a hike at dawn,\nthen brunch.»",
+        "They didn't say what. Read your reply again and find what was wrong.",
+        LAST,
+      ].join("\n\n"),
+    );
+    bridge.onClaw({ event: "chat", payload: { runId: send?.["idempotencyKey"], sessionKey: send?.["sessionKey"], seq: 1, state: "status" } });
+    await bridge.settled();
+    assert.equal(sent[0]?.["goal"], "Looking again at its reply");
+  });
+
+  it("answers the same feedback once, handed again or not", async () => {
+    await bridge.onChips(feedback({ kind: "correction", text: NOTE }));
+    await bridge.onChips(feedback({ kind: "correction", text: NOTE }));
+    assert.equal(calls.filter(([method]) => method === "chat.send").length, 1);
+  });
+
+  it("gives a message the room's lines no longer have to the room's agent, with no reply to quote", async () => {
+    await bridge.onChips(feedback({ kind: "correction", text: NOTE, message_id: "msg_01K4ZQPX0000000000000000Z9" }));
+    const sends = calls.filter(([method]) => method === "chat.send").map(([, params]) => params);
+    assert.equal(sends.length, 1);
+    // As a message for nobody in particular is: whichever of ours Chips has in the room.
+    assert.equal(sends[0]?.["sessionKey"], bridge.keyFor(ROOM, "main"));
+    assert.equal(sends[0]?.["message"], ["Arjun says your reply in this room wasn't right.", `What wasn't right: «${NOTE}»`, LAST].join("\n\n"));
+  });
+
+  it("cuts a long note's goal at 120 characters and a long reply at 1500, each with an ellipsis", async () => {
+    roomLines = [{ seq: 6, kind: "said", from: SCOUT, message_id: REPLY, text: "x".repeat(2_000) }];
+    await bridge.onChips(feedback({ kind: "correction", text: `${"y".repeat(200)}\nand more` }));
+    const send = calls.find(([method]) => method === "chat.send")?.[1];
+    assert.ok(String(send?.["message"]).includes(`«${"x".repeat(1_499)}…»`));
+    bridge.onClaw({ event: "chat", payload: { runId: send?.["idempotencyKey"], sessionKey: send?.["sessionKey"], seq: 1, state: "status" } });
+    await bridge.settled();
+    assert.equal(sent[0]?.["goal"], `Looking again: ${"y".repeat(104)}…`);
+  });
+});
+
 describe("an answer's files", () => {
   const WORKSPACE = "/home/node/.openclaw/workspace";
   /** OpenClaw's files as the bridge reads them: a web address is a link, `missing.html` is not there. */
