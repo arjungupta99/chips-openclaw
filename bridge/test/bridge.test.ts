@@ -1229,18 +1229,26 @@ describe("what a turn cost (Chips ADRs 0117, 0118)", () => {
       call(1_030, 0.02595, 661, 16_640, 54),
       call(1_040, undefined),
     ];
-    assert.deepEqual(spentIn(messages, 1_000), { usd: 0.13539, input: 49_141, output: 598 });
+    assert.deepEqual(spentIn(messages, 1_000), {
+      usd: 0.13539,
+      input: 49_141,
+      cacheRead: 42_880,
+      cacheWrite: 0,
+      output: 598,
+    });
     assert.equal(spentIn(messages, 2_000), undefined);
     assert.equal(spentIn({}, 0), undefined);
   });
 
   it("puts the cost on the turn's usage, and its tokens in when its events never said them", () => {
-    const spent = { usd: 0.135, input: 49_141, output: 598 };
+    const spent = { usd: 0.135, input: 49_141, cacheRead: 42_880, cacheWrite: 0, output: 598 };
     assert.deepEqual(withSpend({ scope: "run", model: "m", output_tokens: 598 }, spent, "m"), {
       scope: "run",
       model: "m",
       output_tokens: 598,
       input_tokens: 49_141,
+      cache_read_tokens: 42_880,
+      cache_write_tokens: 0,
       cost: { usd: 0.135, estimated: true },
     });
     const own = { scope: "run", model: "m", input_tokens: 3, output_tokens: 4, cost: { usd: 1, estimated: true } };
@@ -1249,6 +1257,8 @@ describe("what a turn cost (Chips ADRs 0117, 0118)", () => {
       scope: "run",
       model: "m",
       input_tokens: 49_141,
+      cache_read_tokens: 42_880,
+      cache_write_tokens: 0,
       output_tokens: 598,
       cost: { usd: 0.135, estimated: true },
     });

@@ -410,10 +410,15 @@ export function usageOf(usage: unknown, fallbackModel: string): Payload | undefi
   };
 }
 
-/** What a turn's model calls cost in all, and the tokens they took in and gave out. */
+/**
+ * What a turn's model calls cost in all, and the tokens they took in and gave out: the tokens in
+ * are all of them, and the cache's two say how many of those were read from it and written to it.
+ */
 export interface Spent {
   readonly usd: number;
   readonly input: number;
+  readonly cacheRead: number;
+  readonly cacheWrite: number;
   readonly output: number;
 }
 
@@ -426,6 +431,8 @@ export function spentIn(messages: unknown, since: number): Spent | undefined {
   if (!Array.isArray(messages)) return undefined;
   let usd = 0;
   let input = 0;
+  let cacheRead = 0;
+  let cacheWrite = 0;
   let output = 0;
   let priced = false;
   for (const message of messages) {
@@ -437,24 +444,31 @@ export function spentIn(messages: unknown, since: number): Spent | undefined {
     if (total === undefined || total <= 0) continue;
     priced = true;
     usd += total;
-    input += (num(usage["input"]) ?? 0) + (num(usage["cacheRead"]) ?? 0) + (num(usage["cacheWrite"]) ?? 0);
+    const read = num(usage["cacheRead"]) ?? 0;
+    const written = num(usage["cacheWrite"]) ?? 0;
+    input += (num(usage["input"]) ?? 0) + read + written;
+    cacheRead += read;
+    cacheWrite += written;
     output += num(usage["output"]) ?? 0;
   }
-  return priced ? { usd: Math.round(usd * 1e6) / 1e6, input, output } : undefined;
+  return priced ? { usd: Math.round(usd * 1e6) / 1e6, input, cacheRead, cacheWrite, output } : undefined;
 }
 
 /**
  * The turn's usage with what its history says it cost: the cost, and its tokens in when its
- * events never said them. A cost the turn's own events carried is kept. With no tokens from its
- * events, the history's alone.
+ * events never said them, with how many of those the cache held (Chips ADR 0214). A cost the
+ * turn's own events carried is kept. With no tokens from its events, the history's alone.
  */
 export function withSpend(usage: Payload | undefined, spent: Spent | undefined, model: string): Payload | undefined {
   if (spent === undefined) return usage;
   const base = usage ?? usageOf({ input: spent.input, output: spent.output }, model);
   if (base === undefined) return undefined;
+  const fromHistory = usage?.["input_tokens"] === undefined && spent.input > 0;
   return {
     ...base,
-    ...(base["input_tokens"] === undefined && spent.input > 0 ? { input_tokens: spent.input } : {}),
+    ...(fromHistory
+      ? { input_tokens: spent.input, cache_read_tokens: spent.cacheRead, cache_write_tokens: spent.cacheWrite }
+      : {}),
     ...(base["cost"] === undefined ? { cost: { usd: spent.usd, estimated: true } } : {}),
   };
 }
