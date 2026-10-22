@@ -173,9 +173,9 @@ const choicesOf = (body: Record<string, unknown> | undefined): unknown[] =>
 
 describe("an agent's model as Chips shows it", () => {
   it("is what a made agent runs on, OpenClaw's default for it, and the models it may run on", async () => {
-    await models.agent("agt_scout", { clawAgent: MADE, changeable: true });
+    await models.agent("agt_01K4ZQPX0000000000000000SC", { clawAgent: MADE, changeable: true });
     const [agentId, body] = puts[0] ?? [];
-    assert.equal(agentId, "agt_scout");
+    assert.equal(agentId, "agt_01K4ZQPX0000000000000000SC");
     assert.equal(body?.["model"], "openai/gpt-6-astra");
     assert.equal(body?.["effort"], "medium");
     assert.equal(body?.["own"], false);
@@ -197,7 +197,7 @@ describe("an agent's model as Chips shows it", () => {
 
   it("is read only for an agent the bridge found in OpenClaw, in its words", async () => {
     entries["found"] = { name: "Found" };
-    await models.agent("agt_found", { clawAgent: "found", changeable: false });
+    await models.agent("agt_01K4ZQPX0000000000000000FD", { clawAgent: "found", changeable: false });
     const body = puts[0]?.[1];
     assert.equal(body?.["editable"], false);
     assert.equal(body?.["why_read_only"], READ_ONLY_WHY);
@@ -206,31 +206,31 @@ describe("an agent's model as Chips shows it", () => {
 
   it("says a model and level are its own when its entry sets either", async () => {
     entries[MADE] = { model: "openai/gpt-6-sol" };
-    await models.agent("agt_scout", { clawAgent: MADE, changeable: true });
+    await models.agent("agt_01K4ZQPX0000000000000000SC", { clawAgent: MADE, changeable: true });
     assert.equal(puts[0]?.[1]["own"], true);
     assert.equal(puts[0]?.[1]["model"], "openai/gpt-6-sol");
     entries[MADE] = { thinkingDefault: "high" };
-    await models.agent("agt_scout", { clawAgent: MADE, changeable: true });
+    await models.agent("agt_01K4ZQPX0000000000000000SC", { clawAgent: MADE, changeable: true });
     assert.equal(puts[1]?.[1]["own"], true);
     assert.equal(puts[1]?.[1]["effort"], "high");
   });
 
   it("takes the defaults' level for the default when they set one", async () => {
     defaults = { model: "openai/gpt-6-sol", thinkingDefault: "xhigh" };
-    await models.agent("agt_scout", { clawAgent: MADE, changeable: true });
+    await models.agent("agt_01K4ZQPX0000000000000000SC", { clawAgent: MADE, changeable: true });
     assert.deepEqual(puts[0]?.[1]["default"], { label: DEFAULT_LABEL, model: "openai/gpt-6-sol", effort: "xhigh" });
     assert.equal(puts[0]?.[1]["effort"], "xhigh");
   });
 
   it("is sent again only when it moved", async () => {
-    await models.agent("agt_scout", { clawAgent: MADE, changeable: true });
-    await models.agent("agt_scout", { clawAgent: MADE, changeable: true });
+    await models.agent("agt_01K4ZQPX0000000000000000SC", { clawAgent: MADE, changeable: true });
+    await models.agent("agt_01K4ZQPX0000000000000000SC", { clawAgent: MADE, changeable: true });
     assert.equal(puts.length, 1);
     entries[MADE] = { model: "openai/gpt-6-luna" };
-    await models.agent("agt_scout", { clawAgent: MADE, changeable: true });
+    await models.agent("agt_01K4ZQPX0000000000000000SC", { clawAgent: MADE, changeable: true });
     assert.equal(puts.length, 2);
-    settings.forget("agt_scout");
-    await models.agent("agt_scout", { clawAgent: MADE, changeable: true });
+    settings.forget("agt_01K4ZQPX0000000000000000SC");
+    await models.agent("agt_01K4ZQPX0000000000000000SC", { clawAgent: MADE, changeable: true });
     assert.equal(puts.length, 3);
   });
 
@@ -297,7 +297,7 @@ describe("the copy's rules", () => {
 });
 
 describe("a person's change from Chips", () => {
-  const ask = (model: string | null, effort: string | null) => ({ change_id: CHANGE, agent_id: "agt_scout", model, effort });
+  const ask = (model: string | null, effort: string | null) => ({ change_id: CHANGE, agent_id: "agt_01K4ZQPX0000000000000000SC", model, effort });
 
   it("is written into the agent's entry from the config it was read from, and the copy answers it", async () => {
     await change(ask("openai/gpt-6-sol", "high"), { clawAgent: MADE, changeable: true });
@@ -305,7 +305,7 @@ describe("a person's change from Chips", () => {
     assert.equal(patch?.["baseHash"], "h1");
     assert.deepEqual(entries[MADE], { name: "Scout", model: "openai/gpt-6-sol", thinkingDefault: "high" });
     const [agentId, body] = puts.at(-1) ?? [];
-    assert.equal(agentId, "agt_scout");
+    assert.equal(agentId, "agt_01K4ZQPX0000000000000000SC");
     assert.equal(body?.["answers"], CHANGE);
     assert.equal(body?.["model"], "openai/gpt-6-sol");
     assert.equal(body?.["effort"], "high");
@@ -338,7 +338,7 @@ describe("a person's change from Chips", () => {
 
   it("is refused for an agent the bridge found in OpenClaw, which is changed in OpenClaw", async () => {
     entries["found"] = { name: "Found" };
-    await change({ ...ask("openai/gpt-6-sol", "high"), agent_id: "agt_found" }, { clawAgent: "found", changeable: false });
+    await change({ ...ask("openai/gpt-6-sol", "high"), agent_id: "agt_01K4ZQPX0000000000000000FD" }, { clawAgent: "found", changeable: false });
     assert.ok(!calls.some(([method]) => method === "config.patch"));
     assert.deepEqual(puts.at(-1)?.[1]["refuses"], { change_id: CHANGE, message: READ_ONLY_WHY });
   });
@@ -394,9 +394,9 @@ describe("the bridge keeps the models current", () => {
 
   beforeEach(() => {
     agents = [
-      agentIn("agt_scout", session, ROOM, "Scout"),
-      agentIn("agt_main", "agent:main:chips-main", MAIN_ROOM, "OpenClaw", true),
-      agentIn("agt_found", "found", null, "Found"),
+      agentIn("agt_01K4ZQPX0000000000000000SC", session, ROOM, "Scout"),
+      agentIn("agt_01K4ZQPX0000000000000000MN", "agent:main:chips-main", MAIN_ROOM, "OpenClaw", true),
+      agentIn("agt_01K4ZQPX0000000000000000FD", "found", null, "Found"),
     ];
     entries["found"] = { name: "Found", model: "openai/gpt-6-luna" };
     bridge = new Bridge(chips, claw, { harnessId: ME, agent: "main" }, () => undefined, undefined, Date.now, undefined, undefined, models);
@@ -407,36 +407,36 @@ describe("the bridge keeps the models current", () => {
     await bridge.adoptAgents({ defaultId: "main", agents: [{ id: "main" }, { id: "found" }] });
     await bridge.sendModels();
     const byAgent = new Map(puts.map(([agentId, body]) => [agentId, body]));
-    assert.deepEqual([...byAgent.keys()].sort(), ["agt_found", "agt_main", "agt_scout"]);
-    assert.equal(byAgent.get("agt_scout")?.["editable"], true);
-    assert.equal(byAgent.get("agt_main")?.["editable"], true);
-    assert.equal(byAgent.get("agt_main")?.["why_read_only"], undefined);
-    assert.equal(byAgent.get("agt_found")?.["editable"], false);
-    assert.equal(byAgent.get("agt_found")?.["model"], "openai/gpt-6-luna");
-    assert.equal(byAgent.get("agt_found")?.["own"], true);
+    assert.deepEqual([...byAgent.keys()].sort(), ["agt_01K4ZQPX0000000000000000FD", "agt_01K4ZQPX0000000000000000MN", "agt_01K4ZQPX0000000000000000SC"]);
+    assert.equal(byAgent.get("agt_01K4ZQPX0000000000000000SC")?.["editable"], true);
+    assert.equal(byAgent.get("agt_01K4ZQPX0000000000000000MN")?.["editable"], true);
+    assert.equal(byAgent.get("agt_01K4ZQPX0000000000000000MN")?.["why_read_only"], undefined);
+    assert.equal(byAgent.get("agt_01K4ZQPX0000000000000000FD")?.["editable"], false);
+    assert.equal(byAgent.get("agt_01K4ZQPX0000000000000000FD")?.["model"], "openai/gpt-6-luna");
+    assert.equal(byAgent.get("agt_01K4ZQPX0000000000000000FD")?.["own"], true);
   });
 
   it("writes a change for the agent it made and for the Main agent, and refuses one for a found agent", async () => {
     await bridge.adoptAgents({ defaultId: "main", agents: [{ id: "main" }, { id: "found" }] });
-    await settings.hear({ frame: "model.change", change_id: CHANGE, harness_id: ME, agent_id: "agt_scout", model: "openai/gpt-6-sol", effort: "max", asked_by: ARJUN, asked_at: "2026-10-08T23:30:00.000Z" });
+    await settings.hear({ frame: "model.change", change_id: CHANGE, harness_id: ME, agent_id: "agt_01K4ZQPX0000000000000000SC", model: "openai/gpt-6-sol", effort: "max", asked_by: ARJUN, asked_at: "2026-10-08T23:30:00.000Z" });
     assert.equal(entries[MADE]?.model, "openai/gpt-6-sol");
     assert.equal(puts.at(-1)?.[1]["answers"], CHANGE);
     // The Main agent is OpenClaw's primary agent: its entry takes the change, beside what it had.
-    await settings.hear({ frame: "model.change", change_id: CHANGE, harness_id: ME, agent_id: "agt_main", model: "openai/gpt-6-sol", effort: "max", asked_by: ARJUN, asked_at: "2026-10-08T23:30:00.000Z" });
+    await settings.hear({ frame: "model.change", change_id: CHANGE, harness_id: ME, agent_id: "agt_01K4ZQPX0000000000000000MN", model: "openai/gpt-6-sol", effort: "max", asked_by: ARJUN, asked_at: "2026-10-08T23:30:00.000Z" });
     assert.deepEqual(entries["main"], { name: "main", model: "openai/gpt-6-sol", thinkingDefault: "max" });
     const [agentId, body] = puts.at(-1) ?? [];
-    assert.equal(agentId, "agt_main");
+    assert.equal(agentId, "agt_01K4ZQPX0000000000000000MN");
     assert.deepEqual([body?.["answers"], body?.["model"], body?.["effort"], body?.["own"]], [CHANGE, "openai/gpt-6-sol", "max", true]);
     // And back to OpenClaw's default, which leaves its entry as it was.
-    await settings.hear({ frame: "model.change", change_id: CHANGE, harness_id: ME, agent_id: "agt_main", model: null, effort: null, asked_by: ARJUN, asked_at: "2026-10-08T23:30:00.000Z" });
+    await settings.hear({ frame: "model.change", change_id: CHANGE, harness_id: ME, agent_id: "agt_01K4ZQPX0000000000000000MN", model: null, effort: null, asked_by: ARJUN, asked_at: "2026-10-08T23:30:00.000Z" });
     assert.deepEqual(entries["main"], { name: "main" });
     assert.equal(puts.at(-1)?.[1]["own"], false);
-    await settings.hear({ frame: "model.change", change_id: CHANGE, harness_id: ME, agent_id: "agt_found", model: "openai/gpt-6-sol", effort: "max", asked_by: ARJUN, asked_at: "2026-10-08T23:30:00.000Z" });
+    await settings.hear({ frame: "model.change", change_id: CHANGE, harness_id: ME, agent_id: "agt_01K4ZQPX0000000000000000FD", model: "openai/gpt-6-sol", effort: "max", asked_by: ARJUN, asked_at: "2026-10-08T23:30:00.000Z" });
     assert.equal(entries["found"]?.model, "openai/gpt-6-luna");
     assert.deepEqual(puts.at(-1)?.[1]["refuses"], { change_id: CHANGE, message: READ_ONLY_WHY });
     // One for an agent the bridge doesn't know is not answered; Chips says it was missed.
     puts = [];
-    await settings.hear({ frame: "model.change", change_id: CHANGE, harness_id: ME, agent_id: "agt_nobody", model: null, effort: null, asked_by: ARJUN, asked_at: "2026-10-08T23:30:00.000Z" });
+    await settings.hear({ frame: "model.change", change_id: CHANGE, harness_id: ME, agent_id: "agt_01K4ZQPX0000000000000000NB", model: null, effort: null, asked_by: ARJUN, asked_at: "2026-10-08T23:30:00.000Z" });
     assert.deepEqual(puts, []);
   });
 
@@ -445,7 +445,7 @@ describe("the bridge keeps the models current", () => {
     await bridge.sendModels();
     puts = [];
     const turn = async (id: string, change?: () => void): Promise<void> => {
-      await bridge.onChips({ type: "message.new", space_id: ROOM, message_id: id, from: { participant_id: ARJUN, kind: "person" }, text: "Go on", addressed_to: ["agt_scout"], for: ["agt_scout"] });
+      await bridge.onChips({ type: "message.new", space_id: ROOM, message_id: id, from: { participant_id: ARJUN, kind: "person" }, text: "Go on", addressed_to: ["agt_01K4ZQPX0000000000000000SC"], for: ["agt_01K4ZQPX0000000000000000SC"] });
       const runId = `${id}:${MADE}`;
       bridge.onClaw({ event: "chat", payload: { runId, sessionKey: session, seq: 1, state: "status" } });
       change?.();
@@ -457,7 +457,7 @@ describe("the bridge keeps the models current", () => {
     await turn("msg_01K4ZQPX0000000000000000A2", () => {
       entries[MADE] = { name: "Scout", thinkingDefault: "ultra" };
     });
-    assert.deepEqual(puts.map(([agentId, body]) => [agentId, body["effort"], body["own"]]), [["agt_scout", "ultra", true]]);
+    assert.deepEqual(puts.map(([agentId, body]) => [agentId, body["effort"], body["own"]]), [["agt_01K4ZQPX0000000000000000SC", "ultra", true]]);
   });
 
   it("sends a made agent's once Chips has it", async () => {

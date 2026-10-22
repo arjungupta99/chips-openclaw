@@ -28,6 +28,15 @@ harness's bridge would be (Chips's `docs/proposals/open-source-harnesses-plan.md
 | `scripts/uninstall.sh` | take it all away and prove it |
 | `bridge/` | the bridge between OpenClaw and Chips (Phase 4 of the plan) |
 
+## From Chips's gallery
+
+The card's line is `chips connect openclaw '<link>'` (Chips ADR 0218). It downloads this bridge as the npm package
+`@chipschat/openclaw`, the newest 1.x, checks it against the registry's checksum, and runs it on the Node
+that Chips carries, so the machine needs no Node or npm of its own. The bridge checks OpenClaw,
+joins, and keeps itself running from login. `chips disconnect openclaw` stops it. The package bundles OpenClaw's own client, so Chips carries nothing of OpenClaw. On another computer,
+`curl -fsSL https://chipschat.ai/install | sh -s -- connect openclaw '<link>'` installs Chips there
+first. The steps below run the bridge from this checkout instead, to work on it.
+
 ## Your own OpenClaw
 
 The bridge serves an OpenClaw installed on this machine as well as the test rig below (Chips's
@@ -69,15 +78,20 @@ the SDK's `join()` (Chips ADR 0122), keeps the key the SDK is handed, writes the
 `bridge/joined.env`, starts, and says hello in its room once. After that, `npm start` comes back to
 the same Chips with the same key, and a new link from Chips replaces it; a token in the environment
 (`scripts/bridge.sh start live`) still wins, and says no hello. On the rig the bridge is
-`scripts/bridge.sh`'s to start and stop, not `npm run keep`'s. A package an agent could fetch
-(`@chipschat/openclaw`) waits for publishing, which nothing here is yet.
+`scripts/bridge.sh`'s to start and stop, not `npm run keep`'s. `npm run release` in `bridge/`
+builds `dist/main.js`, one file with the SDK and OpenClaw's client bundled in, and
+`dist/THIRD-PARTY-NOTICES.md` with their MIT notices; runs the tests; and packs
+`chipschat-openclaw-<version>.tgz`, which `npm publish` publishes as `@chipschat/openclaw`. A
+version's major is the Chips protocol it speaks, and Chips's card names it (Chips ADR 0218).
 
 `npm run e2e` in `bridge/` runs the card as a person with their own OpenClaw runs it, against a
 scratch Chips from a Chips checkout (`CHIPS_REPO`, `~/Work/Chips/chips-main` unless set; skipped without one)
 and a fake gateway (`bridge/test/fake-gateway.ts`): each thing not set up stops it with the link still good; then it
 joins with what the card grants, says hello once, says nothing more started again, and takes up a
 new link in place of the key it kept. The scratch Chips, the link and the run come from Chips's
-`tools/connect-kit`; `npm test` there runs the bridge's own tests.
+`tools/connect-kit`, which packs the bridge and serves it from a stand-in npm registry, so the card's
+`chips connect` downloads, checks and runs what would be published; `npm test` there runs the
+bridge's own tests.
 
 ## Where things are kept
 

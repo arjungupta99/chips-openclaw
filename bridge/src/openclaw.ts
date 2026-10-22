@@ -65,7 +65,7 @@ export class OpenClaw {
       token: options.token,
       clientName: "gateway-client",
       clientDisplayName: "Chips bridge",
-      clientVersion: "0.1.0",
+      clientVersion: "1.0.0",
       mode: "backend",
       platform: "macos",
       role: "operator",

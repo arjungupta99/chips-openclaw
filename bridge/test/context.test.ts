@@ -186,8 +186,8 @@ describe("the copy Chips holds", () => {
     folder(MADE).set("SOUL.md", "who");
     folder(MADE).set("IDENTITY.md", IDENTITY("Scout"));
     folder(MADE).set("BOOTSTRAP.md", "who am I?");
-    await contexts.agent("agt_scout", MADE);
-    assert.deepEqual(puts.map(([owner]) => owner), [{ agentId: "agt_scout" }]);
+    await contexts.agent("agt_01K4ZQPX0000000000000000SC", MADE);
+    assert.deepEqual(puts.map(([owner]) => owner), [{ agentId: "agt_01K4ZQPX0000000000000000SC" }]);
     assert.deepEqual(shown(puts[0]?.[1]), [
       ["SOUL.md", "Who it is", "identity"],
       ["IDENTITY.md", "Identity", "identity"],
@@ -196,11 +196,11 @@ describe("the copy Chips holds", () => {
 
   it("sends a copy again only when a file moved", async () => {
     folder(MADE).set("SOUL.md", "who");
-    await contexts.agent("agt_scout", MADE);
-    await contexts.agent("agt_scout", MADE);
+    await contexts.agent("agt_01K4ZQPX0000000000000000SC", MADE);
+    await contexts.agent("agt_01K4ZQPX0000000000000000SC", MADE);
     assert.equal(puts.length, 1);
     folder(MADE).set("MEMORY.md", "Arjun likes short answers.");
-    await contexts.agent("agt_scout", MADE);
+    await contexts.agent("agt_01K4ZQPX0000000000000000SC", MADE);
     assert.equal(puts.length, 2);
     assert.deepEqual(shown(puts[1]?.[1]).at(-1), ["MEMORY.md", "Memory", "memory"]);
   });
@@ -233,7 +233,7 @@ describe("the copy Chips holds", () => {
 describe("a person's edit from Chips", () => {
   const ask = (more: Record<string, unknown> = {}) => ({
     edit_id: EDIT,
-    agent_id: "agt_scout",
+    agent_id: "agt_01K4ZQPX0000000000000000SC",
     name: "SOUL.md",
     text: "Plain and careful.",
     base_hash: sha("who"),
@@ -252,7 +252,7 @@ describe("a person's edit from Chips", () => {
     });
     assert.equal(folder(MADE).get("SOUL.md"), "Plain and careful.");
     const [owner, body] = puts.at(-1) ?? [];
-    assert.deepEqual(owner, { agentId: "agt_scout" });
+    assert.deepEqual(owner, { agentId: "agt_01K4ZQPX0000000000000000SC" });
     assert.equal(body?.["answers"], EDIT);
     assert.equal((body?.["files"] as Record<string, unknown>[])[0]?.["hash"], sha("Plain and careful."));
   });
@@ -307,7 +307,7 @@ describe("the bridge keeps the copies current", () => {
     agents: async () => agents,
     registerAgent: async (wanted) => {
       registered.push({ ...wanted });
-      const agent = { ...agentIn(`agt_${registered.length}`, wanted.key, wanted.space_id ?? null, wanted.name), lead: wanted.lead === true };
+      const agent = { ...agentIn(`agt_01K4ZQPX0000000000000000A${registered.length}`, wanted.key, wanted.space_id ?? null, wanted.name), lead: wanted.lead === true };
       agents = [...agents, agent];
       return { ...agent, attached: true };
     },
@@ -323,7 +323,7 @@ describe("the bridge keeps the copies current", () => {
   const session = `agent:${MADE}:chips-${ROOM.toLowerCase()}`;
 
   beforeEach(() => {
-    agents = [agentIn("agt_scout", session, ROOM, "Scout"), agentIn("agt_main", "main", null, "OpenClaw")];
+    agents = [agentIn("agt_01K4ZQPX0000000000000000SC", session, ROOM, "Scout"), agentIn("agt_01K4ZQPX0000000000000000MN", "main", null, "OpenClaw")];
     registered = [];
     bridge = new Bridge(chips, claw, { harnessId: ME, agent: "main" }, () => undefined, undefined, Date.now, undefined, contexts);
     handle = (frame) => bridge.onContextEdit(frame);
@@ -333,7 +333,7 @@ describe("the bridge keeps the copies current", () => {
   it("sends the harness's own, each agent it made and the Main agent at start, and none other", async () => {
     await bridge.adoptAgents({ defaultId: "main", agents: [{ id: "main" }] });
     await bridge.sendContexts();
-    assert.deepEqual(puts.map(([owner]) => owner), ["harness", { agentId: "agt_scout" }, { agentId: "agt_1" }]);
+    assert.deepEqual(puts.map(([owner]) => owner), ["harness", { agentId: "agt_01K4ZQPX0000000000000000SC" }, { agentId: "agt_01K4ZQPX0000000000000000A1" }]);
     // The Main agent's files are the primary agent's.
     const soul = (puts[2]?.[1]["files"] as Record<string, unknown>[]).find((each) => each["name"] === "SOUL.md");
     assert.equal(soul?.["text"], folder("main").get("SOUL.md"));
@@ -343,7 +343,7 @@ describe("the bridge keeps the copies current", () => {
     await bridge.onChips({ type: "agent.asked", id: "evt_01K4ZQPX0000000000000000N1", ts: new Date().toISOString(), space_id: ROOM, harness_id: ME, name: "Reviewer", by: ARJUN });
     await bridge.settled();
     const [owner, body] = puts.at(-1) ?? [];
-    assert.deepEqual(owner, { agentId: "agt_1" });
+    assert.deepEqual(owner, { agentId: "agt_01K4ZQPX0000000000000000A1" });
     const identity = (body?.["files"] as Record<string, unknown>[]).find((each) => each["name"] === "IDENTITY.md");
     assert.equal(identity?.["about"], "Name: Reviewer");
   });
@@ -352,7 +352,7 @@ describe("the bridge keeps the copies current", () => {
     await bridge.adoptAgents({ defaultId: "main", agents: [{ id: "main" }] });
     await bridge.sendContexts();
     puts = [];
-    await bridge.onChips({ type: "agent.updated", agent_id: "agt_scout", name: "Juniper" });
+    await bridge.onChips({ type: "agent.updated", agent_id: "agt_01K4ZQPX0000000000000000SC", name: "Juniper" });
     await bridge.settled();
     assert.equal(puts.length, 1);
     const identity = (puts[0]?.[1]["files"] as Record<string, unknown>[]).find((each) => each["name"] === "IDENTITY.md");
@@ -364,7 +364,7 @@ describe("the bridge keeps the copies current", () => {
     await bridge.sendContexts();
     puts = [];
     const turn = async (id: string, change?: () => void): Promise<void> => {
-      await bridge.onChips({ type: "message.new", space_id: ROOM, message_id: id, from: { participant_id: ARJUN, kind: "person" }, text: "Remember this", addressed_to: ["agt_scout"], for: ["agt_scout"] });
+      await bridge.onChips({ type: "message.new", space_id: ROOM, message_id: id, from: { participant_id: ARJUN, kind: "person" }, text: "Remember this", addressed_to: ["agt_01K4ZQPX0000000000000000SC"], for: ["agt_01K4ZQPX0000000000000000SC"] });
       const runId = `${id}:${MADE}`;
       bridge.onClaw({ event: "chat", payload: { runId, sessionKey: session, seq: 1, state: "status" } });
       change?.();
@@ -374,21 +374,21 @@ describe("the bridge keeps the copies current", () => {
     await turn("msg_01K4ZQPX0000000000000000A1");
     assert.equal(puts.length, 0);
     await turn("msg_01K4ZQPX0000000000000000A2", () => folder(MADE).set("MEMORY.md", "Short answers."));
-    assert.deepEqual(puts.map(([owner]) => owner), [{ agentId: "agt_scout" }]);
+    assert.deepEqual(puts.map(([owner]) => owner), [{ agentId: "agt_01K4ZQPX0000000000000000SC" }]);
   });
 
   it("saves an edit in the folder of the agent it is for, and the harness's in the primary agent's", async () => {
     await bridge.adoptAgents({ defaultId: "main", agents: [{ id: "main" }] });
-    await settings.hear({ frame: "context.edit", edit_id: EDIT, harness_id: ME, agent_id: "agt_scout", name: "SOUL.md", text: "Careful.", base_hash: sha("who"), asked_by: ARJUN, asked_at: "2026-10-07T20:00:00.000Z" });
+    await settings.hear({ frame: "context.edit", edit_id: EDIT, harness_id: ME, agent_id: "agt_01K4ZQPX0000000000000000SC", name: "SOUL.md", text: "Careful.", base_hash: sha("who"), asked_by: ARJUN, asked_at: "2026-10-07T20:00:00.000Z" });
     assert.equal(folder(MADE).get("SOUL.md"), "Careful.");
     await settings.hear({ frame: "context.edit", edit_id: EDIT, harness_id: ME, name: "SOUL.md", text: "Main's.", base_hash: sha("# SOUL.md - Who You Are\n\n_You're not a chatbot._"), asked_by: ARJUN, asked_at: "2026-10-07T20:00:00.000Z" });
     assert.equal(folder("main").get("SOUL.md"), "Main's.");
     // The Main agent's are the primary agent's too.
-    await settings.hear({ frame: "context.edit", edit_id: EDIT, harness_id: ME, agent_id: "agt_1", name: "SOUL.md", text: "The Main agent's.", base_hash: sha("Main's."), asked_by: ARJUN, asked_at: "2026-10-07T20:00:00.000Z" });
+    await settings.hear({ frame: "context.edit", edit_id: EDIT, harness_id: ME, agent_id: "agt_01K4ZQPX0000000000000000A1", name: "SOUL.md", text: "The Main agent's.", base_hash: sha("Main's."), asked_by: ARJUN, asked_at: "2026-10-07T20:00:00.000Z" });
     assert.equal(folder("main").get("SOUL.md"), "The Main agent's.");
     // An agent with no OpenClaw agent of its own is not answered; Chips says the edit was missed.
     puts = [];
-    await settings.hear({ frame: "context.edit", edit_id: EDIT, harness_id: ME, agent_id: "agt_main", name: "SOUL.md", text: "x", base_hash: sha("x"), asked_by: ARJUN, asked_at: "2026-10-07T20:00:00.000Z" });
+    await settings.hear({ frame: "context.edit", edit_id: EDIT, harness_id: ME, agent_id: "agt_01K4ZQPX0000000000000000MN", name: "SOUL.md", text: "x", base_hash: sha("x"), asked_by: ARJUN, asked_at: "2026-10-07T20:00:00.000Z" });
     assert.deepEqual(puts, []);
   });
 });

@@ -146,7 +146,7 @@ export class Chips {
     return connect({
       url: options.url,
       token: options.token,
-      client: { name: "chips-openclaw-bridge", version: "0.1.0" },
+      client: { name: "chips-openclaw-bridge", version: "1.0.0" },
       ...(this.cursor === undefined ? {} : { since: this.cursor }),
       ...(options.onRestart === undefined
         ? {}
