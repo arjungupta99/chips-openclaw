@@ -5,7 +5,7 @@
 set -euo pipefail
 . "$(dirname "$0")/lib.sh"
 
-CHIPS_REPO="${CHIPS_REPO:-$HOME/Work/Chips}"
+CHIPS_REPO="${CHIPS_REPO:-$HOME/Work/Chips/chips-main}"
 DATA="$DIR/chips"
 PIDFILE="$DATA/chipsd.pid"
 SCRATCH_PORT=4436

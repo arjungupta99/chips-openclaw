@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # The Chips SDK the bridge is built on, packed from a Chips checkout and installed:
-#   vendor.sh [path to Chips]        (~/Work/Chips unless given)
+#   vendor.sh [path to Chips]        (~/Work/Chips/chips-main unless given)
 #
 # Chips's `pnpm release:sdk` builds @chipschat/protocol, @chipschat/harness and @chipschat/conformance and packs
 # them into bridge/vendor/, which package.json names as file: dependencies. npm keeps a tarball it
@@ -8,7 +8,7 @@
 # the new tarballs installed in their place. Nothing is published (Chips's ruling of 5 October 2026).
 set -euo pipefail
 
-CHIPS="${1:-$HOME/Work/Chips}"
+CHIPS="${1:-$HOME/Work/Chips/chips-main}"
 BRIDGE="$(cd "$(dirname "$0")/../bridge" && pwd)"
 
 (cd "$CHIPS" && pnpm release:sdk "$BRIDGE/vendor")

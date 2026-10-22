@@ -35,7 +35,7 @@ setup audit HS-7). With OpenClaw set up (`openclaw onboard`) and its gateway run
 gallery card (Chips ADR 0171; **Agents → Add an agent → OpenClaw**) gives this line, run once:
 
 ```sh
-cd ~/Work/chips-openclaw/bridge && npm install && CHIPS_JOIN_LINK='<link>' npm run keep
+cd ~/Work/Chips/chips-openclaw/bridge && npm install && CHIPS_JOIN_LINK='<link>' npm run keep
 ```
 
 Before it takes the link up, which works once, it reads OpenClaw's own `~/.openclaw/openclaw.json`
@@ -73,7 +73,7 @@ the same Chips with the same key, and a new link from Chips replaces it; a token
 (`@chipschat/openclaw`) waits for publishing, which nothing here is yet.
 
 `npm run e2e` in `bridge/` runs the card as a person with their own OpenClaw runs it, against a
-scratch Chips from a Chips checkout (`CHIPS_REPO`, `~/Work/Chips` unless set; skipped without one)
+scratch Chips from a Chips checkout (`CHIPS_REPO`, `~/Work/Chips/chips-main` unless set; skipped without one)
 and a fake gateway (`bridge/test/fake-gateway.ts`): each thing not set up stops it with the link still good; then it
 joins with what the card grants, says hello once, says nothing more started again, and takes up a
 new link in place of the key it kept. The scratch Chips, the link and the run come from Chips's
