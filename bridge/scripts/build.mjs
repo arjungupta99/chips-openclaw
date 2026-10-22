@@ -3,7 +3,7 @@
  * The bridge as one file, the way `chips connect` runs it (Chips ADR 0218): `dist/main.js` with
  * everything it imports bundled in, so the package has no dependencies to install, and
  * `dist/THIRD-PARTY-NOTICES.md` with the licence of each package that went into it. The same file
- * in each Chips bridge.
+ * in each Chips bridge, but for `wsByImport`, which only OpenClaw's client needs.
  */
 
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -12,6 +12,29 @@ import { fileURLToPath } from "node:url";
 import { build } from "esbuild";
 
 const here = join(dirname(fileURLToPath(import.meta.url)), "..");
+
+/**
+ * OpenClaw's gateway client finds `ws` as it runs, by a path beside it in node_modules
+ * (`require.resolve("ws/package.json")`), and a bundle has no node_modules. Here it is handed `ws`
+ * by an import instead, so `ws` goes into the bundle with it. A client that stops finding it that
+ * way fails this build, rather than a person's `chips connect`.
+ */
+const wsByImport = {
+  name: "ws-by-import",
+  setup(build) {
+    build.onLoad({ filter: /@openclaw[\\/]gateway-client[\\/]dist[\\/]index\.mjs$/ }, (args) => {
+      const source = readFileSync(args.path, "utf8");
+      const lookup =
+        /const wsPackageRoot = [^\n]*\nconst WebSocket = require\([^\n]*\);\n(?:require\([^\n]*\);\n)*/;
+      if (!lookup.test(source)) {
+        throw new Error(
+          "@openclaw/gateway-client no longer finds ws the way this build hands it over: read its websocket.ts again.",
+        );
+      }
+      return { contents: source.replace(lookup, 'import WebSocket from "ws";\n'), loader: "js" };
+    });
+  },
+};
 const own = JSON.parse(readFileSync(join(here, "package.json"), "utf8"));
 
 const built = await build({
@@ -29,6 +52,7 @@ const built = await build({
       "const require = __bridgeRequire(import.meta.url);",
     ].join("\n"),
   },
+  plugins: [wsByImport],
   metafile: true,
   logLevel: "warning",
 });
