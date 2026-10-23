@@ -468,3 +468,21 @@ describe("the bridge keeps the models current", () => {
     assert.equal(body?.["editable"], true);
   });
 });
+
+describe("a fork's copy", () => {
+  const COPY = "chips-01k4zqpx0000000000000fork";
+
+  it("runs on its original's own model and level, written into its entry", async () => {
+    entries[MADE] = { name: "Scout", model: "openai/gpt-5.6-luna", thinkingDefault: "low" };
+    entries[COPY] = { name: "Scout · fork" };
+    assert.equal(await models.inherit(MADE, COPY), true);
+    assert.deepEqual(entries[COPY], { name: "Scout · fork", model: "openai/gpt-5.6-luna", thinkingDefault: "low" });
+  });
+
+  it("stays on the defaults when its original has no model of its own", async () => {
+    entries[COPY] = { name: "Scout · fork" };
+    assert.equal(await models.inherit(MADE, COPY), false);
+    assert.deepEqual(entries[COPY], { name: "Scout · fork" });
+    assert.equal(calls.some(([method]) => method === "config.patch"), false);
+  });
+});

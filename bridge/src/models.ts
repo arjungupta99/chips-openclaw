@@ -280,7 +280,7 @@ export class Models {
   async change(frame: ChangeFrame, whose: Whose): Promise<Payload> {
     if (!whose.changeable) throw new Refuse(READ_ONLY_WHY, await this.read(whose).catch(() => undefined));
     try {
-      await this.write(whose.clawAgent, frame);
+      await this.write(patchOf(whose.clawAgent, frame));
     } catch (error) {
       const message = String((error as Error)?.message ?? error).slice(0, MESSAGE_MAX);
       this.log(`openclaw: ${whose.clawAgent}'s model not changed from Chips: ${message}`);
@@ -299,14 +299,31 @@ export class Models {
     });
   }
 
+  /**
+   * A fork's copy runs on what its original runs on (Chips ADR 0087): the original's own model and
+   * level, where it has either, written into the copy's entry, since a turn goes by its agent's entry
+   * and not by the session it was forked into. An original on the defaults leaves the copy on them.
+   * True when the copy was given any.
+   */
+  async inherit(from: string, to: string): Promise<boolean> {
+    const config = await this.claw.request<{ config?: { agents?: { entries?: Record<string, ClawSetting> } } }>("config.get", {});
+    const own = config.config?.agents?.entries?.[from];
+    if (own?.model === undefined && own?.thinkingDefault === undefined) return false;
+    const entry = {
+      ...(own.model === undefined ? {} : { model: own.model }),
+      ...(own.thinkingDefault === undefined ? {} : { thinkingDefault: own.thinkingDefault }),
+    };
+    await this.write(JSON.stringify({ agents: { entries: { [to]: entry } } }));
+    return true;
+  }
+
   /** Every read and send asked for so far, done; for the tests and for a clean stop. */
   async settled(): Promise<void> {
     await Promise.all(this.chains.values());
   }
 
-  /** The agent's entry patched from the config as it is now, read again if it moved meanwhile. */
-  private async write(clawAgent: string, frame: ChangeFrame): Promise<void> {
-    const raw = patchOf(clawAgent, frame);
+  /** An agent's entry patched (`raw`) from the config as it is now, read again if it moved meanwhile. */
+  private async write(raw: string): Promise<void> {
     for (let attempt = 1; ; attempt += 1) {
       const { hash } = await this.claw.request<{ hash?: string }>("config.get", {});
       try {

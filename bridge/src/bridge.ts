@@ -1135,6 +1135,10 @@ export class Bridge {
     }
     if (!copied) this.log(`openclaw: ${original.name}'s folder was not there to copy: its copy begins as a new agent's does`);
     if (!(await this.makeClawAgent(clawAgent))) return undefined;
+    // A turn goes by its agent's model, not the forked session's: the copy runs on what the original does.
+    await this.models?.inherit(source.clawAgent, clawAgent).catch((error: unknown) => {
+      this.log(`openclaw: ${wanted.name} runs on OpenClaw's default, not ${original.name}'s model: ${String(error)}`);
+    });
     let remembers: boolean;
     try {
       remembers = await this.forkSession(key, clawAgent, source.sessionKey, wanted.name);
