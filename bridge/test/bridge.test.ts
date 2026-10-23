@@ -13,6 +13,7 @@ import {
   type FilesPort,
   forkName,
   heardIn,
+  replyingIn,
   spentIn,
   textOf,
   titleFrom,
@@ -341,6 +342,51 @@ describe("rooms and sessions", () => {
     assert.equal(calls.length, 0);
     await bridge.onChips(said("@OpenClaw and the build?", { message_id: "msg_01K4ZQPX0000000000000000A2" }));
     assert.equal(calls.find(([method]) => method === "chat.send")?.[1]["message"], told("@OpenClaw and the build?"));
+  });
+
+  it("tells the turn the message a reply answers, after what was said and before the words (Chips ADR 0219)", async () => {
+    const tuesday = "2026-10-20T21:14:00.000Z";
+    await bridge.onChips(
+      said("Make it 8 people", {
+        message_id: "msg_01K4ZQPX0000000000000000A2",
+        addressed_to: [ME],
+        ts: "2026-10-22T18:00:00.000Z",
+        context: {
+          lines: [{ seq: 60, kind: "said", from: { id: ARJUN.participant_id, kind: "person", name: "Arjun" }, text: "Order the chocolate one", addressed_to: [] }],
+          since_seq: 50,
+          truncated: false,
+          before: 60,
+        },
+        reply_to: "msg_01K4ZQPX0000000000000000A0",
+        replying_to: {
+          seq: 41,
+          at: tuesday,
+          kind: "said",
+          from: { id: ME, kind: "harness", name: "OpenClaw" },
+          message_id: "msg_01K4ZQPX0000000000000000A0",
+          text: "Held for 6 at 7:30.",
+          before: [{ seq: 40, at: tuesday, kind: "said", from: { id: ARJUN.participant_id, kind: "person", name: "Arjun" }, text: "Hold Foreign Cinema" }],
+        },
+      }),
+    );
+    const send = calls.find(([method]) => method === "chat.send")?.[1];
+    const message = String(send?.["message"] ?? "");
+    assert.match(
+      message,
+      /Said in this room since you last spoke:\nArjun: Order the chocolate one\n\nArjun is replying to your message from .+\.\nSaid just before it:\nArjun: Hold Foreign Cinema\nYour message:\n> Held for 6 at 7:30\.\n\nMake it 8 people$/,
+    );
+  });
+
+  it("writes the message a reply answers as Chips's SDK does, from where the taker stands (Chips ADR 0219)", () => {
+    const reply = (extra: Record<string, unknown>) =>
+      said("Make it 8 people", {
+        ts: "2026-10-22T18:00:00.000Z",
+        replying_to: { seq: 41, at: "2026-10-22T16:12:00.000Z", kind: "said", from: { id: ME, kind: "harness", name: "OpenClaw" }, message_id: "msg_01K4ZQPX0000000000000000A0", text: "Booked", ...extra },
+      });
+    assert.match(replyingIn(reply({}), ME), /^Arjun is replying to your message from today at \d{1,2}:\d{2} [AP]M\.\nYour message:\n> Booked$/);
+    assert.match(replyingIn(reply({}), "agt_other"), /OpenClaw's message:\n> Booked$/);
+    assert.match(replyingIn(reply({ deleted: true, text: undefined }), ME), /, which has since been deleted\.$/);
+    assert.equal(replyingIn(said("no reply"), ME), "");
   });
 
   it("puts what Chips handed over ahead of the turn (Chips ADR 0088)", async () => {

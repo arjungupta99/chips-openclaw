@@ -77,7 +77,7 @@
  * same event and Chips answers it as a duplicate.
  */
 
-import { Refuse } from "@chipschat/harness";
+import { Refuse, renderReplyingTo } from "@chipschat/harness";
 import { type ChipsAgent, type ChipsEvent, ChipsRefusal, type NewAgent, type Placed, type Taken } from "./chips.ts";
 import { chipsId } from "./ids.ts";
 import { type Media, mediaLinesIn, sentWithTool } from "./media.ts";
@@ -350,6 +350,23 @@ function tookTurn(each: unknown, own: (participantId: string) => boolean): boole
     line["kind"] === "said" &&
     (!Array.isArray(addressed) || (addressed as unknown[]).some((id) => typeof id === "string" && own(id)))
   );
+}
+
+/**
+ * The message a reply answers (Chips ADR 0219), in the words Chips's SDK writes it with: whose
+ * message and when, the lines said just before it when Chips handed them, and the message quoted.
+ * `taker` is who the turn is said as, so its own message reads "your message". Nothing when the
+ * message answers none.
+ */
+export function replyingIn(event: ChipsEvent, taker: string): string {
+  const quoted = event["replying_to"] as Payload | undefined;
+  const from = event["from"] as Payload | undefined;
+  if (typeof quoted !== "object" || quoted === null || typeof quoted["from"] !== "object" || typeof quoted["at"] !== "string") return "";
+  return renderReplyingTo(quoted as unknown as Parameters<typeof renderReplyingTo>[0], {
+    sender: { id: String(from?.["participant_id"] ?? ""), name: str(from?.["display_name"]) ?? "Someone" },
+    taker,
+    at: str(event["ts"]),
+  });
 }
 
 /** A context's lines, or none. */
@@ -1986,7 +2003,10 @@ export class Bridge {
       // Chips's note on the room comes first, ahead of what was said and the words (ADR 0092), and
       // Chips's own word to the agent ahead of that (the referee).
       const note = noteFor(event, taker.agentId ?? this.self.harnessId);
-      const message = this.withOverheard(agentSaid ? fromAgent(from, text, note !== undefined) : text, event["context"], {
+      // The message the words reply to, between what was said and the words (Chips ADR 0219).
+      const replying = replyingIn(event, agentId ?? this.self.harnessId);
+      const said = agentSaid ? fromAgent(from, text, note !== undefined) : text;
+      const message = this.withOverheard(replying === "" ? said : `${replying}\n\n${said}`, event["context"], {
         caughtUp,
         missed,
         fresh,
