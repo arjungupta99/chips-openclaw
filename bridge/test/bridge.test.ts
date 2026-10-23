@@ -4,6 +4,7 @@
  */
 
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { afterEach, beforeEach, describe, it } from "node:test";
 import {
   Bridge,
@@ -29,6 +30,9 @@ import { join } from "node:path";
 import { Automations, SPEAKING_LATER } from "../src/automations.ts";
 import { rootsFor } from "../src/media.ts";
 import { workspacesIn } from "../src/own-agents.ts";
+import { projectsIn } from "../src/project.ts";
+import { type FakeChips, startFakeChips } from "@chipschat/conformance";
+import { connect } from "@chipschat/harness";
 
 /**
  * A turn's words as a room sends them: behind how a file reaches the room (Chips AW-19) and how to
@@ -2400,6 +2404,101 @@ describe("an OpenClaw agent of its own for each agent Chips asks for", () => {
     await bridge.settled();
     assert.deepEqual(sent.map((event) => event.type), ["run.started", "run.failed"]);
     assert.equal(calls.filter(([method]) => method === "chat.send").length, 3);
+  });
+});
+
+describe("the room's project (Chips ADR 0221)", () => {
+  /** Nova, an agent the bridge made, in the fake Chips's room; that Chips serves the room's project. */
+  const NOVA = "chips-01k4zqpx0000000000000000n1";
+  let sandbox: string;
+  let logged: string[];
+  let fake: FakeChips;
+  let nova: string;
+  let room: string;
+  const copy = (): string => join(sandbox, "state", "chips", NOVA, "room");
+  const novaKey = (): string => `agent:${NOVA}:chips-${room.toLowerCase()}`;
+  const sends = (): Record<string, unknown>[] => calls.filter(([method]) => method === "chat.send").map(([, params]) => params);
+  const forNova = (text: string, id = "msg_01K4ZQPX0000000000000000A1"): ChipsEvent =>
+    said(text, { space_id: room, message_id: id, addressed_to: [nova], for: [nova] });
+  const ends = (runId: unknown, message: string): void =>
+    bridge.onClaw({ event: "chat", payload: { runId, sessionKey: novaKey(), seq: 1, state: "final", message } });
+
+  beforeEach(async () => {
+    sandbox = mkdtempSync(join(tmpdir(), "bridge-project-"));
+    logged = [];
+    fake = await startFakeChips({ capabilities: ["agents"], harnessName: "OpenClaw" });
+    const client = await connect({ url: fake.address.url, token: fake.address.token });
+    nova = (await client.agents.list()).find((each) => each.key === fake.address.harnessId)?.agentId ?? "";
+    client.close();
+    room = fake.address.spaceId;
+    agents = [agentIn("agt_main", "agent:main:chips-main", MAIN_ROOM), agentIn(nova, novaKey(), room, "Nova")];
+    clawAgents = [{ id: "main" }, { id: NOVA, name: "Nova" }];
+    const roots = rootsFor(sandbox);
+    const log = (line: string): number => logged.push(line);
+    bridge = new Bridge(
+      chips,
+      claw,
+      { harnessId: ME, agent: "main" },
+      log,
+      undefined,
+      Date.now,
+      workspacesIn(roots),
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      new Automations(),
+      projectsIn(roots, fake.address, log),
+    );
+    await bridge.adoptAgents({ defaultId: "main", agents: [{ id: "main" }, { id: NOVA, name: "Nova" }] });
+    calls = [];
+  });
+
+  afterEach(async () => {
+    await fake.close();
+    rmSync(sandbox, { recursive: true, force: true });
+  });
+
+  it("hands an agent the bridge made its copy at the container's path, and sends what it changed before its words", async () => {
+    await bridge.onChips(forNova("start the notes"));
+    const first = sends()[0];
+    assert.ok(
+      String(first?.["message"]).includes(
+        `The room's project is a git repository. Your copy is /home/node/.openclaw/chips/${NOVA}/room (0 files), brought up to date just now.`,
+      ),
+      String(first?.["message"]),
+    );
+    // The agent writes in the container; the files are this Mac's, under OpenClaw's state.
+    writeFileSync(join(copy(), "notes.md"), "One sentence.\n");
+    let pushedFirst = false;
+    refusePost = () => {
+      pushedFirst = logged.some((line) => line.startsWith("Nova's project: sent "));
+      return undefined;
+    };
+    ends(first?.["idempotencyKey"], "Started the notes.");
+    await bridge.settled();
+    const changed = await fake.waitFor((event) => (event.type === "project.changed" ? event : undefined), 3000);
+    assert.equal(changed.payload["by"], nova);
+    assert.equal(changed.payload["message"], "Started the notes.");
+    assert.deepEqual(changed.payload["files"], [{ path: "notes.md", added: 1, removed: 0 }]);
+    assert.ok(pushedFirst, "sent before the words were posted");
+  });
+
+  it("leaves the copy alone while a turn of the agent's runs, which the words join", async () => {
+    await bridge.onChips(forNova("start the notes"));
+    const first = sends()[0];
+    bridge.onClaw({ event: "chat", payload: { runId: first?.["idempotencyKey"], sessionKey: novaKey(), seq: 1, state: "delta", message: "Writing" } });
+    writeFileSync(join(copy(), "notes.md"), "Half a sentence");
+    await bridge.onChips(forNova("and a second line", "msg_01K4ZQPX0000000000000000A2"));
+    assert.doesNotMatch(String(sends()[1]?.["message"]), /The room's project/);
+    // Not committed, nor the copy moved, under the turn that is writing it.
+    assert.equal(execFileSync("git", ["status", "--porcelain"], { cwd: copy(), encoding: "utf8" }), "?? notes.md\n");
+  });
+
+  it("gives the primary agent, whose folder is every room's, no project", async () => {
+    await bridge.onChips(said("hello"));
+    assert.doesNotMatch(String(sends()[0]?.["message"]), /The room's project/);
+    assert.equal(existsSync(join(sandbox, "state", "workspace", "room")), false);
   });
 });
 

@@ -25,7 +25,7 @@
 import { constants } from "node:fs";
 import { copyFile, cp, mkdir, rm, rmdir } from "node:fs/promises";
 import { join, posix } from "node:path";
-import type { MediaRoots } from "./media.ts";
+import { type MediaRoots, macPathOf } from "./media.ts";
 
 /** What every OpenClaw agent the bridge makes is called first, and nothing else is. */
 export const MADE_PREFIX = "chips-";
@@ -68,8 +68,7 @@ export interface Workspaces {
 
 /** Folders under OpenClaw's state, which is mounted from this Mac (`media.ts`). */
 export function workspacesIn(roots: MediaRoots): Workspaces {
-  const onMac = (path: string): string =>
-    join(roots.stateDir, ...posix.relative(roots.gatewayStateDir, path).split("/"));
+  const onMac = (path: string): string => macPathOf(roots, path);
   const of = (agent: string): string => posix.join(roots.gatewayStateDir, "chips", agent);
   return {
     of,

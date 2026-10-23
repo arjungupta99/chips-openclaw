@@ -11,7 +11,7 @@ import { rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { AgentContextCopy, AgentContextWindowCopy, AgentHeartbeatCopy, AgentModelCopy } from "@chipschat/harness";
-import { JoinError, reportStep } from "@chipschat/harness";
+import { checkGit, JoinError, reportStep } from "@chipschat/harness";
 import { Automations } from "./automations.ts";
 import { Bridge } from "./bridge.ts";
 import { Chips, type ChipsEvent } from "./chips.ts";
@@ -23,6 +23,7 @@ import { Models } from "./models.ts";
 import { health } from "./health.ts";
 import { readMedia } from "./media.ts";
 import { workspacesIn } from "./own-agents.ts";
+import { projectsIn } from "./project.ts";
 import { OpenClaw } from "./openclaw.ts";
 import { keepIfAsked, stopIfAsked } from "./keep.ts";
 import { type Restarter, restarter } from "./restart.ts";
@@ -162,6 +163,10 @@ restart = restarter({
 });
 
 const { roots } = config;
+// Each agent the bridge made works on its room's project in a copy of its own (Chips ADR 0221), where git will.
+const git = await checkGit();
+if (!git.ok) log(`rooms' projects are off: ${git.why}`);
+
 bridge = new Bridge(
   chips,
   claw,
@@ -185,6 +190,8 @@ bridge = new Bridge(
   ),
   // Who each automation our agents schedule is for, kept across restarts (Chips ADR 0157).
   new Automations(join(config.stateDir, "automations.json"), log),
+  // The rooms' projects, done with this Mac's git (Chips ADR 0221).
+  git.ok ? projectsIn(roots, { url: config.chipsUrl, token: config.harnessToken }, log) : undefined,
 );
 
 /**

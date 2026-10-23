@@ -64,6 +64,12 @@
  *   answer sends back under one of those names is posted as the next version, naming the version
  *   it was made from (`room-files.ts`). One Chips refuses as made from a stale version is left out
  *   of the post, which says why, and the session's next turn there is told.
+ * - The room's project (Chips ADR 0221): each agent the bridge made works on it in a copy in its
+ *   own folder, `chips/<agent>/room` (`project.ts`). Words sent while none of the session's turns
+ *   runs bring the copy up to date first, and the turn is told of it after Chips's note on the
+ *   room, at the container's path. A turn that ends with none other running in its session has
+ *   what it changed committed under the agent's name and sent, before its words are posted. The
+ *   primary agent and OpenClaw's own work in a folder every room of theirs shares, and have none.
  * - An exec approval becomes an approval card, and the person's answer goes back as allow-once,
  *   allow-always or deny. An `ask_user` question becomes a question card. An ask answered in
  *   OpenClaw's own tools instead is settled in Chips, once, so its card cools (Chips ADR 0079).
@@ -77,7 +83,7 @@
  * same event and Chips answers it as a duplicate.
  */
 
-import { Refuse, renderReplyingTo } from "@chipschat/harness";
+import { type Project, pushedInWords, Refuse, renderReplyingTo } from "@chipschat/harness";
 import { type ChipsAgent, type ChipsEvent, ChipsRefusal, type NewAgent, type Placed, type Taken } from "./chips.ts";
 import { chipsId } from "./ids.ts";
 import { type Media, mediaLinesIn, sentWithTool } from "./media.ts";
@@ -87,6 +93,7 @@ import type { ChangeFrame, Models, Whose as ModelOwner } from "./models.ts";
 import { type ChangeFrame as BeatChange, checkInOf, type Heartbeats } from "./heartbeats.ts";
 import type { CompactFrame, LimitFrame, Session, Windows } from "./windows.ts";
 import { isMadeAgent, madeAgentId, type Workspaces } from "./own-agents.ts";
+import type { Projects } from "./project.ts";
 import { filesLine, namedIn, ROOM_FILES, type RoomFile, roomFilesIn, STALE_FILE, staleIn } from "./room-files.ts";
 import { Automations, committedOf, forPerson, jobOf, jobOfSession, type Person, SPEAKING_LATER } from "./automations.ts";
 
@@ -562,6 +569,13 @@ function noteFor(event: ChipsEvent, takerId: string): string | undefined {
   return note === undefined || note === "" ? undefined : note;
 }
 
+/** Whether a room has agents beside the one taking the turn, from Chips's note on a message (ADR 0092). */
+function othersIn(event: ChipsEvent, takerId: string): boolean {
+  const members = (event["room"] as Payload | undefined)?.["members"];
+  if (!Array.isArray(members)) return false;
+  return (members as Payload[]).some((each) => isAgentKind(each?.["kind"]) && each["participant_id"] !== takerId);
+}
+
 /** A room's people, each by the @ that reaches them, and the handles of everybody in it. */
 interface RoomPeople {
   readonly people: readonly Person[];
@@ -798,6 +812,12 @@ export class Bridge {
   private readonly agentByKey = new Map<string, string>();
   /** The one room each of our agents is in, as Chips last said; null when it is in none. */
   private readonly roomOf = new Map<string, string | null>();
+  /** Our agents' names in Chips, by agent: what their commits to a room's project are signed. */
+  private readonly nameOf = new Map<string, string>();
+  /** The copy of the room's project each session's last turn was handed, and its room (Chips ADR 0221). */
+  private readonly copies = new Map<string, { readonly project: Project; readonly spaceId: string }>();
+  /** Each session's git on its copy, one thing at a time: a turn's pull waits for the last one's push. */
+  private readonly copyWork = new Map<string, Promise<unknown>>();
   /**
    * What Chips handed with an agent put in a room (`agent.attached`'s `catch_up`), for its next
    * turn there; and where each last took a turn, so a catch-up leaves out what it heard already.
@@ -838,6 +858,8 @@ export class Bridge {
     private readonly windows?: Windows,
     /** What our agents schedule, and who each job is for (ADR 0157); kept in memory alone by default. */
     private readonly automations: Automations = new Automations(),
+    /** The rooms' projects our agents work on (Chips ADR 0221); none, and no agent has one. */
+    private readonly projects?: Projects,
   ) {
     this.primary = self.agent;
   }
@@ -1025,6 +1047,7 @@ export class Bridge {
       this.keyOf.set(agent.agent_id, agent.key);
       this.agentByKey.set(agent.key, agent.agent_id);
       this.roomOf.set(agent.agent_id, agent.room !== undefined ? agent.room : (agent.spaces[0] ?? null));
+      this.nameOf.set(agent.agent_id, agent.name);
     }
   }
 
@@ -2003,6 +2026,8 @@ export class Bridge {
       // Chips's note on the room comes first, ahead of what was said and the words (ADR 0092), and
       // Chips's own word to the agent ahead of that (the referee).
       const note = noteFor(event, taker.agentId ?? this.self.harnessId);
+      // And the room's project after it (Chips ADR 0221): the agent's copy, brought up to date.
+      const project = await this.projectFor(event, spaceId, taker, agentId);
       // The message the words reply to, between what was said and the words (Chips ADR 0219).
       const replying = replyingIn(event, agentId ?? this.self.harnessId);
       const said = agentSaid ? fromAgent(from, text, note !== undefined) : text;
@@ -2024,7 +2049,7 @@ export class Bridge {
       const send: Payload = {
         sessionKey: taker.sessionKey,
         // How a file reaches the room, and how to speak in it later (ADR 0157), with every turn.
-        message: [...chips, note, files.line, SPEAKING_LATER, message].filter((part) => part !== undefined).join("\n\n"),
+        message: [...chips, note, project, files.line, SPEAKING_LATER, message].filter((part) => part !== undefined).join("\n\n"),
         idempotencyKey: turn,
         queueMode: "steer",
         ...(sent.length === 0 ? {} : { attachments: sent }),
@@ -2604,6 +2629,12 @@ export class Bridge {
     const forJob = job !== undefined && passed !== "" && !isNoReply(passed);
     if (forJob) this.automations.said(job);
     const text = forJob ? this.forAsker(passed, run.spaceId, this.automations.askerOf(job)) : passed;
+    // What the turn changed in its copy of the room's project is sent before its words (Chips ADR 0221).
+    const pushed = this.sendProject(run, isNoReply(passed) ? "" : passed);
+    this.write(run, async () => {
+      await pushed;
+      return undefined;
+    });
     // No `to`, even for an answer to another harness: it acts on the words only when they @ it.
     // Sending it back by itself kept Jacobian and OpenClaw trading thanks until Chips's guard
     // held the fifth (the live test, 27 September 2026).
@@ -2953,6 +2984,52 @@ export class Bridge {
       ...(expires === undefined ? {} : { timeout_seconds: Math.max(30, Math.round((expires - Date.now()) / 1000)) }),
       idempotency_key: `openclaw-question:${clawId}`,
     });
+  }
+
+  /**
+   * The room's project for a turn (Chips ADR 0221): the copy of one of the agents the bridge made,
+   * brought up to date, and what the turn is told of it. Nothing while a turn of the session's
+   * runs, which these words join: the copy is that turn's to change. None for the primary agent and
+   * OpenClaw's own, whose folder is every room's.
+   */
+  private async projectFor(event: ChipsEvent, spaceId: string, taker: Taker, agentId: string | undefined): Promise<string | undefined> {
+    const { clawAgent, sessionKey } = taker;
+    if (this.projects === undefined || agentId === undefined || !isMadeAgent(clawAgent) || this.turnIn(sessionKey)) return undefined;
+    const name = this.nameOf.get(agentId) ?? clawAgent;
+    const project = this.projects.of({ spaceId, agentId, name, folder: this.workspaces.of(clawAgent) });
+    try {
+      const facts = await this.onCopy(sessionKey, () => project.pull());
+      this.copies.set(sessionKey, { project, spaceId });
+      return this.projects.note(facts, othersIn(event, agentId));
+    } catch (error) {
+      this.log(`${name}'s copy of the room's project couldn't be readied: ${String(error)}`);
+      return undefined;
+    }
+  }
+
+  /**
+   * What a turn changed in its agent's copy of the room's project, committed and sent, begun as the
+   * turn ends so that the session's next pull waits for it. Left while another turn of the session
+   * runs: its end sends both.
+   */
+  private sendProject(run: Run, words: string): Promise<void> {
+    const copy = this.copies.get(run.sessionKey);
+    if (copy === undefined || copy.spaceId !== run.spaceId || this.turnIn(run.sessionKey)) return Promise.resolve();
+    const name = (run.agentId === undefined ? undefined : this.nameOf.get(run.agentId)) ?? run.sessionKey;
+    return this.onCopy(run.sessionKey, async () => {
+      try {
+        this.log(`${name}'s project: ${pushedInWords(await copy.project.push({ words }))}`);
+      } catch (error) {
+        this.log(`${name}'s project couldn't be sent: ${String(error)}`);
+      }
+    });
+  }
+
+  /** One thing done on a session's copy, after what was asked of it before. */
+  private onCopy<T>(sessionKey: string, work: () => Promise<T>): Promise<T> {
+    const next = (this.copyWork.get(sessionKey) ?? Promise.resolve()).then(work);
+    this.copyWork.set(sessionKey, next.catch(() => undefined));
+    return next;
   }
 
   /** The newest run still going in a session, for an ask that does not name its turn. */

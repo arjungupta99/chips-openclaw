@@ -12,7 +12,7 @@
  */
 
 import { readFile, realpath, stat } from "node:fs/promises";
-import { join, posix, sep } from "node:path";
+import { join, posix, relative, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
 /** What one `MEDIA:` reference turned out to be. */
@@ -77,6 +77,16 @@ export function rootsFor(sandbox: string): MediaRoots {
     gatewayWorkspaceDir: "/home/node/.openclaw/workspace",
     stateDir: join(sandbox, "state"),
   };
+}
+
+/** A path under OpenClaw's state as the gateway sees it, on this Mac. */
+export function macPathOf(roots: MediaRoots, path: string): string {
+  return join(roots.stateDir, ...posix.relative(roots.gatewayStateDir, path).split("/"));
+}
+
+/** A path under OpenClaw's state on this Mac, as the gateway sees it. */
+export function gatewayPathOf(roots: MediaRoots, path: string): string {
+  return posix.join(roots.gatewayStateDir, ...relative(roots.stateDir, path).split(sep));
 }
 
 /**
