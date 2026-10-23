@@ -2645,10 +2645,13 @@ export class Bridge {
         run.reply = [text, ...files.notes].filter((part) => part !== "").join("\n\n");
         run.sent = files.names;
         if (run.reply === "" && files.ids.length === 0) return undefined;
+        // The change the turn's push made goes with its words (Chips ADR 0222).
+        const change = await pushed;
         return {
           type: "message.post",
           run_id: run.chipsRun,
           text: run.reply,
+          ...(change === undefined ? {} : { change }),
           ...(files.ids.length === 0 ? {} : { upload_ids: files.ids }),
           // Each file sent back under the name of a room file the session has: the version it was made from.
           ...(Object.keys(files.replaces).length === 0 ? {} : { replaces: files.replaces }),
@@ -3009,18 +3012,22 @@ export class Bridge {
 
   /**
    * What a turn changed in its agent's copy of the room's project, committed and sent, begun as the
-   * turn ends so that the session's next pull waits for it. Left while another turn of the session
-   * runs: its end sends both.
+   * turn ends so that the session's next pull waits for it: the commit it left `main` at, for the
+   * turn's words to carry (Chips ADR 0222), when it sent one. Left while another turn of the
+   * session runs: its end sends both.
    */
-  private sendProject(run: Run, words: string): Promise<void> {
+  private sendProject(run: Run, words: string): Promise<string | undefined> {
     const copy = this.copies.get(run.sessionKey);
-    if (copy === undefined || copy.spaceId !== run.spaceId || this.turnIn(run.sessionKey)) return Promise.resolve();
+    if (copy === undefined || copy.spaceId !== run.spaceId || this.turnIn(run.sessionKey)) return Promise.resolve(undefined);
     const name = (run.agentId === undefined ? undefined : this.nameOf.get(run.agentId)) ?? run.sessionKey;
     return this.onCopy(run.sessionKey, async () => {
       try {
-        this.log(`${name}'s project: ${pushedInWords(await copy.project.push({ words }))}`);
+        const pushed = await copy.project.push({ words });
+        this.log(`${name}'s project: ${pushedInWords(pushed)}`);
+        return pushed.state === "sent" ? pushed.commit : undefined;
       } catch (error) {
         this.log(`${name}'s project couldn't be sent: ${String(error)}`);
+        return undefined;
       }
     });
   }
