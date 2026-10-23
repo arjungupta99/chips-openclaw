@@ -11,7 +11,7 @@ import { rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { AgentContextCopy, AgentContextWindowCopy, AgentHeartbeatCopy, AgentModelCopy } from "@chipschat/harness";
-import { JoinError } from "@chipschat/harness";
+import { JoinError, reportStep } from "@chipschat/harness";
 import { Automations } from "./automations.ts";
 import { Bridge } from "./bridge.ts";
 import { Chips, type ChipsEvent } from "./chips.ts";
@@ -37,6 +37,8 @@ const config = await loadConfig({ link: process.argv[2] === "connect" ? process.
   (error: unknown) => {
     // What isn't set up, or a link Chips refuses (spent, expired, not a link): its words, no stack.
     if (!(error instanceof SetupError) && !(error instanceof JoinError)) throw error;
+    // Where it stopped, in a few words for Chips for Mac's sheet; the whole sentence for a terminal.
+    if (error instanceof SetupError) reportStep("failed", error.words);
     console.error(error.message);
     process.exit(1);
   },

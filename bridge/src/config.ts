@@ -21,7 +21,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { connect as tcp } from "node:net";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { filledIn, helloOnce, type Joined, type JoinOptions, join as joinChips } from "@chipschat/harness";
+import { filledIn, helloOnce, type Joined, type JoinOptions, join as joinChips, reportStep, type StopWords } from "@chipschat/harness";
 import { type MediaRoots, rootsFor } from "./media.ts";
 
 export interface Config {
@@ -52,10 +52,28 @@ export interface Config {
   readonly hello: ((say: (spaceId: string) => Promise<unknown>) => Promise<boolean>) | undefined;
 }
 
-/** Something to put right before the bridge starts, said so a person can. */
+/**
+ * Something to put right before the bridge starts, said so a person can: the message in a terminal,
+ * `words` on Chips for Mac's sheet (Chips ADR 0218, phase 5).
+ */
 export class SetupError extends Error {
   override readonly name = "SetupError";
+  constructor(
+    message: string,
+    readonly words: StopWords = {},
+  ) {
+    super(message);
+  }
 }
+
+/** The port in a gateway's address, as a person reads it. */
+const portOf = (url: string): string => {
+  try {
+    return new URL(url).port || "80";
+  } catch {
+    return url;
+  }
+};
 
 export const STILL_GOOD = "The link is still good: run the same command again once that's done.";
 
@@ -209,6 +227,12 @@ function ownGateway(
   if (!existsSync(path)) {
     throw new SetupError(
       `OpenClaw isn't set up on this machine: there is no ${path}. Install OpenClaw (openclaw.ai) and run \`openclaw onboard\`.${still}`,
+      {
+        detail: "OpenClaw isn't set up here",
+        says: "OpenClaw isn't set up on this Mac.",
+        doing: "Install OpenClaw (openclaw.ai), run this in a terminal, then try again.",
+        copy: "openclaw onboard",
+      },
     );
   }
   let config: Record<string, unknown>;
@@ -217,6 +241,11 @@ function ownGateway(
   } catch (error) {
     throw new SetupError(
       `${path} couldn't be read (${(error as Error).message}): set OPENCLAW_GATEWAY_TOKEN, and OPENCLAW_URL if its gateway isn't on 18789.${still}`,
+      {
+        detail: "Its config couldn't be read",
+        says: `${path} couldn't be read.`,
+        doing: "Set OPENCLAW_GATEWAY_TOKEN, and OPENCLAW_URL if its gateway isn't on 18789.",
+      },
     );
   }
   const gateway = (config["gateway"] ?? {}) as Record<string, unknown>;
@@ -232,6 +261,12 @@ function ownGateway(
   if (!filledIn(token)) {
     throw new SetupError(
       `OpenClaw's gateway token isn't in ${path} (gateway.auth.token)${fromEnv === undefined ? "" : ` or $${fromEnv}`}: run \`openclaw onboard\`, or set OPENCLAW_GATEWAY_TOKEN.${still}`,
+      {
+        detail: "No gateway token",
+        says: "OpenClaw's gateway has no token here.",
+        doing: "Run this in a terminal, then try again.",
+        copy: "openclaw onboard",
+      },
     );
   }
   const agents = (config["agents"] ?? {}) as Record<string, unknown>;
@@ -259,6 +294,7 @@ export async function loadConfig(options: LoadOptions = {}): Promise<Config> {
   // OpenClaw's side, checked before Chips's: a link works once, and is spent by the join.
   const link = options.link ?? (env["CHIPS_JOIN_LINK"] || undefined);
   const still = link === undefined ? "" : ` ${STILL_GOOD}`;
+  if (link !== undefined) reportStep("checking", { detail: "Looking for its gateway" }, env);
   let gatewayUrl: string;
   let gatewayToken: string | undefined;
   let roots: MediaRoots;
@@ -277,8 +313,16 @@ export async function loadConfig(options: LoadOptions = {}): Promise<Config> {
   if (link !== undefined && !(await (options.reach ?? reachable)(gatewayUrl))) {
     throw new SetupError(
       `OpenClaw's gateway isn't answering at ${gatewayUrl}: ${own ? "start it (`openclaw gateway`)" : "start OpenClaw with scripts/up.sh"}.${still}`,
+      {
+        detail: `Nothing answers on port ${portOf(gatewayUrl)}`,
+        says: "OpenClaw's gateway isn't running.",
+        ...(own
+          ? { doing: "Start it in a terminal, then try again.", copy: "openclaw gateway" }
+          : { doing: "Start OpenClaw with scripts/up.sh, then try again." }),
+      },
     );
   }
+  if (link !== undefined) reportStep("checked", { detail: `Its gateway answers on port ${portOf(gatewayUrl)}` }, env);
   return {
     ...(await chipsSide(files, env, stateDir, options)),
     gatewayUrl,

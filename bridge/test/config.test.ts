@@ -192,6 +192,22 @@ describe("a person's own OpenClaw", () => {
     assert.equal(played.asked.length, 0, "no link taken up");
   });
 
+  // Chips for Mac's sheet (Chips ADR 0218, phase 5): a few words under the step, the sentence,
+  // what to do, and a line to copy; the terminal keeps the whole sentence.
+  it("says where it stopped in a few words for Chips for Mac's sheet", async () => {
+    const stopped = await loadConfig({ env: own({ gateway: { auth: { token: "t" } } }).env, link: LINK, join: player().join, reach: async () => false }).then(
+      () => undefined,
+      (error: unknown) => error,
+    );
+    assert.ok(stopped instanceof SetupError);
+    assert.deepEqual(stopped.words, {
+      detail: "Nothing answers on port 18789",
+      says: "OpenClaw's gateway isn't running.",
+      doing: "Start it in a terminal, then try again.",
+      copy: "openclaw gateway",
+    });
+  });
+
   it("is the test rig instead when its .env is there", async () => {
     const { home, env } = own({ gateway: { auth: { token: "own" } } });
     mkdirSync(join(home, "chips-openclaw"));
