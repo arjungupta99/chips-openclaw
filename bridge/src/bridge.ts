@@ -2042,7 +2042,7 @@ export class Bridge {
         .filter((line): line is string => line !== undefined)
         .map((line) => `Chips: ${line}`);
       // The room's files the turn's words name, at their current version (Chips ADR 0099).
-      const files = await this.roomFiles(taker.sessionKey, spaceId, event, [...chips, message].join("\n"));
+      const files = await this.roomFiles(taker.sessionKey, spaceId, event, [...chips, message].join("\n"), project !== undefined);
       const sent = [...attachments, ...files.sent];
       // Steered: into the session's turn while one runs, a turn of its own when none does. Said, not
       // left to OpenClaw's stored queue mode, which could make it wait for a turn after.
@@ -2147,9 +2147,10 @@ export class Bridge {
     spaceId: string,
     event: ChipsEvent,
     words: string,
+    project: boolean,
   ): Promise<{ sent: Payload[]; line: string; took: () => void }> {
     const files = roomFilesIn(event["context"]);
-    if (files.length === 0) return { sent: [], line: filesLine([], []), took: () => undefined };
+    if (files.length === 0) return { sent: [], line: filesLine([], [], project), took: () => undefined };
     const has = this.versionsOf(sessionKey, spaceId);
     const onMessage = attachmentsOf(event);
     const carried = files.filter((file) => carries(onMessage, file));
@@ -2182,7 +2183,7 @@ export class Bridge {
     // under its name is its next version (Chips ADR 0101): O2 had K–O posted as a new file.
     return {
       sent,
-      line: filesLine([...carried.filter(isDocument), ...handed], left),
+      line: filesLine([...carried.filter(isDocument), ...handed], left, project),
       took: () => {
         for (const file of [...carried, ...handed]) has.set(file.name, file.attachmentId);
       },

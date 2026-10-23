@@ -23,7 +23,7 @@ import {
   wordsOf,
 } from "../src/bridge.ts";
 import { type ChipsAgent, type ChipsEvent, ChipsRefusal, type Taken } from "../src/chips.ts";
-import { SENDING_FILES } from "../src/room-files.ts";
+import { SENDING_FILES, sendingFiles } from "../src/room-files.ts";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -2468,6 +2468,9 @@ describe("the room's project (Chips ADR 0221)", () => {
       ),
       String(first?.["message"]),
     );
+    // Only a file outside the project needs sending (Chips AP-9).
+    assert.ok(String(first?.["message"]).includes(sendingFiles(true)), String(first?.["message"]));
+    assert.match(sendingFiles(true), /^A file that isn't in the room's project reaches this room only when you send it/);
     // The agent writes in the container; the files are this Mac's, under OpenClaw's state.
     writeFileSync(join(copy(), "notes.md"), "One sentence.\n");
     let pushedFirst = false;
@@ -2498,6 +2501,7 @@ describe("the room's project (Chips ADR 0221)", () => {
   it("gives the primary agent, whose folder is every room's, no project", async () => {
     await bridge.onChips(said("hello"));
     assert.doesNotMatch(String(sends()[0]?.["message"]), /The room's project/);
+    assert.ok(String(sends()[0]?.["message"]).includes(SENDING_FILES));
     assert.equal(existsSync(join(sandbox, "state", "workspace", "room")), false);
   });
 });

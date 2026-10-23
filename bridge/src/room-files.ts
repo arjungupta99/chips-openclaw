@@ -31,11 +31,23 @@ export interface RoomFile {
   readonly url: string;
 }
 
-/** How a file reaches a room, said with every turn there: a path in an agent's folder does not. */
-export const SENDING_FILES =
-  "A file reaches this room only when you send it, on a line of its own: MEDIA:<path>. " +
-  "A path alone reaches nobody: the people and agents here cannot open your folder. " +
-  "A MEDIA: line sends any file in your folder; the message tool refuses some, a web page among them.";
+/**
+ * How a file reaches a room, said with every turn there: a path in an agent's folder does not. A
+ * turn that works on the room's project hears that only a file outside it needs sending: told that
+ * a file "reaches this room only when you send it", agents sent the project's files too, even after
+ * the project's note said not to (Chips AP-9).
+ */
+export function sendingFiles(project = false): string {
+  const which = project ? "A file that isn't in the room's project" : "A file";
+  return (
+    `${which} reaches this room only when you send it, on a line of its own: MEDIA:<path>. ` +
+    "A path alone reaches nobody: the people and agents here cannot open your folder. " +
+    "A MEDIA: line sends any file in your folder; the message tool refuses some, a web page among them."
+  );
+}
+
+/** How a file reaches a room that has no project to work on. */
+export const SENDING_FILES = sendingFiles();
 
 /** As many of a room's files as one turn is handed, and the most bytes each may have. */
 export const ROOM_FILES = { most: 5, bytes: 5 * 1024 * 1024 } as const;
@@ -108,11 +120,12 @@ function described(file: RoomFile): string {
 
 /**
  * What a turn is told of the room's files it was handed, of those it named and was not, and how a
- * file of its own reaches the room.
+ * file of its own reaches the room: with the room's project, a file that isn't in it.
  */
 export function filesLine(
   handed: readonly RoomFile[],
   left: readonly { readonly file: RoomFile; readonly why: string }[],
+  project = false,
 ): string {
   const lines: string[] = [];
   if (handed.length > 0) {
@@ -122,7 +135,7 @@ export function filesLine(
     );
   }
   for (const { file, why } of left) lines.push(`Not attached: ${described(file)}, ${why}.`);
-  lines.push(SENDING_FILES);
+  lines.push(sendingFiles(project));
   return lines.join("\n");
 }
 
