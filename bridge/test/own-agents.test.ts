@@ -60,6 +60,25 @@ describe("the OpenClaw agents the bridge makes", () => {
     assert.equal(existsSync(join(sandbox, "state", "chips", "chips-01k4", "USER.md")), false);
   });
 
+  it("begins a copy's folder as a copy of its original's, everything in it, over what is there (Chips ADR 0087)", async () => {
+    const workspaces = workspacesIn(rootsFor(sandbox));
+    const original = join(sandbox, "state", "chips", "chips-01k4");
+    const copy = join(sandbox, "state", "chips", "chips-01k5");
+    mkdirSync(join(original, "memory"), { recursive: true });
+    writeFileSync(join(original, "MEMORY.md"), "heron");
+    writeFileSync(join(original, "memory", "2026-10-22.md"), "made a game");
+    writeFileSync(join(original, "game.html"), "<p>game</p>");
+    mkdirSync(copy, { recursive: true });
+    writeFileSync(join(copy, "MEMORY.md"), "half a copy");
+    assert.equal(await workspaces.copy(workspaces.of("chips-01k4"), "chips-01k5"), true);
+    assert.equal(readFileSync(join(copy, "MEMORY.md"), "utf8"), "heron");
+    assert.equal(readFileSync(join(copy, "memory", "2026-10-22.md"), "utf8"), "made a game");
+    assert.equal(readFileSync(join(copy, "game.html"), "utf8"), "<p>game</p>");
+    // A folder OpenClaw names that is not there is nothing to copy.
+    assert.equal(await workspaces.copy("/home/node/.openclaw/workspace-gone", "chips-01k6"), false);
+    assert.equal(existsSync(join(sandbox, "state", "chips", "chips-01k6")), false);
+  });
+
   it("takes the first-run ritual out of a made agent's folder, and leaves the rest", async () => {
     const workspaces = workspacesIn(rootsFor(sandbox));
     await workspaces.seed("chips-01k4");

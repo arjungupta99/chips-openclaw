@@ -4,13 +4,14 @@
  */
 
 import assert from "node:assert/strict";
-import { beforeEach, describe, it } from "node:test";
+import { afterEach, beforeEach, describe, it } from "node:test";
 import {
   Bridge,
   type ChipsPort,
   commandAsk,
   type ClawPort,
   type FilesPort,
+  forkName,
   heardIn,
   spentIn,
   textOf,
@@ -21,10 +22,12 @@ import {
 } from "../src/bridge.ts";
 import { type ChipsAgent, type ChipsEvent, ChipsRefusal, type Taken } from "../src/chips.ts";
 import { SENDING_FILES } from "../src/room-files.ts";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Automations, SPEAKING_LATER } from "../src/automations.ts";
+import { rootsFor } from "../src/media.ts";
+import { workspacesIn } from "../src/own-agents.ts";
 
 /**
  * A turn's words as a room sends them: behind how a file reaches the room (Chips AW-19) and how to
@@ -72,7 +75,41 @@ let history: unknown[] | Error = [];
 let refuseClaw = new Set<string>();
 let clawAgents: { id: string; name?: string }[] = [];
 let listLag = 0;
+/**
+ * The sessions OpenClaw keeps, as far as a fork reads them: each one's agent and what was said in
+ * it, and the sessions a turn runs in now. `sessions.create` makes one, or adopts one it has; with
+ * `parentSessionKey` and `fork` the new one begins with the parent's history, refused while a turn
+ * runs in the parent unless `forkFrom: "last-completed"`, which leaves that turn's tail out; and a
+ * parent it does not have is refused, as an agent's that never spoke is. `chat.send` adds the words.
+ */
+let clawSessions = new Map<string, { agentId: string; messages: Record<string, unknown>[] }>();
+let runningIn = new Set<string>();
 let bridge: Bridge;
+
+/** A history up to its last answer, as OpenClaw's `last-completed` fork copies it. */
+function throughLastAnswer(messages: readonly Record<string, unknown>[]): Record<string, unknown>[] {
+  const last = messages.map((each) => each["role"]).lastIndexOf("assistant");
+  return messages.slice(0, last + 1);
+}
+
+/** A session OpenClaw keeps, as `sessions.create` asks for one. */
+function clawSession(params: Record<string, unknown>): Record<string, unknown> {
+  const key = String(params["key"]);
+  const parent = typeof params["parentSessionKey"] === "string" ? params["parentSessionKey"] : undefined;
+  const forked = params["fork"] === true && parent !== undefined;
+  if (!clawSessions.has(key)) {
+    let messages: Record<string, unknown>[] = [];
+    if (forked) {
+      const from = clawSessions.get(parent);
+      if (from === undefined) throw new Error(`unknown parent session: ${parent}`);
+      const completed = params["forkFrom"] === "last-completed";
+      if (runningIn.has(parent) && !completed) throw new Error(`Parent session ${parent} is still active; try again in a moment.`);
+      messages = completed ? throughLastAnswer(from.messages) : [...from.messages];
+    }
+    clawSessions.set(key, { agentId: String(params["agentId"]), messages });
+  }
+  return { ok: true, key, ...(forked ? { forkedFromParent: true } : {}) };
+}
 
 /** One of our agents as Chips lists it, in one room or in none. */
 function agentIn(agentId: string, key: string, room: string | null, name = "OpenClaw"): ChipsAgent {
@@ -111,14 +148,16 @@ const chips: ChipsPort = {
     registered.push({ ...wanted });
     const { key, name } = wanted;
     const had = agents.find((each) => each.key === key);
-    // As Chips answers a new agent registered for the room it was asked for (ADR 0108): put in it.
-    const room = wanted.made_for !== undefined ? (wanted.space_id ?? null) : (had?.room ?? null);
+    // As Chips answers a new agent (ADR 0108), or a fork's copy (ADR 0087), registered for the room
+    // it was asked for: put in it.
+    const forRoom = wanted.made_for !== undefined || wanted.forked_from !== undefined;
+    const room = forRoom ? (wanted.space_id ?? null) : (had?.room ?? null);
     const agent: ChipsAgent =
       had === undefined
         ? { ...agentIn(`agt_${key}`, key, room, name), lead: wanted.lead === true }
         : { ...had, name, ...(wanted.lead === true ? { lead: true } : {}) };
     agents = [...agents.filter((each) => each.key !== key), agent];
-    return { ...agent, ...(wanted.made_for === undefined ? {} : { attached: had === undefined }) };
+    return { ...agent, ...(forRoom ? { attached: had === undefined } : {}) };
   },
   // As Chips does for a room a harness opens by its key: the key's own agent is put in it.
   openSpace: async (key) => {
@@ -172,6 +211,18 @@ const claw: ClawPort = {
       if (history instanceof Error) throw history;
       return { sessionKey: params["sessionKey"], messages: history } as T;
     }
+    if (method === "sessions.create") return clawSession(params) as T;
+    if (method === "chat.send") {
+      clawSessions.get(String(params["sessionKey"]))?.messages.push({ role: "user", content: params["message"] });
+    }
+    if (method === "agents.delete") {
+      clawAgents = clawAgents.filter((each) => each.id !== params["agentId"]);
+      for (const [key, session] of clawSessions) if (session.agentId === params["agentId"]) clawSessions.delete(key);
+    }
+    // An OpenClaw agent the bridge did not make works where OpenClaw's config puts it.
+    if (method === "agents.files.list") {
+      return { agentId: params["agentId"], workspace: `/home/node/.openclaw/workspace-${String(params["agentId"])}`, files: [] } as T;
+    }
     return {} as T;
   },
 };
@@ -196,6 +247,8 @@ beforeEach(() => {
   clawAgents = [];
   listLag = 0;
   pending = undefined;
+  clawSessions = new Map();
+  runningIn = new Set();
   bridge = new Bridge(chips, claw, { harnessId: ME, agent: "main" }, () => undefined);
 });
 
@@ -2301,6 +2354,261 @@ describe("an OpenClaw agent of its own for each agent Chips asks for", () => {
     await bridge.settled();
     assert.deepEqual(sent.map((event) => event.type), ["run.started", "run.failed"]);
     assert.equal(calls.filter(([method]) => method === "chat.send").length, 3);
+  });
+});
+
+describe("a copy of an agent for a person's Fork (Chips ADR 0087)", () => {
+  const FORK = "evt_01K4ZQPX0000000000000000F1";
+  /** The OpenClaw agent made for the copy, and the made agent it copies, Nova, in ROOM. */
+  const COPY = "chips-01k4zqpx0000000000000000f1";
+  const NOVA = "chips-01k4zqpx0000000000000000n1";
+  const NEW_ROOM = "spc_01K4ZQPX000000000000000077";
+  const ELSEWHERE = "spc_01K4ZQPX000000000000000055";
+  const ORIGINAL_FILES: Record<string, string> = {
+    "AGENTS.md": "Nova's way of working",
+    "IDENTITY.md": "- **Name:** Nova",
+    "MEMORY.md": "The code word is heron.",
+    "DREAMS.md": "A dream of herons.",
+    "memory/2026-10-22.md": "Made a game.",
+    "game.html": "<p>game</p>",
+  };
+  /** What Nova said in ROOM, as OpenClaw keeps it: its history names its own folder. */
+  const NOVA_SAID = [
+    { role: "user", content: "Remember the code word heron" },
+    { role: "assistant", content: `Noted in /home/node/.openclaw/chips/${NOVA}/MEMORY.md` },
+  ];
+  const novaKey = (): string => bridge.keyFor(ROOM, NOVA);
+  const copyKey = (): string => bridge.madeKeyFor(NEW_ROOM, FORK);
+  const copyId = (): string => `agt_${copyKey()}`;
+  const fork = (extra: Record<string, unknown> = {}): ChipsEvent => ({
+    type: "agent.fork",
+    id: FORK,
+    ts: new Date().toISOString(),
+    space_id: NEW_ROOM,
+    agent_id: "agt_nova",
+    by: ARJUN.participant_id,
+    ...extra,
+  });
+  let sandbox: string;
+  let logged: string[];
+  const folder = (agent: string): string => join(sandbox, "state", "chips", agent);
+  const methods = (): string[] => calls.map(([method]) => method);
+  /** A bridge on this Mac's folders, as main.ts makes one, with OpenClaw's agents taken as its own. */
+  async function bridgeOn(port: ChipsPort = chips, gateway: ClawPort = claw): Promise<Bridge> {
+    const made = new Bridge(port, gateway, { harnessId: ME, agent: "main" }, (line) => logged.push(line), undefined, Date.now, workspacesIn(rootsFor(sandbox)));
+    await made.adoptAgents({ defaultId: "main", agents: [{ id: "main" }, { id: NOVA, name: "Nova" }] });
+    calls = [];
+    registered = [];
+    return made;
+  }
+
+  beforeEach(async () => {
+    sandbox = mkdtempSync(join(tmpdir(), "bridge-fork-"));
+    mkdirSync(join(sandbox, "state", "workspace"), { recursive: true });
+    for (const name of ["AGENTS.md", "SOUL.md", "USER.md"]) writeFileSync(join(sandbox, "state", "workspace", name), `main's ${name}`);
+    mkdirSync(join(folder(NOVA), "memory"), { recursive: true });
+    for (const [name, text] of Object.entries(ORIGINAL_FILES)) writeFileSync(join(folder(NOVA), name), text);
+    logged = [];
+    agents = [agentIn("agt_main", "agent:main:chips-main", MAIN_ROOM), agentIn("agt_nova", `agent:${NOVA}:chips-${ROOM.toLowerCase()}`, ROOM, "Nova")];
+    clawAgents = [{ id: "main" }, { id: NOVA, name: "Nova" }];
+    clawSessions.set(`agent:${NOVA}:chips-${ROOM.toLowerCase()}`, { agentId: NOVA, messages: NOVA_SAID.map((each) => ({ ...each })) });
+    bridge = await bridgeOn();
+  });
+
+  afterEach(() => rmSync(sandbox, { recursive: true, force: true }));
+
+  it("names a copy after its original, as Jacobian names its forks", () => {
+    assert.equal(forkName("Nova"), "Nova · fork");
+    assert.equal(forkName("Nova · fork 2"), "Nova · fork");
+  });
+
+  it("makes a copy that remembers what the original did, in an OpenClaw agent and a folder of its own, registered forked_from it for the room", async () => {
+    await bridge.onChips(fork());
+    // Made and listed, its session forked from Nova's in ROOM, then registered and named as Chips named it.
+    assert.deepEqual(methods(), ["agents.create", "agents.list", "sessions.create", "agents.update", "agents.list"]);
+    assert.deepEqual(calls[0]?.[1], { name: COPY, workspace: `/home/node/.openclaw/chips/${COPY}` });
+    assert.deepEqual(calls[2]?.[1], {
+      key: copyKey(),
+      agentId: COPY,
+      displayName: "Nova · fork",
+      parentSessionKey: novaKey(),
+      fork: true,
+      forkFrom: "last-completed",
+    });
+    assert.deepEqual(registered, [{ key: copyKey(), name: "Nova · fork", forked_from: "agt_nova", space_id: NEW_ROOM }]);
+    assert.deepEqual(calls[3]?.[1], { agentId: COPY, name: "Nova · fork" });
+    assert.equal(agents.find((each) => each.key === copyKey())?.room, NEW_ROOM);
+    // What it remembers is Nova's, and so are the files that names: copied, not shared.
+    assert.deepEqual(clawSessions.get(copyKey())?.messages, NOVA_SAID);
+    for (const [name, text] of Object.entries(ORIGINAL_FILES)) assert.equal(readFileSync(join(folder(COPY), name), "utf8"), text);
+    assert.equal(readFileSync(join(folder(COPY), "SOUL.md"), "utf8"), "main's SOUL.md");
+    assert.equal(readFileSync(join(folder(NOVA), "MEMORY.md"), "utf8"), ORIGINAL_FILES["MEMORY.md"]);
+  });
+
+  it("gives the copy's turns to its own session and the original's to Nova's, and tells the copy once whose copy it is", async () => {
+    await bridge.onChips(fork());
+    calls = [];
+    await bridge.onChips(said("@Nova·fork what is the code word?", { space_id: NEW_ROOM, addressed_to: [copyId()], for: [copyId()] }));
+    await bridge.onChips(said("@Nova and you?", { message_id: "msg_01K4ZQPX0000000000000000A2", addressed_to: ["agt_nova"], for: ["agt_nova"] }));
+    await bridge.onChips(said("And now?", { space_id: NEW_ROOM, message_id: "msg_01K4ZQPX0000000000000000A3", addressed_to: [copyId()], for: [copyId()] }));
+    const sends = calls.filter(([method]) => method === "chat.send").map(([, params]) => params);
+    assert.deepEqual(sends.map((params) => params["sessionKey"]), [copyKey(), novaKey(), copyKey()]);
+    // Its session was forked already; Nova's is the one it had.
+    assert.deepEqual(calls.filter(([method]) => method === "sessions.create").map(([, params]) => params["key"]), [novaKey()]);
+    const note =
+      "Chips: You are a copy of Nova, made for this room: you remember what Nova did until now, and from here on the two of you remember apart. " +
+      `Nova's files were copied into your own folder, /home/node/.openclaw/chips/${COPY}. Work there: /home/node/.openclaw/chips/${NOVA} is still Nova's.`;
+    assert.equal(sends[0]?.["message"], told("@Nova·fork what is the code word?", note));
+    assert.equal(sends[1]?.["message"], told("@Nova and you?"));
+    assert.equal(sends[2]?.["message"], told("And now?"));
+    // From here on the two remember apart.
+    assert.equal(clawSessions.get(copyKey())?.messages.length, NOVA_SAID.length + 2);
+    assert.equal(clawSessions.get(novaKey())?.messages.length, NOVA_SAID.length + 1);
+    // And the copy answers as itself, in its room.
+    const run = `msg_01K4ZQPX0000000000000000A1:${COPY}`;
+    bridge.onClaw({ event: "chat", payload: { runId: run, sessionKey: copyKey(), seq: 1, state: "final", message: "Heron." } });
+    await bridge.settled();
+    assert.equal(sent.find((event) => event.type === "run.started")?.["space_id"], NEW_ROOM);
+    assert.deepEqual(sent.find((event) => event.type === "message.post")?.["actor"], { kind: "agent", id: copyId() });
+  });
+
+  it("copies through the original's last answer while a turn of its goes on", async () => {
+    runningIn.add(novaKey());
+    clawSessions.get(novaKey())?.messages.push({ role: "user", content: "Now make it blue" });
+    // As OpenClaw refuses a plain fork of a session a turn runs in.
+    await assert.rejects(claw.request("sessions.create", { key: "agent:x:y", agentId: COPY, parentSessionKey: novaKey(), fork: true }), /still active/);
+    await bridge.onChips(fork());
+    assert.deepEqual(clawSessions.get(copyKey())?.messages, NOVA_SAID);
+    assert.equal(registered.length, 1);
+  });
+
+  it("makes one copy of an ask heard twice, at once or after, and registers the same copy again", async () => {
+    await Promise.all([bridge.onChips(fork()), bridge.onChips(fork())]);
+    await bridge.onChips(fork());
+    assert.deepEqual(registered.map((each) => each["key"]), [copyKey(), copyKey(), copyKey()]);
+    assert.equal(methods().filter((method) => method === "agents.create").length, 1);
+    assert.equal(methods().filter((method) => method === "sessions.create").length, 1);
+    assert.equal(agents.filter((each) => each.key === copyKey()).length, 1);
+  });
+
+  it("names the copy in OpenClaw as Chips numbered it, and registers it again by that name", async () => {
+    const asked: string[] = [];
+    // As Chips numbers a copy's name another agent in the room has (`Nova · fork 2`).
+    const numbering: ChipsPort = {
+      ...chips,
+      registerAgent: async (wanted) => {
+        asked.push(wanted.name);
+        return chips.registerAgent(wanted.forked_from === undefined ? wanted : { ...wanted, name: "Nova · fork 2" });
+      },
+    };
+    const numbered = await bridgeOn(numbering);
+    asked.length = 0;
+    await numbered.onChips(fork());
+    await numbered.onChips(fork());
+    assert.deepEqual(asked, ["Nova · fork", "Nova · fork 2"]);
+    assert.deepEqual(calls.find(([method]) => method === "agents.update")?.[1], { agentId: COPY, name: "Nova · fork 2" });
+  });
+
+  it("registers a copy made before a restart again, and leaves what it has done since as it is", async () => {
+    await bridge.onChips(fork());
+    clawSessions.get(copyKey())?.messages.push({ role: "user", content: "The word is crane now" });
+    writeFileSync(join(folder(COPY), "MEMORY.md"), "The code word is crane.");
+    const again = await bridgeOn();
+    await again.onChips(fork());
+    assert.deepEqual(calls, []);
+    assert.deepEqual(registered, [{ key: copyKey(), name: "Nova · fork", forked_from: "agt_nova", space_id: NEW_ROOM }]);
+    assert.equal(clawSessions.get(copyKey())?.messages.length, NOVA_SAID.length + 1);
+    assert.equal(readFileSync(join(folder(COPY), "MEMORY.md"), "utf8"), "The code word is crane.");
+  });
+
+  it("makes no copy for an ask the room stopped waiting for, of an agent none of its, or of one that speaks as the primary agent", async () => {
+    agents = [...agents, agentIn("agt_fallback", ME, ELSEWHERE)];
+    await bridge.onChips(fork({ ts: new Date(Date.now() - 61_000).toISOString() }));
+    await bridge.onChips(fork({ agent_id: "agt_01K4ZQPX0000000000000000ZZ" }));
+    // The Main agent, which Chips never asks to fork, and the default agent: OpenClaw's primary agent.
+    await bridge.onChips(fork({ agent_id: "agt_main" }));
+    await bridge.onChips(fork({ agent_id: "agt_fallback" }));
+    assert.deepEqual(calls, []);
+    assert.deepEqual(registered, []);
+    assert.equal(logged.filter((line) => line.startsWith("chips: no copy of")).length, 4);
+    assert.equal(existsSync(folder(COPY)), false);
+  });
+
+  it("unmakes the copy's OpenClaw agent when Chips refuses the copy, and tries again when the ask is heard again", async () => {
+    let refuse = true;
+    const refusing: ChipsPort = {
+      ...chips,
+      registerAgent: async (wanted) => {
+        if (refuse && wanted.forked_from !== undefined) throw new ChipsRefusal(409, "conflict", "That room has an agent of that name.");
+        return chips.registerAgent(wanted);
+      },
+    };
+    const quiet = await bridgeOn(refusing);
+    await quiet.onChips(fork());
+    assert.deepEqual(methods(), ["agents.create", "agents.list", "sessions.create", "agents.delete"]);
+    assert.deepEqual(calls[3]?.[1], { agentId: COPY, deleteFiles: true });
+    assert.equal(clawSessions.has(copyKey()), false);
+    refuse = false;
+    calls = [];
+    await quiet.onChips(fork());
+    assert.deepEqual(methods(), ["agents.create", "agents.list", "sessions.create", "agents.update", "agents.list"]);
+    assert.deepEqual(clawSessions.get(copyKey())?.messages, NOVA_SAID);
+  });
+
+  it("forks the session once more when OpenClaw refused it as it took in the copy's making", async () => {
+    let reloads = 1;
+    const reloading: ClawPort = {
+      request: async <T>(method: string, params: Record<string, unknown>) => {
+        if (method === "sessions.create" && reloads-- > 0) {
+          calls.push([method, params]);
+          throw new Error("PreparedModelCatalogConfigReplacedError: prepared model catalog owner config was replaced during the read (x)");
+        }
+        return claw.request<T>(method, params);
+      },
+    };
+    const patient = await bridgeOn(chips, reloading);
+    await patient.onChips(fork());
+    assert.deepEqual(methods(), ["agents.create", "agents.list", "sessions.create", "sessions.create", "agents.update", "agents.list"]);
+    assert.deepEqual(calls[3]?.[1], calls[2]?.[1]);
+    assert.deepEqual(clawSessions.get(copyKey())?.messages, NOVA_SAID);
+    assert.equal(registered.length, 1);
+  });
+
+  it("unmakes the copy's OpenClaw agent and registers nothing when OpenClaw will not fork the session", async () => {
+    refuseClaw = new Set(["sessions.create"]);
+    await bridge.onChips(fork());
+    assert.deepEqual(methods(), ["agents.create", "agents.list", "sessions.create", "agents.delete"]);
+    assert.deepEqual(registered, []);
+  });
+
+  it("makes a copy with nothing to remember of an agent that never spoke in its room", async () => {
+    clawSessions.delete(novaKey());
+    await bridge.onChips(fork());
+    const creates = calls.filter(([method]) => method === "sessions.create").map(([, params]) => params);
+    assert.deepEqual(creates.map((params) => params["fork"]), [true, undefined]);
+    assert.deepEqual(creates[1], { key: copyKey(), agentId: COPY, displayName: "Nova · fork" });
+    assert.deepEqual(clawSessions.get(copyKey())?.messages, []);
+    assert.equal(registered.length, 1);
+    // Its folder is Nova's still, and it is told nothing of a past it does not have.
+    assert.equal(readFileSync(join(folder(COPY), "MEMORY.md"), "utf8"), ORIGINAL_FILES["MEMORY.md"]);
+    calls = [];
+    await bridge.onChips(said("Hi", { space_id: NEW_ROOM, addressed_to: [copyId()], for: [copyId()] }));
+    assert.equal(calls.find(([method]) => method === "chat.send")?.[1]["message"], told("Hi"));
+  });
+
+  it("copies an agent of OpenClaw's own from its session in its room and the folder OpenClaw says is its", async () => {
+    const scoutFolder = join(sandbox, "state", "workspace-scout");
+    mkdirSync(scoutFolder, { recursive: true });
+    writeFileSync(join(scoutFolder, "MEMORY.md"), "Scout's notes");
+    agents = [...agents, agentIn("agt_scout", "scout", ROOM, "Scout")];
+    clawAgents = [...clawAgents, { id: "scout", name: "Scout" }];
+    clawSessions.set(bridge.keyFor(ROOM, "scout"), { agentId: "scout", messages: [{ role: "assistant", content: "Scouted." }] });
+    await bridge.onChips(fork({ agent_id: "agt_scout" }));
+    assert.deepEqual(calls[0], ["agents.files.list", { agentId: "scout" }]);
+    assert.equal(calls.find(([method]) => method === "sessions.create")?.[1]["parentSessionKey"], bridge.keyFor(ROOM, "scout"));
+    assert.deepEqual(registered, [{ key: copyKey(), name: "Scout · fork", forked_from: "agt_scout", space_id: NEW_ROOM }]);
+    assert.equal(readFileSync(join(folder(COPY), "MEMORY.md"), "utf8"), "Scout's notes");
+    assert.deepEqual(clawSessions.get(copyKey())?.messages, [{ role: "assistant", content: "Scouted." }]);
   });
 });
 

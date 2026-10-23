@@ -62,8 +62,9 @@ export class ChipsRefusal extends Error {
 }
 
 /**
- * One of our agents to register: its key and name, and for a new agent a person asked for in a
- * room (Chips ADR 0108) the ask it answers and the room, which Chips puts it in while it waits.
+ * One of our agents to register: its key and name; for a new agent a person asked for in a room
+ * (Chips ADR 0108) the ask it answers, and for a copy a person's Fork asked for (Chips ADR 0087)
+ * the agent it copies; and for either the room, which Chips puts it in while it waits.
  */
 export interface NewAgent {
   readonly key: string;
@@ -71,6 +72,7 @@ export interface NewAgent {
   /** The harness's Main agent (Chips ADR 0087): one at most, only ever in its Main room. */
   readonly lead?: boolean;
   readonly made_for?: string;
+  readonly forked_from?: string;
   readonly space_id?: string;
 }
 

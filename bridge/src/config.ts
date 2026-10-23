@@ -103,6 +103,23 @@ function required(values: Record<string, string | undefined>, name: string): str
 /** What the bridge is called in Chips when it joins, unless CHIPS_HARNESS_NAME says otherwise. */
 export const JOIN_NAME = "OpenClaw";
 
+/**
+ * What the bridge asks Chips to let it do when it joins with a code: what Chips's OpenClaw card
+ * grants, and a copy of one of its agents for a person's Fork (`forks`, Chips ADR 0087). A link
+ * carries what the person chose instead.
+ */
+export const WANTS = [
+  "agents",
+  "new_spaces",
+  "new_agents",
+  "forks",
+  "restarts",
+  "context_files",
+  "models",
+  "heartbeats",
+  "context_windows",
+] as const;
+
 /** Where the address of the Chips it joined is written: never its key, which the SDK keeps. */
 export const JOINED_FILE = "joined.env";
 
@@ -172,6 +189,7 @@ async function chipsSide(
     ...(link === undefined ? { url: joined } : { link }),
     name,
     software: "OpenClaw",
+    wants: WANTS,
     env: values,
   });
   writeFileSync(join(stateDir, JOINED_FILE), `CHIPS_URL=${answer.url}\n`, { mode: 0o600 });

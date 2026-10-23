@@ -15,11 +15,15 @@
  * `BOOTSTRAP.md`, a first-run ritual for the agent's first turn. The bridge takes it out once the
  * agent is made, and OpenClaw then counts the folder as set up.
  *
+ * A copy a person asks for with Fork (Chips ADR 0087) is made the same way, but its folder begins
+ * as a copy of its original's: what it remembers doing names the original's files, and they are
+ * then its own to read and change.
+ *
  * A folder is where an agent starts, not a wall: an agent can still write outside it.
  */
 
 import { constants } from "node:fs";
-import { copyFile, mkdir, rm, rmdir } from "node:fs/promises";
+import { copyFile, cp, mkdir, rm, rmdir } from "node:fs/promises";
 import { join, posix } from "node:path";
 import type { MediaRoots } from "./media.ts";
 
@@ -45,6 +49,14 @@ export interface Workspaces {
   of(agent: string): string;
   /** An agent's folder, begun with the primary agent's persona. A file there already is kept. */
   seed(agent: string): Promise<void>;
+  /**
+   * An agent's folder begun as a copy of another agent's (`from`, as the gateway sees it), for a
+   * person's Fork (Chips ADR 0087): everything in it, its persona and name, its memory and the files
+   * it made, so what the copy remembers doing there is there for it to read. OpenClaw's own state
+   * for the agent is not in it (`agents/<agent>/`): the session's fork carries what it said. A file
+   * there already is replaced. False when `from` is not there to copy.
+   */
+  copy(from: string, agent: string): Promise<boolean>;
   /** A made agent's folder, without the first-run ritual OpenClaw puts in a new one. */
   settle(agent: string): Promise<void>;
   /**
@@ -73,6 +85,15 @@ export function workspacesIn(roots: MediaRoots): Workspaces {
           const code = (error as NodeJS.ErrnoException).code;
           if (code !== "EEXIST" && code !== "ENOENT") throw error;
         }
+      }
+    },
+    copy: async (from, agent) => {
+      try {
+        await cp(onMac(from), onMac(of(agent)), { recursive: true, force: true });
+        return true;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+        throw error;
       }
     },
     settle: async (agent) => {

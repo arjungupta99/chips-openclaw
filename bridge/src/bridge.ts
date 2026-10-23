@@ -14,6 +14,13 @@
  *   it is in Chips; deleted in Chips, it is deleted in OpenClaw. One OpenClaw cannot make is not
  *   made in Chips either, and the room says so after its minute, as for any harness that never
  *   answers.
+ * - A copy of one of our agents a person asks for in another room (Fork, Chips ADR 0087) is one
+ *   more OpenClaw agent the bridge makes, called `<name> · fork`, its folder begun as a copy of the
+ *   original's, and its session in that room forked from the original's session in its own room
+ *   (`sessions.create` with `fork`), so it remembers what the original did up to its last answer.
+ *   From then on the two remember apart. It is registered `forked_from` the original, for the room,
+ *   which Chips puts it in while the room waits. The Main agent, OpenClaw's primary agent, is never
+ *   copied.
  * - Each agent the bridge made has its context in Chips (Chips ADR 0134, `context.ts`): a copy of
  *   the files OpenClaw builds it from, sent when it is made or claimed, renamed, at start, and
  *   after a turn of its that changed one; and a person's edit there is saved into its folder.
@@ -133,6 +140,7 @@ const NO_FILES: FilesPort = {
 const NO_WORKSPACES: Workspaces = {
   of: (agent) => `/home/node/.openclaw/chips/${agent}`,
   seed: async () => undefined,
+  copy: async () => false,
   settle: async () => undefined,
   clear: async () => undefined,
 };
@@ -161,6 +169,9 @@ const AGENT_KNOWN_EVERY_MS = 200;
 const CONFIG_REPLACED =
   /PreparedModelCatalogConfigReplacedError|model catalog owner config was replaced|codex app-server request timed out/;
 const AGAIN_AFTER_MS = 1_000;
+
+/** How the gateway refuses to fork a session it does not have: an agent that never spoke there. */
+const UNKNOWN_PARENT = /unknown parent session/i;
 
 interface Run {
   readonly chipsRun: string;
@@ -486,6 +497,26 @@ type Whose = "own" | "default";
 /** How long a room in Chips waits for a new agent asked for (Chips ADR 0108): a minute. */
 const NEW_AGENT_WAIT_MS = 60_000;
 
+/** How long a room in Chips waits for a copy a person's Fork asked for (Chips ADR 0087, `FORK_WAIT_MS`): a minute too. */
+const FORK_WAIT_MS = 60_000;
+
+/** A copy's name, as Jacobian names its forks: `Nova · fork`, which Chips numbers when it is taken. */
+export function forkName(original: string): string {
+  return `${original.trim().replace(/ · fork( \d+)?$/, "")} · fork`;
+}
+
+/**
+ * What a copy is told on its first turn in its room (Chips ADR 0087, Fork): whose copy it is, and
+ * that the files what it remembers names in the original's folder are in its own folder now, which
+ * is where it works.
+ */
+function copyNote(name: string, from: string, folder: string): string {
+  return (
+    `You are a copy of ${name}, made for this room: you remember what ${name} did until now, and from here on the two of you remember apart. ` +
+    `${name}'s files were copied into your own folder, ${folder}. Work there: ${from} is still ${name}'s.`
+  );
+}
+
 /** What Chips calls a sender that is an agent: `harness` before a harness declares `agents`, `agent` after. */
 const isAgentKind = (kind: unknown): boolean => kind === "harness" || kind === "agent";
 
@@ -704,6 +735,11 @@ export class Bridge {
   >();
   /** The feedback a second look was asked for, by its event's id, the newest `FEEDBACK_KEPT`. */
   private readonly lookedAgain = new Set<string>();
+  /**
+   * The copies a person's Fork asked for (Chips ADR 0087), by the ask's id, made or being made, and
+   * what each was registered as: an ask heard again waits for the same copy and registers it again.
+   */
+  private readonly forks = new Map<string, Promise<NewAgent | undefined>>();
   /** What each turn the bridge asked for was sent with, until it ends: to send it again once. */
   private readonly sends = new Map<string, Payload>();
   private readonly latest = new Map<string, string>();
@@ -1009,6 +1045,189 @@ export class Bridge {
     } catch (error) {
       this.log(`chips refused the new agent ${name}: ${String(error)}`);
       await this.removeClawAgent(clawAgent);
+    }
+  }
+
+  /**
+   * A person asked Chips for a copy of one of our agents in another room (Chips ADR 0087, Fork),
+   * made once per ask (`makeCopy`). The same ask heard again, while its copy is being made or after,
+   * registers the same copy again, which Chips answers as done. One a replay hands over after the
+   * minute makes nothing.
+   */
+  private async forkAgent(event: ChipsEvent): Promise<void> {
+    const askId = str(event["id"]);
+    const room = str(event["space_id"]);
+    const originalId = str(event["agent_id"]);
+    if (askId === undefined || room === undefined || originalId === undefined) return;
+    if (!(Date.now() - Date.parse(str(event["ts"]) ?? "") < FORK_WAIT_MS)) {
+      this.log(`chips: no copy of ${originalId} for ${room}: the room stopped waiting for it`);
+      return;
+    }
+    const making = this.forks.get(askId);
+    if (making !== undefined) {
+      const copy = await making;
+      if (copy !== undefined) await this.registerAgain(copy);
+      return;
+    }
+    const made = this.makeCopy(askId, room, originalId).catch((error: unknown) => {
+      this.log(`chips: no copy of ${originalId} for ${room}: ${String(error)}`);
+      return undefined;
+    });
+    this.forks.set(askId, made);
+    if ((await made) === undefined) this.forks.delete(askId);
+  }
+
+  /** A copy registered again, by the name Chips gave it; Chips answers it as done. */
+  private async registerAgain(copy: NewAgent): Promise<void> {
+    try {
+      this.learn([await this.chips.registerAgent(copy)]);
+    } catch (error) {
+      this.log(`chips refused ${copy.name} again: ${String(error)}`);
+    }
+  }
+
+  /**
+   * A copy of one of our agents for a room (Chips ADR 0087, Fork). It is an OpenClaw agent made for
+   * the ask, as a new agent's is (`makeClawAgent`), with its folder begun as a copy of the original's:
+   * what the copy remembers names the original's files, and they are there for it to read. Its
+   * session in the room is forked from the original's session in the room the original is in,
+   * through the original's last completed answer, so a turn going on there is no bar; it is made
+   * before Chips has the copy, so no message can start a blank one first. An original that never
+   * spoke in its room, or is in no room and has no session of its own, gives a copy with nothing to
+   * remember. Then it is registered `forked_from` the original, for the room, called `<name> · fork`,
+   * and its OpenClaw agent is named as Chips names it.
+   *
+   * No copy is made of an agent that is none of ours, nor of one that speaks as OpenClaw's primary
+   * agent: the Main agent, the default agent, or a session of the primary agent's. A copy Chips has
+   * already, made before a restart, is registered again and nothing more: what it has done since is
+   * its own. One that could not be forked, or that Chips refuses, is unmade in OpenClaw. What it was
+   * registered as comes back, by the name Chips gave it, or nothing when no copy was made.
+   */
+  private async makeCopy(askId: string, room: string, originalId: string): Promise<NewAgent | undefined> {
+    const known = await this.chips.agents();
+    this.learn(known);
+    const original = known.find((each) => each.agent_id === originalId);
+    if (original === undefined) {
+      this.log(`chips: no copy of ${originalId} for ${room}: it is none of this harness's agents`);
+      return undefined;
+    }
+    const source = this.forkSourceOf(original);
+    if (source === undefined) {
+      this.log(`chips: no copy of ${original.name} for ${room}: it speaks as OpenClaw's primary agent, which is not copied`);
+      return undefined;
+    }
+    const clawAgent = madeAgentId(askId);
+    const key = this.madeKeyFor(room, askId);
+    const wanted: NewAgent = { key, name: forkName(original.name), forked_from: originalId, space_id: room };
+    const had = known.find((each) => each.key === key);
+    if (had !== undefined) {
+      const again = { ...wanted, name: had.name };
+      await this.registerAgain(again);
+      return again;
+    }
+    const from = await this.folderOf(source.clawAgent);
+    let copied: boolean;
+    try {
+      copied = from !== undefined && (await this.workspaces.copy(from, clawAgent));
+    } catch (error) {
+      this.log(`openclaw: could not copy ${original.name}'s folder for its copy: ${String(error)}`);
+      return undefined;
+    }
+    if (!copied) this.log(`openclaw: ${original.name}'s folder was not there to copy: its copy begins as a new agent's does`);
+    if (!(await this.makeClawAgent(clawAgent))) return undefined;
+    let remembers: boolean;
+    try {
+      remembers = await this.forkSession(key, clawAgent, source.sessionKey, wanted.name);
+    } catch (error) {
+      this.log(`openclaw: could not fork ${original.name}'s session for its copy: ${String(error)}`);
+      await this.removeClawAgent(clawAgent);
+      return undefined;
+    }
+    if (!remembers) this.log(`openclaw: ${original.name} never spoke in its room: its copy starts with nothing to remember`);
+    let made: ChipsAgent & Placed;
+    try {
+      made = await this.chips.registerAgent(wanted);
+    } catch (error) {
+      this.log(`chips refused ${wanted.name}, a copy of ${original.name}: ${String(error)}`);
+      this.sessions.delete(key);
+      await this.removeClawAgent(clawAgent);
+      return undefined;
+    }
+    this.learn([made]);
+    await this.nameClawAgent(clawAgent, made.name);
+    void this.contexts?.agent(made.agent_id, clawAgent);
+    void this.models?.agent(made.agent_id, { clawAgent, changeable: true });
+    if (remembers && copied && from !== undefined) this.tell(key, room, copyNote(original.name, from, this.workspaces.of(clawAgent)));
+    const placed = made.attached === false && made.why !== undefined ? `, not in it: ${made.why}` : "";
+    this.log(`chips: made ${made.name}, a copy of ${original.name}, for ${room}${placed}`);
+    return { ...wanted, name: made.name };
+  }
+
+  /**
+   * What a copy of one of ours is made from: the OpenClaw agent it is, and its session in the room it
+   * is in. One keyed by its session has that session wherever it is; one keyed by an OpenClaw agent
+   * has its session in its room, and none while it is in no room. Nothing for one that speaks as
+   * OpenClaw's primary agent, which is not copied.
+   */
+  private forkSourceOf(agent: ChipsAgent): { readonly clawAgent: string; readonly sessionKey: string | undefined } | undefined {
+    if (this.isMain(agent.key) || agent.key === this.self.harnessId) return undefined;
+    const ofSession = this.agentFor(agent.key);
+    const clawAgent = ofSession ?? agent.key;
+    if (clawAgent === this.primary) return undefined;
+    if (ofSession !== undefined) return { clawAgent, sessionKey: agent.key };
+    const room = this.roomOf.get(agent.agent_id) ?? null;
+    return { clawAgent, sessionKey: room === null ? undefined : this.takerFor(agent.agent_id, room).sessionKey };
+  }
+
+  /**
+   * An OpenClaw agent's folder, as the gateway names it: where the bridge made it, for one it made;
+   * where OpenClaw says (`agents.files.list`), for any other. Nothing when OpenClaw will not say.
+   */
+  private async folderOf(clawAgent: string): Promise<string | undefined> {
+    if (isMadeAgent(clawAgent)) return this.workspaces.of(clawAgent);
+    try {
+      const listed = await this.claw.request<{ workspace?: unknown }>("agents.files.list", { agentId: clawAgent });
+      return str(listed.workspace);
+    } catch (error) {
+      this.log(`openclaw: could not find ${clawAgent}'s folder: ${String(error)}`);
+      return undefined;
+    }
+  }
+
+  /**
+   * A copy's session in its room, forked from its original's (`parent`) through the original's last
+   * completed answer (OpenClaw's operator fork, `forkFrom: "last-completed"`), which leaves out a
+   * turn going on there rather than wait for it; or made with nothing in it when there is nothing to
+   * fork, an original that never spoke there having no session in OpenClaw. True when it was forked.
+   * Each is asked once more after a moment when OpenClaw refused it while taking in a config change,
+   * as the copy's making is one.
+   */
+  private async forkSession(key: string, agent: string, parent: string | undefined, title: string): Promise<boolean> {
+    const made = { key, agentId: agent, displayName: title };
+    let forked = false;
+    if (parent !== undefined) {
+      try {
+        await this.onceMoreIfReplaced(() =>
+          this.claw.request("sessions.create", { ...made, parentSessionKey: parent, fork: true, forkFrom: "last-completed" }),
+        );
+        forked = true;
+      } catch (error) {
+        if (!UNKNOWN_PARENT.test(String(error))) throw error;
+      }
+    }
+    if (!forked) await this.onceMoreIfReplaced(() => this.claw.request("sessions.create", made));
+    this.sessions.add(key);
+    return forked;
+  }
+
+  /** A gateway request OpenClaw refused while it took in a config change (`CONFIG_REPLACED`), asked once more after a moment. */
+  private async onceMoreIfReplaced<T>(ask: () => Promise<T>): Promise<T> {
+    try {
+      return await ask();
+    } catch (error) {
+      if (!CONFIG_REPLACED.test(String(error))) throw error;
+      await new Promise((resolve) => setTimeout(resolve, AGAIN_AFTER_MS));
+      return ask();
     }
   }
 
@@ -1645,6 +1864,9 @@ export class Bridge {
       // A new agent a person asked for in a room (Chips ADR 0108).
       case "agent.asked":
         return this.makeAgent(event);
+      // A copy of one of ours a person asked for in another room (Chips ADR 0087, Fork).
+      case "agent.fork":
+        return this.forkAgent(event);
       case "agent.released":
         return this.released(event);
       // One of ours deleted by a person (Chips ADR 0095): forgotten here, and unmade in OpenClaw.

@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { describe, it } from "node:test";
 import type { Joined, JoinOptions } from "@chipschat/harness";
 import { createServer } from "node:net";
-import { JOIN_NAME, JOINED_FILE, loadConfig, reachable, SetupError, STILL_GOOD } from "../src/config.ts";
+import { JOIN_NAME, JOINED_FILE, loadConfig, reachable, SetupError, STILL_GOOD, WANTS } from "../src/config.ts";
 
 const LINK = "http://192.168.1.20:4431/j/sec_abc";
 const JOINED: Joined = {
@@ -64,6 +64,15 @@ describe("the bridge's Chips side", () => {
     assert.equal(again.asked[0]?.link, undefined);
     assert.equal(again.asked[0]?.url, JOINED.url);
     assert.equal(config.harnessToken, JOINED.token);
+  });
+
+  it("asks, when it joins with a code, for what the gallery's card grants and for forks (Chips ADR 0087)", async () => {
+    const { env } = sandbox();
+    await loadConfig({ env, link: LINK, join: player().join, reach: up });
+    const again = player();
+    await loadConfig({ env, join: again.join, reach: up });
+    assert.deepEqual([...(again.asked[0]?.wants ?? [])], [...WANTS]);
+    assert.ok((WANTS as readonly string[]).includes("forks"));
   });
 
   it("reads CHIPS_JOIN_LINK as the gallery's command sets it, and a link wins over chips.env's lines", async () => {

@@ -37,6 +37,14 @@ joins, and keeps itself running from login. `chips disconnect openclaw` stops it
 `curl -fsSL https://chipschat.ai/install | sh -s -- connect openclaw '<link>'` installs Chips there
 first. The steps below run the bridge from this checkout instead, to work on it.
 
+What the bridge does in Chips is the mapping at the top of `bridge/src/bridge.ts`. A person's Fork
+(Chips ADR 0087), a copy of one of its agents in another room, is one more OpenClaw agent, called
+*Nova · fork* for Nova: its folder begins as a copy of Nova's, and its session in that room is forked
+from Nova's in Nova's room (`sessions.create` with `fork`, through Nova's last finished answer), so
+it remembers what Nova did and has the files that names. From then on the two remember apart. The
+Main agent is not copied. The card grants no `forks` yet, so Chips offers Fork only to a bridge that
+asked for it, as this one does when it joins with a code (`WANTS` in `bridge/src/config.ts`).
+
 ## Your own OpenClaw
 
 The bridge serves an OpenClaw installed on this machine as well as the test rig below (Chips's
@@ -97,7 +105,8 @@ bridge's own tests.
 
 Everything OpenClaw and the bridge keep is under `~/chips-openclaw/`:
 - `state/`: OpenClaw's config, sessions, workspace and logs; `state/chips/<agent>/` is the folder of
-  each OpenClaw agent the bridge made for an agent in Chips (`bridge/src/own-agents.ts`)
+  each OpenClaw agent the bridge made for an agent in Chips (`bridge/src/own-agents.ts`), a Fork's
+  copy's begun as a copy of its original's
 - `secrets/`: its sign-in
 - `.env`: the gateway token
 - `bridge/`: the bridge's device key, one cursor per Chips harness, its log, `chips.env` (the scratch

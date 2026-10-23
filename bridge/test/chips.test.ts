@@ -133,6 +133,27 @@ describe("the routes, as the bridge reads them", () => {
     assert.ok(history.events.some((event) => event.type === "message.post" && event["text"] === "hello"));
   });
 
+  it("hears a person's Fork, and registers the copy forked_from its original for the room, which it joins (Chips ADR 0087)", async () => {
+    await fake.close();
+    fake = await startFakeChips({ capabilities: ["agents", "forks"] });
+    const chips = await open();
+    const original = await chips.registerAgent({ key: "agent:scout:chips-main", name: "Scout" });
+    await chips.openSpace("agent:scout:chips-main");
+    const room = await fake.openRoom("Elsewhere");
+    const asks: ChipsEvent[] = [];
+    chips.stream(async (event) => {
+      if (event.type === "agent.fork") asks.push(event);
+    });
+    const { forkId } = await fake.askForFork(original.agent_id, room);
+    for (let waited = 0; asks.length === 0 && waited < 5_000; waited += 20) await new Promise((done) => setTimeout(done, 20));
+    assert.deepEqual([asks[0]?.["id"], asks[0]?.["agent_id"], asks[0]?.["space_id"]], [forkId, original.agent_id, room]);
+    // When it was asked, by Chips's clock: the room waits a minute from it.
+    assert.ok(Date.now() - Date.parse(String(asks[0]?.["ts"])) < 60_000);
+    const copy = await chips.registerAgent({ key: "agent:chips-01k5:chips-elsewhere", name: "Scout · fork", forked_from: original.agent_id, space_id: room });
+    assert.equal(copy.attached, true);
+    assert.equal((await chips.agents()).find((each) => each.agent_id === copy.agent_id)?.room, room);
+  });
+
   it("uploads a file and hands back the id a post names", async () => {
     const chips = await open();
     const id = await chips.upload("notes.md", Buffer.from("# Notes\n"));
