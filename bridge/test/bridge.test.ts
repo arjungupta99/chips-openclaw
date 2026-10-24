@@ -2487,6 +2487,22 @@ describe("the room's project (Chips ADR 0221)", () => {
     assert.ok(pushedFirst, "sent before the words were posted");
   });
 
+  it("says after its words when its change didn't reach the project (Chips AP-6)", async () => {
+    await bridge.onChips(forNova("start the notes"));
+    const first = sends()[0];
+    // A key in the copy holds the whole change back: the reply mustn't read as if it went.
+    const key = ["sk-", "ant-", "api03-", "Z".repeat(40)].join("");
+    writeFileSync(join(copy(), "config.js"), `export const key = "${key}";\n`);
+    ends(first?.["idempotencyKey"], "The key is in config.js.");
+    await bridge.settled();
+    const post = sent.find((event) => event.type === "message.post");
+    assert.equal(
+      post?.["text"],
+      "The key is in config.js.\n\n(Not in the room's project: config.js looks like it holds an Anthropic key, so nothing was sent.)",
+    );
+    assert.equal(post?.["change"], undefined);
+  });
+
   it("leaves the copy alone while a turn of the agent's runs, which the words join", async () => {
     await bridge.onChips(forNova("start the notes"));
     const first = sends()[0];

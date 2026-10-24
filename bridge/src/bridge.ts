@@ -83,7 +83,7 @@
  * same event and Chips answers it as a duplicate.
  */
 
-import { type Project, pushedInWords, Refuse, renderReplyingTo } from "@chipschat/harness";
+import { heldNote, type Project, pushedInWords, Refuse, renderReplyingTo } from "@chipschat/harness";
 import { type ChipsAgent, type ChipsEvent, ChipsRefusal, type NewAgent, type Placed, type Taken } from "./chips.ts";
 import { chipsId } from "./ids.ts";
 import { type Media, mediaLinesIn, sentWithTool } from "./media.ts";
@@ -2643,11 +2643,12 @@ export class Bridge {
     if (text !== "" || run.media.length > 0) {
       this.write(run, async () => {
         const files = await this.upload(run);
-        run.reply = [text, ...files.notes].filter((part) => part !== "").join("\n\n");
+        // The change the turn's push made goes with its words (Chips ADR 0222); a change that didn't
+        // go is said after them (Chips AP-6).
+        const { change, note } = await pushed;
+        run.reply = [text, note ?? "", ...files.notes].filter((part) => part !== "").join("\n\n");
         run.sent = files.names;
         if (run.reply === "" && files.ids.length === 0) return undefined;
-        // The change the turn's push made goes with its words (Chips ADR 0222).
-        const change = await pushed;
         return {
           type: "message.post",
           run_id: run.chipsRun,
@@ -3014,21 +3015,25 @@ export class Bridge {
   /**
    * What a turn changed in its agent's copy of the room's project, committed and sent, begun as the
    * turn ends so that the session's next pull waits for it: the commit it left `main` at, for the
-   * turn's words to carry (Chips ADR 0222), when it sent one. Left while another turn of the
-   * session runs: its end sends both.
+   * turn's words to carry (Chips ADR 0222), when it sent one; else, when the change didn't go, the
+   * line the words say so in (Chips AP-6). Left while another turn of the session runs: its end
+   * sends both.
    */
-  private sendProject(run: Run, words: string): Promise<string | undefined> {
+  private sendProject(run: Run, words: string): Promise<{ change?: string; note?: string }> {
     const copy = this.copies.get(run.sessionKey);
-    if (copy === undefined || copy.spaceId !== run.spaceId || this.turnIn(run.sessionKey)) return Promise.resolve(undefined);
+    if (copy === undefined || copy.spaceId !== run.spaceId || this.turnIn(run.sessionKey)) return Promise.resolve({});
     const name = (run.agentId === undefined ? undefined : this.nameOf.get(run.agentId)) ?? run.sessionKey;
     return this.onCopy(run.sessionKey, async () => {
       try {
         const pushed = await copy.project.push({ words });
         this.log(`${name}'s project: ${pushedInWords(pushed)}`);
-        return pushed.state === "sent" ? pushed.commit : undefined;
+        if (pushed.state === "sent") return { change: pushed.commit };
+        const note = heldNote(pushed, name);
+        return note === undefined ? {} : { note };
       } catch (error) {
         this.log(`${name}'s project couldn't be sent: ${String(error)}`);
-        return undefined;
+        const note = heldNote({ state: "failed", why: String(error) }, name);
+        return note === undefined ? {} : { note };
       }
     });
   }
