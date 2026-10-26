@@ -84,6 +84,7 @@
  */
 
 import { heldNote, type Project, pushedInWords, Refuse, renderReplyingTo } from "@chipschat/harness";
+import { withRole } from "@chipschat/protocol";
 import { type ChipsAgent, type ChipsEvent, ChipsRefusal, type NewAgent, type Placed, type Taken } from "./chips.ts";
 import { chipsId } from "./ids.ts";
 import { type Media, mediaLinesIn, sentWithTool } from "./media.ts";
@@ -308,7 +309,9 @@ function contextLineOf(line: Payload, self?: string): string | undefined {
       const files = Array.isArray(line["files"]) ? (line["files"] as unknown[]).filter((each) => typeof each === "string") : [];
       const sent = files.length > 0 ? `(sent ${files.join(", ")})` : "";
       const words = [flat(line["text"]) || flat(line["transcript"]), sent].filter((part) => part !== "").join(" ");
-      return words === "" ? undefined : `${name}: ${words}`;
+      // A person's standing after their name, as the SDK's lines say it (Chips SEC-15, SEC-49).
+      const who = name === "You" ? name : withRole(name, { kind: str(from?.["kind"]), workspace_role: str(from?.["workspace_role"]) });
+      return words === "" ? undefined : `${who}: ${words}`;
     }
     case "joined":
       return `(${name} joined the room)`;
@@ -363,14 +366,20 @@ function tookTurn(each: unknown, own: (participantId: string) => boolean): boole
  * The message a reply answers (Chips ADR 0219), in the words Chips's SDK writes it with: whose
  * message and when, the lines said just before it when Chips handed them, and the message quoted.
  * `taker` is who the turn is said as, so its own message reads "your message". Nothing when the
- * message answers none.
+ * message answers none. Who replies is handed with their kind and standing, so "Priya (guest) is
+ * replying" reads as a guest's (Chips SEC-49).
  */
 export function replyingIn(event: ChipsEvent, taker: string): string {
   const quoted = event["replying_to"] as Payload | undefined;
   const from = event["from"] as Payload | undefined;
   if (typeof quoted !== "object" || quoted === null || typeof quoted["from"] !== "object" || typeof quoted["at"] !== "string") return "";
   return renderReplyingTo(quoted as unknown as Parameters<typeof renderReplyingTo>[0], {
-    sender: { id: String(from?.["participant_id"] ?? ""), name: str(from?.["display_name"]) ?? "Someone" },
+    sender: {
+      id: String(from?.["participant_id"] ?? ""),
+      name: str(from?.["display_name"]) ?? "Someone",
+      kind: str(from?.["kind"]),
+      workspace_role: str(from?.["workspace_role"]),
+    },
     taker,
     at: str(event["ts"]),
   });
