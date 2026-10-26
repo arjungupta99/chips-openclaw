@@ -36,7 +36,7 @@ const str = (value: unknown): string | undefined => (typeof value === "string" &
  * reminder is said to be set, and said when it fires, with ⏰ (Arjun, 14 October 2026).
  */
 export const SPEAKING_LATER =
-  'To remind someone or to do something later, use automations with sessionTarget "current", or "isolated" with delivery {mode: "none"}: what it says then is posted in this room either way. ' +
+  'To remind someone or to do something later, use automations with sessionTarget "current", or "isolated" with delivery {mode: "none"}: what it says then is posted in this space either way. ' +
   "Write a time with the UTC offset Chips's note gives; an `at` without one is read as UTC. " +
   "When you set one, say so in one line that begins with ⏰ and gives the time it fires, in the person's time, and have what it says when it fires begin with ⏰ too.";
 

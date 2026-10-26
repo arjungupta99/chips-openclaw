@@ -314,19 +314,19 @@ function contextLineOf(line: Payload, self?: string): string | undefined {
       return words === "" ? undefined : `${who}: ${words}`;
     }
     case "joined":
-      return `(${name} joined the room)`;
+      return `(${name} joined the space)`;
     case "left":
-      return `(${name} left the room)`;
+      return `(${name} left the space)`;
     case "renamed": {
       const title = str(line["title"]);
       return title !== undefined
-        ? `(${name} renamed the room "${title}")`
+        ? `(${name} renamed the space "${title}")`
         : `(${str(line["previous"]) ?? name} is now called ${str(line["name"]) ?? name})`;
     }
     case "archived":
-      return `(${name} archived the room)`;
+      return `(${name} archived the space)`;
     case "unarchived":
-      return `(${name} unarchived the room)`;
+      return `(${name} unarchived the space)`;
     default:
       return undefined;
   }
@@ -545,7 +545,7 @@ export function forkName(original: string): string {
  */
 function copyNote(name: string, from: string, folder: string): string {
   return (
-    `You are a copy of ${name}, made for this room: you remember what ${name} did until now, and from here on the two of you remember apart. ` +
+    `You are a copy of ${name}, made for this space: you remember what ${name} did until now, and from here on the two of you remember apart. ` +
     `${name}'s files were copied into your own folder, ${folder}. Work there: ${from} is still ${name}'s.`
   );
 }
@@ -561,9 +561,9 @@ const isAgentKind = (kind: unknown): boolean => kind === "harness" || kind === "
  */
 function fromAgent(from: Payload, text: string, noted: boolean): string {
   const name = str(from["display_name"]) ?? "Another agent";
-  if (noted) return `${name} (an agent in this room) said this to you:\n${text}`;
+  if (noted) return `${name} (an agent in this space) said this to you:\n${text}`;
   const handle = `@${name.replace(/\s+/g, "")}`;
-  return `${name} (an agent in this room) said this to you. Everyone here reads your answer; ${name} acts on it only if you address it as ${handle}:\n${text}`;
+  return `${name} (an agent in this space) said this to you. Everyone here reads your answer; ${name} acts on it only if you address it as ${handle}:\n${text}`;
 }
 
 /**
@@ -642,7 +642,7 @@ export function heldNoteOf(taken: Taken | undefined): string | undefined {
   const count = taken.exchange?.count;
   const since = typeof count === "number" && count > 0 ? ` (they have sent each other ${count} since a person last acted)` : "";
   return (
-    `Your last message here was held, so the agents it named do not have it yet: messages between the agents in this room are held${since} until a person acts. ` +
+    `Your last message here was held, so the agents it named do not have it yet: messages between the agents in this space are held${since} until a person acts. ` +
     "Until then, tell the person what is done and what is blocked, rather than asking the agents again."
   );
 }
@@ -692,7 +692,7 @@ function lookAgainGoal(note: string | undefined): string {
  */
 function lookAgainPrompt(name: string, reply: string | undefined, note: string | undefined): string {
   return [
-    `${name} says your reply in this room wasn't right.`,
+    `${name} says your reply in this space wasn't right.`,
     reply === undefined ? undefined : `Your reply:\n«${cutTo(reply, REPLY_QUOTED)}»`,
     note === undefined ? "They didn't say what. Read your reply again and find what was wrong." : `What wasn't right: «${note}»`,
     "Look at it again and answer properly in its place. If it is not clear what was wrong, ask them in one short line. Say plainly what you changed.",
@@ -2251,7 +2251,7 @@ export class Bridge {
     ]);
     const lines = heardIn({ lines: all }, () => false, with_.speaker);
     if (lines.length === 0) return text;
-    const heading = recent ? "Said in this room lately:" : "Said in this room since you last spoke:";
+    const heading = recent ? "Said in this space lately:" : "Said in this space since you last spoke:";
     return `${heading}\n${lines.join("\n")}\n\n${text}`;
   }
 
@@ -2508,7 +2508,7 @@ export class Bridge {
       (jobId !== undefined
         ? `Scheduled: ${job?.name ?? "an automation"}`
         : latest === undefined
-          ? "Answer in the room."
+          ? "Answer in the space."
           : `Following up: ${latest}`);
     this.write(run, {
       type: "run.started",

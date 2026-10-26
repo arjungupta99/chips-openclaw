@@ -38,9 +38,9 @@ export interface RoomFile {
  * the project's note said not to (Chips AP-9).
  */
 export function sendingFiles(project = false): string {
-  const which = project ? "A file that isn't in the room's project" : "A file";
+  const which = project ? "A file that isn't in the space's project" : "A file";
   return (
-    `${which} reaches this room only when you send it, on a line of its own: MEDIA:<path>. ` +
+    `${which} reaches this space only when you send it, on a line of its own: MEDIA:<path>. ` +
     "A path alone reaches nobody: the people and agents here cannot open your folder. " +
     "A MEDIA: line sends any file in your folder; the message tool refuses some, a web page among them."
   );
@@ -130,7 +130,7 @@ export function filesLine(
   const lines: string[] = [];
   if (handed.length > 0) {
     lines.push(
-      `Files in this room, attached at their current version: ${handed.map(described).join(", ")}. ` +
+      `Files in this space, attached at their current version: ${handed.map(described).join(", ")}. ` +
         "To change one, send it back under the same name: Chips takes it as the next version.",
     );
   }

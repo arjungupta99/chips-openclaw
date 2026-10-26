@@ -314,7 +314,7 @@ describe("rooms and sessions", () => {
     assert.deepEqual(calls.map(([method]) => method), ["sessions.create", "chat.send"]);
     assert.equal(
       calls[1]?.[1]["message"],
-      told("J Bot (an agent in this room) said this to you. Everyone here reads your answer; J Bot acts on it only if you address it as @JBot:\nIs main green?"),
+      told("J Bot (an agent in this space) said this to you. Everyone here reads your answer; J Bot acts on it only if you address it as @JBot:\nIs main green?"),
     );
     const r1 = "msg_01K4ZQPX0000000000000000A1";
     bridge.onClaw({
@@ -377,7 +377,7 @@ describe("rooms and sessions", () => {
     const message = String(send?.["message"] ?? "");
     assert.match(
       message,
-      /Said in this room since you last spoke:\nArjun: Order the chocolate one\n\nArjun is replying to your message from .+\.\nSaid just before it:\nArjun: Hold Foreign Cinema\nYour message:\n> Held for 6 at 7:30\.\n\nMake it 8 people$/,
+      /Said in this space since you last spoke:\nArjun: Order the chocolate one\n\nArjun is replying to your message from .+\.\nSaid just before it:\nArjun: Hold Foreign Cinema\nYour message:\n> Held for 6 at 7:30\.\n\nMake it 8 people$/,
     );
   });
 
@@ -407,7 +407,7 @@ describe("rooms and sessions", () => {
       { seq: 2, kind: "said", from: { id: "agt_x", kind: "agent", name: "Jacobian", workspace_role: "owner" }, text: "Noted", addressed_to: [] },
       { seq: 3, kind: "joined", from: guest },
     ] };
-    assert.deepEqual(heardIn(lines, () => false), ["Arjun (owner) (guest): Send the deposit", "Jacobian: Noted", "(Arjun (owner) joined the room)"]);
+    assert.deepEqual(heardIn(lines, () => false), ["Arjun (owner) (guest): Send the deposit", "Jacobian: Noted", "(Arjun (owner) joined the space)"]);
   });
 
   it("puts what Chips handed over ahead of the turn (Chips ADR 0088)", async () => {
@@ -431,7 +431,7 @@ describe("rooms and sessions", () => {
     const send = calls.find(([method]) => method === "chat.send")?.[1];
     assert.equal(
       send?.["message"],
-      told("Said in this room since you last spoke:\nArjun: @Jacobian the notes?\nJacobian: Drafted, in the doc.\n(Dana joined the room)\n\n@OpenClaw what did Jacobian say?"),
+      told("Said in this space since you last spoke:\nArjun: @Jacobian the notes?\nJacobian: Drafted, in the doc.\n(Dana joined the space)\n\n@OpenClaw what did Jacobian say?"),
     );
     // A turn Chips hands nothing with is told nothing, whatever was overheard before it.
     await bridge.onChips({ ...said("an overheard line"), type: "message.overheard" });
@@ -462,11 +462,11 @@ describe("rooms and sessions", () => {
       [
         "Dana: Book it.",
         "Dana: (sent map.png)",
-        '(Arjun renamed the room "Kyoto")',
+        '(Arjun renamed the space "Kyoto")',
         "(Dana is now called Dana K)",
-        "(Arjun archived the room)",
-        "(Arjun unarchived the room)",
-        "(Dana K left the room)",
+        "(Arjun archived the space)",
+        "(Arjun unarchived the space)",
+        "(Dana K left the space)",
       ],
     );
   });
@@ -657,7 +657,7 @@ describe("a reply that was not right (Chips ADR 0200)", () => {
         {
           sessionKey: bridge.keyFor(ROOM, "scout"),
           message: [
-            "Arjun says your reply in this room wasn't right.",
+            "Arjun says your reply in this space wasn't right.",
             "Your reply:\n«Sunday: a hike at dawn,\nthen brunch.»",
             `What wasn't right: «${NOTE}»`,
             LAST,
@@ -699,7 +699,7 @@ describe("a reply that was not right (Chips ADR 0200)", () => {
     assert.equal(
       send?.["message"],
       [
-        "Arjun says your reply in this room wasn't right.",
+        "Arjun says your reply in this space wasn't right.",
         "Your reply:\n«Sunday: a hike at dawn,\nthen brunch.»",
         "They didn't say what. Read your reply again and find what was wrong.",
         LAST,
@@ -722,7 +722,7 @@ describe("a reply that was not right (Chips ADR 0200)", () => {
     assert.equal(sends.length, 1);
     // As a message for nobody in particular is: whichever of ours Chips has in the room.
     assert.equal(sends[0]?.["sessionKey"], bridge.keyFor(ROOM, "main"));
-    assert.equal(sends[0]?.["message"], ["Arjun says your reply in this room wasn't right.", `What wasn't right: «${NOTE}»`, LAST].join("\n\n"));
+    assert.equal(sends[0]?.["message"], ["Arjun says your reply in this space wasn't right.", `What wasn't right: «${NOTE}»`, LAST].join("\n\n"));
   });
 
   it("cuts a long note's goal at 120 characters and a long reply at 1500, each with an ellipsis", async () => {
@@ -908,7 +908,7 @@ describe("an answer's files", () => {
       content: Buffer.from("png-bytes").toString("base64"),
       sizeBytes: 9,
     });
-    const HANDED = `Files in this room, attached at their current version: ascii-alphabet.html (v2, by Oc3). To change one, send it back under the same name: Chips takes it as the next version.\n${SENDING_FILES}\n\n${SPEAKING_LATER}`;
+    const HANDED = `Files in this space, attached at their current version: ascii-alphabet.html (v2, by Oc3). To change one, send it back under the same name: Chips takes it as the next version.\n${SENDING_FILES}\n\n${SPEAKING_LATER}`;
 
     it("tells a turn in a room with no files yet how a file of its own reaches the room (Chips AW-19)", async () => {
       // Terra Fab, 10 October 2026: both agents' first answers named a path in their own folder.
@@ -931,7 +931,7 @@ describe("an answer's files", () => {
       await bridge.onChips(said("@OpenClaw carry on", listing([GALLERY], [line])));
       assert.equal(
         sends()[0]?.["message"],
-        `${HANDED}\n\nSaid in this room since you last spoke:\nOc3: Started it (sent ascii-alphabet.html)\n\n@OpenClaw carry on`,
+        `${HANDED}\n\nSaid in this space since you last spoke:\nOc3: Started it (sent ascii-alphabet.html)\n\n@OpenClaw carry on`,
       );
       await bridge.onChips(said("Still on ascii-alphabet.html?", { message_id: "msg_01K4ZQPX0000000000000000A2", ...listing([GALLERY]) }));
       assert.equal(sends()[1]?.["message"], told("Still on ascii-alphabet.html?"));
@@ -949,7 +949,7 @@ describe("an answer's files", () => {
       assert.equal(
         sends()[0]?.["message"],
         [
-          "Files in this room, attached at their current version: a1.txt (v1), a2.txt (v1), a3.txt (v1), a4.txt (v1), a5.txt (v1). To change one, send it back under the same name: Chips takes it as the next version.",
+          "Files in this space, attached at their current version: a1.txt (v1), a2.txt (v1), a3.txt (v1), a4.txt (v1), a5.txt (v1). To change one, send it back under the same name: Chips takes it as the next version.",
           "Not attached: big.mov (v1), since it is larger than 5 MB.",
           "Not attached: a6.txt (v1), since a turn is handed 5 files at most.",
           SENDING_FILES,
@@ -1039,7 +1039,7 @@ describe("an answer's files", () => {
         sends()[1]?.["message"],
         [
           `Chips: Your last answer here sent a file Chips did not take as its next version: ${why}`,
-          `Files in this room, attached at their current version: ascii-alphabet.html (v3, by Oc2). To change one, send it back under the same name: Chips takes it as the next version.\n${SENDING_FILES}`,
+          `Files in this space, attached at their current version: ascii-alphabet.html (v3, by Oc2). To change one, send it back under the same name: Chips takes it as the next version.\n${SENDING_FILES}`,
           SPEAKING_LATER,
           "How is it going?",
         ].join("\n\n"),
@@ -1342,7 +1342,7 @@ describe("what a turn cost (Chips ADRs 0117, 0118)", () => {
   it("adds up the priced model calls since the turn began, and nothing before it or unpriced", () => {
     const messages = [
       call(900, 0.4),
-      { role: "user", timestamp: 1_000, content: "In this room: …" },
+      { role: "user", timestamp: 1_000, content: "In this space: …" },
       call(1_010, 0.053264, 3_855, 11_264, 69),
       { role: "toolResult", timestamp: 1_011, content: [] },
       call(1_020, 0.056176, 1_745, 14_976, 475),
@@ -1857,7 +1857,7 @@ describe("OpenClaw's agents as agents in Chips (Chips ADR 0087)", () => {
     await bridge.onChips(said("Thanks", { ...inOther, seq: 40, message_id: "msg_01K4ZQPX0000000000000000A2" }));
     assert.deepEqual(
       calls.filter(([method]) => method === "chat.send").map(([, params]) => params["message"]),
-      [told("Said in this room since you last spoke:\nDana: Book the table\n(Arjun joined the room)\nArjun: Hi all\n\n@OpenClaw which one?"), told("Thanks")],
+      [told("Said in this space since you last spoke:\nDana: Book the table\n(Arjun joined the space)\nArjun: Hi all\n\n@OpenClaw which one?"), told("Thanks")],
     );
   });
 
@@ -1894,7 +1894,7 @@ describe("OpenClaw's agents as agents in Chips (Chips ADR 0087)", () => {
     calls = [];
     const hello = { participant_id: "agt_hello", kind: "agent", display_name: "Hello", role: "member" };
     const note =
-      "In this room: Arjun (person, @Arjun), Hello (agent, @Hello), and you, OpenClaw (@OpenClaw). Everyone here reads what you write; only those you @-mention act on it.";
+      "In this space: Arjun (person, @Arjun), Hello (agent, @Hello), and you, OpenClaw (@OpenClaw). Everyone here reads what you write; only those you @-mention act on it.";
     await bridge.onChips(
       said("@OpenClaw F–J are yours.", {
         from: hello,
@@ -1913,7 +1913,7 @@ describe("OpenClaw's agents as agents in Chips (Chips ADR 0087)", () => {
     const message = String(calls.find(([method]) => method === "chat.send")?.[1]["message"]);
     assert.equal(
       message,
-      told("Said in this room since you last spoke:\nArjun: Five letters each.\n\nHello (an agent in this room) said this to you:\n@OpenClaw F–J are yours.", note),
+      told("Said in this space since you last spoke:\nArjun: Five letters each.\n\nHello (an agent in this space) said this to you:\n@OpenClaw F–J are yours.", note),
     );
   });
 
@@ -1935,8 +1935,8 @@ describe("OpenClaw's agents as agents in Chips (Chips ADR 0087)", () => {
 
   it("gives the harness its own note where it takes the turn itself, as in a room it was asked for", async () => {
     await bridge.onChips({ type: "space.created", space_id: ROOM, asked_of: ME, kind: "direct" });
-    await bridge.onChips(said("Plan a picnic", { for: [ME], addressed_to: [ME], room: { members: [], notes: { [ME]: "In this room: …" } } }));
-    assert.equal(calls.find(([method]) => method === "chat.send")?.[1]["message"], told("Plan a picnic", "In this room: …"));
+    await bridge.onChips(said("Plan a picnic", { for: [ME], addressed_to: [ME], room: { members: [], notes: { [ME]: "In this space: …" } } }));
+    assert.equal(calls.find(([method]) => method === "chat.send")?.[1]["message"], told("Plan a picnic", "In this space: …"));
   });
 
   it("leads with Chips's word on the agents' talk, as Chips's, ahead of the room note and the words (the referee)", async () => {
@@ -1951,13 +1951,13 @@ describe("OpenClaw's agents as agents in Chips (Chips ADR 0087)", () => {
         from: hello,
         addressed_to: ["agt_main"],
         for: ["agt_main"],
-        room: { members: [], notes: { agt_main: "In this room: …" } },
+        room: { members: [], notes: { agt_main: "In this space: …" } },
         exchange: { count: 9, stage: "nudge", note: ` ${word} ` },
       }),
     );
     assert.equal(
       calls.find(([method]) => method === "chat.send")?.[1]["message"],
-      told("Hello (an agent in this room) said this to you:\n@OpenClaw send K–O", `Chips: ${word}\n\nIn this room: …`),
+      told("Hello (an agent in this space) said this to you:\n@OpenClaw send K–O", `Chips: ${word}\n\nIn this space: …`),
     );
   });
 
@@ -1992,7 +1992,7 @@ describe("OpenClaw's agents as agents in Chips (Chips ADR 0087)", () => {
     const sends = calls.filter(([method]) => method === "chat.send").map(([, params]) => String(params["message"]));
     assert.equal(
       sends[1],
-      `Chips: Your last message here was held, so the agents it named do not have it yet: messages between the agents in this room are held (they have sent each other 48 since a person last acted) until a person acts. Until then, tell the person what is done and what is blocked, rather than asking the agents again.\n\n${SENDING_FILES}\n\n${SPEAKING_LATER}\n\nWhere are we?`,
+      `Chips: Your last message here was held, so the agents it named do not have it yet: messages between the agents in this space are held (they have sent each other 48 since a person last acted) until a person acts. Until then, tell the person what is done and what is blocked, rather than asking the agents again.\n\n${SENDING_FILES}\n\n${SPEAKING_LATER}\n\nWhere are we?`,
     );
     assert.equal(sends[2], told("Thanks"));
   });
@@ -2015,7 +2015,7 @@ describe("OpenClaw's agents as agents in Chips (Chips ADR 0087)", () => {
     calls = [];
     const hello = { participant_id: "agt_hello", kind: "agent", display_name: "Hello", role: "member" };
     await bridge.onChips(said("@OpenClaw what number?", { from: hello, addressed_to: ["agt_main"], for: ["agt_main"] }));
-    assert.match(String(calls.find(([method]) => method === "chat.send")?.[1]["message"]), /\n\nHello \(an agent in this room\)/);
+    assert.match(String(calls.find(([method]) => method === "chat.send")?.[1]["message"]), /\n\nHello \(an agent in this space\)/);
     calls = [];
     const mine = { participant_id: "agt_main", kind: "agent", display_name: "OpenClaw", role: "member" };
     await bridge.onChips(said("Ten.", { from: mine, addressed_to: ["agt_main"], for: ["agt_main"] }));
@@ -2035,7 +2035,7 @@ describe("OpenClaw's agents as agents in Chips (Chips ADR 0087)", () => {
     const sends = calls.filter(([method]) => method === "chat.send").map(([, params]) => [params["sessionKey"], params["message"]]);
     assert.equal(sends.length, 1);
     assert.equal(sends[0]?.[0], bridge.keyFor(ROOM, "main"));
-    assert.match(String(sends[0]?.[1]), /\n\nScout \(an agent in this room\) said this to you\b[^]*\n@OpenClaw add K–O\.$/);
+    assert.match(String(sends[0]?.[1]), /\n\nScout \(an agent in this space\) said this to you\b[^]*\n@OpenClaw add K–O\.$/);
     // Its own words to itself, and from a Chips that names nobody, are nobody's turn.
     calls = [];
     await bridge.onChips(said("Noted.", { from: scout, message_id: "msg_01K4ZQPX0000000000000000A2", addressed_to: ["agt_scout"], for: ["agt_scout"] }));
@@ -2179,7 +2179,7 @@ describe("OpenClaw's agents as agents in Chips (Chips ADR 0087)", () => {
     assert.equal(
       calls.find(([method]) => method === "chat.send")?.[1]["message"],
       // Every line, the request it took no turn on in this conversation among them, and its own words as its own.
-      told("Said in this room lately:\nArjun: Hey both, build an ASCII gallery\nOpenClaw: I made A to J.\nYou: No browser for a screenshot.\nArjun: Thanks both\n\nWhat did each of you do?"),
+      told("Said in this space lately:\nArjun: Hey both, build an ASCII gallery\nOpenClaw: I made A to J.\nYou: No browser for a screenshot.\nArjun: Thanks both\n\nWhat did each of you do?"),
     );
     // Once: its next turn there is handed what Chips carries, and what it missed while it went.
     pulls = [];
@@ -2208,7 +2208,7 @@ describe("OpenClaw's agents as agents in Chips (Chips ADR 0087)", () => {
     );
     assert.deepEqual(pulls, [[ROOM, 13, 20]]);
     // The other's answer, and not its own, which it said in this conversation.
-    assert.equal(calls.find(([method]) => method === "chat.send")?.[1]["message"], told("Said in this room since you last spoke:\nOpenClaw: I'll do the letters.\n\n@OpenClaw go on"));
+    assert.equal(calls.find(([method]) => method === "chat.send")?.[1]["message"], told("Said in this space since you last spoke:\nOpenClaw: I'll do the letters.\n\n@OpenClaw go on"));
   });
 
   it("keeps a line meant for another of its agents in an agent's catch-up: that was a turn in another conversation", async () => {
@@ -2218,7 +2218,7 @@ describe("OpenClaw's agents as agents in Chips (Chips ADR 0087)", () => {
     await bridge.onChips(said("Over to you", { seq: 21, addressed_to: ["agt_main"], for: ["agt_main"], context }));
     assert.equal(
       calls.find(([method]) => method === "chat.send")?.[1]["message"],
-      told("Said in this room since you last spoke:\nArjun: @claimed only you\n\nOver to you"),
+      told("Said in this space since you last spoke:\nArjun: @claimed only you\n\nOver to you"),
     );
     calls = [];
     // The agent it was for had a turn on it, in its own conversation.
@@ -2481,13 +2481,13 @@ describe("the room's project (Chips ADR 0221)", () => {
     const first = sends()[0];
     assert.ok(
       String(first?.["message"]).includes(
-        `The room's project is a git repository. Your copy is /home/node/.openclaw/chips/${NOVA}/room (0 files), brought up to date just now.`,
+        `The space's project is a git repository. Your copy is /home/node/.openclaw/chips/${NOVA}/room (0 files), brought up to date just now.`,
       ),
       String(first?.["message"]),
     );
     // Only a file outside the project needs sending (Chips AP-9).
     assert.ok(String(first?.["message"]).includes(sendingFiles(true)), String(first?.["message"]));
-    assert.match(sendingFiles(true), /^A file that isn't in the room's project reaches this room only when you send it/);
+    assert.match(sendingFiles(true), /^A file that isn't in the space's project reaches this space only when you send it/);
     // The agent writes in the container; the files are this Mac's, under OpenClaw's state.
     writeFileSync(join(copy(), "notes.md"), "One sentence.\n");
     let pushedFirst = false;
@@ -2515,7 +2515,7 @@ describe("the room's project (Chips ADR 0221)", () => {
     const post = sent.find((event) => event.type === "message.post");
     assert.equal(
       post?.["text"],
-      "The key is in config.js.\n\n(Not in the room's project: config.js looks like it holds an Anthropic key, so nothing was sent.)",
+      "The key is in config.js.\n\n(Not in the space's project: config.js looks like it holds an Anthropic key, so nothing was sent.)",
     );
     assert.equal(post?.["change"], undefined);
   });
@@ -2526,14 +2526,14 @@ describe("the room's project (Chips ADR 0221)", () => {
     bridge.onClaw({ event: "chat", payload: { runId: first?.["idempotencyKey"], sessionKey: novaKey(), seq: 1, state: "delta", message: "Writing" } });
     writeFileSync(join(copy(), "notes.md"), "Half a sentence");
     await bridge.onChips(forNova("and a second line", "msg_01K4ZQPX0000000000000000A2"));
-    assert.doesNotMatch(String(sends()[1]?.["message"]), /The room's project/);
+    assert.doesNotMatch(String(sends()[1]?.["message"]), /The space's project/);
     // Not committed, nor the copy moved, under the turn that is writing it.
     assert.equal(execFileSync("git", ["status", "--porcelain"], { cwd: copy(), encoding: "utf8" }), "?? notes.md\n");
   });
 
   it("gives the primary agent, whose folder is every room's, no project", async () => {
     await bridge.onChips(said("hello"));
-    assert.doesNotMatch(String(sends()[0]?.["message"]), /The room's project/);
+    assert.doesNotMatch(String(sends()[0]?.["message"]), /The space's project/);
     assert.ok(String(sends()[0]?.["message"]).includes(SENDING_FILES));
     assert.equal(existsSync(join(sandbox, "state", "workspace", "room")), false);
   });
@@ -2638,7 +2638,7 @@ describe("a copy of an agent for a person's Fork (Chips ADR 0087)", () => {
     // Its session was forked already; Nova's is the one it had.
     assert.deepEqual(calls.filter(([method]) => method === "sessions.create").map(([, params]) => params["key"]), [novaKey()]);
     const note =
-      "Chips: You are a copy of Nova, made for this room: you remember what Nova did until now, and from here on the two of you remember apart. " +
+      "Chips: You are a copy of Nova, made for this space: you remember what Nova did until now, and from here on the two of you remember apart. " +
       `Nova's files were copied into your own folder, /home/node/.openclaw/chips/${COPY}. Work there: /home/node/.openclaw/chips/${NOVA} is still Nova's.`;
     assert.equal(sends[0]?.["message"], told("@Nova·fork what is the code word?", note));
     assert.equal(sends[1]?.["message"], told("@Nova and you?"));
