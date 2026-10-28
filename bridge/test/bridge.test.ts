@@ -1085,14 +1085,37 @@ describe("supervision", () => {
     assert.ok(Number(card?.["expires_in"]) > 100 && Number(card?.["expires_in"]) <= 120);
   });
 
-  it("passes a yes for always back as allow-always, and says it was passed on", async () => {
+  it("passes a command's yes for always back as allow-once, and says it was passed on (Chips ADR 0239)", async () => {
     asked();
     await bridge.settled();
     const card = sent.find((event) => event.type === "approval.request");
     await bridge.onChips({ type: "approval.resolved", approval_id: card?.["approval_id"], run_id: card?.["run_id"], decision: "approved", scope: "always" });
     await bridge.settled();
-    assert.deepEqual(calls, [["exec.approval.resolve", { id: "ap-1", decision: "allow-always" }]]);
+    // Chips remembers how the command starts and answers the next one itself.
+    assert.deepEqual(calls, [["exec.approval.resolve", { id: "ap-1", decision: "allow-once" }]]);
     assert.equal(sent.at(-1)?.type, "approval.executed");
+  });
+
+  it("passes a yes for always back as allow-always for a plugin's ask that is not a command", async () => {
+    bridge.onClaw({ event: "chat", payload: { runId: "r10", sessionKey: key(), seq: 1, state: "status" } });
+    bridge.onClaw({
+      event: "plugin.approval.requested",
+      payload: {
+        id: "plugin:ap-9",
+        request: {
+          title: "Post to the board?",
+          toolName: "board_post",
+          allowedDecisions: ["allow-once", "allow-always", "deny"],
+          sessionKey: key(),
+          runId: "r10",
+        },
+      },
+    });
+    await bridge.settled();
+    const card = sent.find((event) => event.type === "approval.request");
+    assert.equal((card?.["action"] as { kind: string }).kind, "tool.call");
+    await bridge.onChips({ type: "approval.resolved", approval_id: card?.["approval_id"], decision: "approved", scope: "always" });
+    assert.deepEqual(calls, [["plugin.approval.resolve", { id: "plugin:ap-9", decision: "allow-always" }]]);
   });
 
   it("takes a yes for always as a yes for once when OpenClaw offers only once", async () => {
@@ -1143,7 +1166,8 @@ describe("supervision", () => {
     assert.equal(card?.["question"], "Run `ls -la`?");
     assert.equal(card?.["effect"], undefined);
     await bridge.onChips({ type: "approval.resolved", approval_id: card?.["approval_id"], decision: "approved", scope: "always" });
-    assert.deepEqual(calls, [["plugin.approval.resolve", { id: "plugin:ap-3", decision: "allow-always" }]]);
+    // A command: Codex's own always is not given (Chips ADR 0239).
+    assert.deepEqual(calls, [["plugin.approval.resolve", { id: "plugin:ap-3", decision: "allow-once" }]]);
   });
 
   it("says where Codex's own command runs, from the folder its tool call started in (AQ-2)", async () => {

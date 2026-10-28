@@ -799,7 +799,8 @@ export class Bridge {
   /** Chips's approval id → OpenClaw's, and whether OpenClaw takes allow-always for it. */
   /**
    * Chips's approval id to OpenClaw's, the method that answers it (an exec approval and a plugin
-   * approval are resolved apart) and whether OpenClaw takes a yes for always.
+   * approval are resolved apart) and whether a yes for always is OpenClaw's always: never for a
+   * command, which Chips remembers by how each part starts and answers itself (Chips ADR 0239).
    */
   private readonly approvals = new Map<
     string,
@@ -2896,7 +2897,8 @@ export class Bridge {
     const approvalId = chipsId("apr", `openclaw-approval:${clawId}`);
     const unavailable = Array.isArray(request["unavailableDecisions"]) ? (request["unavailableDecisions"] as unknown[]) : [];
     const offered = Array.isArray(request["allowedDecisions"]) ? (request["allowedDecisions"] as unknown[]) : undefined;
-    const always = !unavailable.includes("allow-always") && (offered === undefined || offered.includes("allow-always"));
+    // A command's Always is OpenClaw's once: Chips remembers how its parts start (Chips ADR 0239).
+    const always = false;
     this.approvals.set(approvalId, { id: clawId, always, method: "exec.approval.resolve", run });
     const expires = num(p["expiresAtMs"]);
     this.write(run, {
@@ -2938,7 +2940,7 @@ export class Bridge {
     const cwd = command === undefined || toolCallId === undefined ? undefined : run.cwds.get(toolCallId);
     const approvalId = chipsId("apr", `openclaw-approval:${clawId}`);
     const offered = Array.isArray(request["allowedDecisions"]) ? (request["allowedDecisions"] as unknown[]) : undefined;
-    const always = offered === undefined || offered.includes("allow-always");
+    const always = command === undefined && (offered === undefined || offered.includes("allow-always"));
     this.approvals.set(approvalId, { id: clawId, always, method: "plugin.approval.resolve", run });
     const expires = num(p["expiresAtMs"]);
     this.write(run, {
