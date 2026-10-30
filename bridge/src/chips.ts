@@ -20,6 +20,7 @@ import {
   RefusedError,
   type SettingsHandlers,
 } from "@chipschat/harness";
+import { VERSION } from "./version.js";
 
 export type ChipsEvent = Record<string, unknown> & { readonly type: string };
 
@@ -148,7 +149,7 @@ export class Chips {
     return connect({
       url: options.url,
       token: options.token,
-      client: { name: "chips-openclaw-bridge", version: "1.0.0" },
+      client: { name: "chips-openclaw-bridge", version: VERSION },
       ...(this.cursor === undefined ? {} : { since: this.cursor }),
       ...(options.onRestart === undefined
         ? {}

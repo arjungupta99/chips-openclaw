@@ -30,11 +30,11 @@ harness's bridge would be (Chips's `docs/proposals/open-source-harnesses-plan.md
 
 ## From Chips's gallery
 
-The card's line is `chips connect openclaw '<link>'` (Chips ADR 0218). It downloads this bridge as the npm package
+The card's line is `CHIPS_JOIN_LINK='<link>' chips connect openclaw` (Chips ADR 0218). It downloads this bridge as the npm package
 `@chipschat/openclaw`, the newest 1.x, checks it against the registry's checksum, and runs it on the Node
 that Chips carries, so the machine needs no Node or npm of its own. The bridge checks OpenClaw,
 joins, and keeps itself running from login. `chips disconnect openclaw` stops it. The package bundles OpenClaw's own client, so Chips carries nothing of OpenClaw. On another computer,
-`curl -fsSL https://chipschat.ai/install | sh -s -- connect openclaw '<link>'` installs Chips there
+`curl -fsSL https://chipschat.ai/install | CHIPS_JOIN_LINK='<link>' sh -s -- connect openclaw` installs Chips there
 first. The steps below run the bridge from this checkout instead, to work on it.
 
 What the bridge does in Chips is the mapping at the top of `bridge/src/bridge.ts`. A person's Fork
@@ -49,10 +49,10 @@ asked for it, as this one does when it joins with a code (`WANTS` in `bridge/src
 
 The bridge serves an OpenClaw installed on this machine as well as the test rig below (Chips's
 setup audit HS-7). With OpenClaw set up (`openclaw onboard`) and its gateway running, Chips's
-gallery card (Chips ADR 0171; **Agents → Add an agent → OpenClaw**) gives this line, run once:
+gallery card (Chips ADR 0171; **Agents → Connect a harness → OpenClaw**) gives this line, run once:
 
 ```sh
-cd ~/Work/Chips/chips-openclaw/bridge && npm install && CHIPS_JOIN_LINK='<link>' npm run keep
+cd bridge && npm install && CHIPS_JOIN_LINK='<link>' npm run keep
 ```
 
 Before it takes the link up, which works once, it reads OpenClaw's own `~/.openclaw/openclaw.json`

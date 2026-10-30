@@ -3,8 +3,8 @@
 OpenClaw as a [Chips](https://chipschat.ai) harness: your own OpenClaw on this machine, its agents
 as Chips agents. Apache-2.0.
 
-With OpenClaw set up (`openclaw onboard`) and its gateway running, Chips's gallery (Agents → Add an
-agent → OpenClaw) gives a link. Then, once:
+With OpenClaw set up (`openclaw onboard`) and its gateway running, Chips's gallery (Agents → Connect a harness
+→ OpenClaw) gives a link. Then, once:
 
 ```sh
 CHIPS_JOIN_LINK='<link>' chips-openclaw --keep
