@@ -51,10 +51,10 @@ const WRITE_TRIES = 3;
 const APPLIED_TRIES = 10;
 const APPLIED_EVERY_MS = 200;
 /** `sessions.usage` reads its files again when asked: how often, and how long apart, to ask. */
-const USAGE_TRIES = 5;
-const USAGE_EVERY_MS = 3000;
-/** How long after a heartbeat priced too soon to price it again. */
-const PRICE_AGAIN_MS = 120_000;
+const USAGE_TRIES = 6;
+const USAGE_EVERY_MS = 5000;
+/** How long after a heartbeat priced too soon to price it again, and again. */
+const PRICE_AGAIN_MS: readonly number[] = [120_000, 480_000];
 /** How long after a heartbeat ends its reply may still be heard. */
 const HEARD_SLACK_MS = 5000;
 
@@ -361,6 +361,8 @@ export class Jobs {
   private readonly cron = new Map<string, { readonly own: Own; readonly job: CronJob }>();
   /** How often each ran when last seen, for a job turned off. */
   private readonly before = new Map<Own, number>();
+  /** Heartbeats sent before Home's usage counted them, by run id, to price when it has. */
+  private readonly unpriced = new Map<string, { readonly run: CronRun; readonly sent: Payload }>();
   /** The heartbeat replies heard in Home: when, and whether each told the person something. */
   private heard: { readonly at: number; readonly notify: boolean }[] = [];
 
@@ -417,7 +419,11 @@ export class Jobs {
         const agentId = own === SKILLS && job.agentId ? this.ours().agentOf(job.agentId) : undefined;
         const made = runOf(run, own, agentId);
         if (made === undefined) continue;
-        runs.push({ ...made, ...(await this.priced(run, own, job, home)) });
+        const sent = { ...made, ...(await this.priced(run, own, job, home)) };
+        // A check of the last day Home's usage hasn't counted yet is priced at the next one.
+        const recent = this.now() - (run.runAtMs ?? 0) < DAY_MS;
+        if (own === HEARTBEAT && sent["cost_usd"] === undefined && recent) this.unpriced.set(String(sent["run_id"]), { run, sent });
+        runs.push(sent);
       }
     }
     if (runs.length === 0) return;
@@ -438,7 +444,7 @@ export class Jobs {
       void this.send();
       return;
     }
-    void this.finished(p as unknown as CronRun, own).then(() => this.send());
+    void this.finished(p as unknown as CronRun, own);
   }
 
   /** A heartbeat's reply heard in Home, and whether it told the person something. */
@@ -478,7 +484,7 @@ export class Jobs {
     await this.chain.catch(() => undefined);
   }
 
-  /** A run of ours that finished, priced, sent. */
+  /** A run of ours that finished, priced, sent, then the copy; a heartbeat not priced yet, later. */
   private async finished(run: CronRun, own: Own): Promise<void> {
     const job = this.cron.get(run.jobId)?.job ?? { id: run.jobId };
     const agentId = own === SKILLS && job.agentId ? this.ours().agentOf(job.agentId) : undefined;
@@ -487,13 +493,31 @@ export class Jobs {
     const home = own === HEARTBEAT ? await this.homeQuarters() : undefined;
     const sent = { ...made, ...this.quietOf(run, own), ...(await this.priced(run, own, job, home)) };
     await this.chips.runs([sent]).catch((error: unknown) => this.log(`chips: a run of ${own} not sent: ${String(error)}`));
-    // Home's usage may not have counted the check yet: priced once more a little later, and sent
-    // again with its cost, which Chips lays over what it has.
-    if (own !== HEARTBEAT || sent["cost_usd"] !== undefined) return;
-    await this.sleep(PRICE_AGAIN_MS);
-    const priced = await this.priced(run, own, job, await this.homeQuarters());
-    if (priced["cost_usd"] === undefined) return;
-    await this.chips.runs([{ ...sent, ...priced }]).catch((error: unknown) => this.log(`chips: a heartbeat's cost not sent: ${String(error)}`));
+    // Its next run has moved.
+    void this.send();
+    if (own !== HEARTBEAT) return;
+    // Home's usage counts a check some minutes after it ends: one it hadn't is priced again later,
+    // and at each check after, and sent again with its cost, which Chips lays over what it has.
+    if (sent["cost_usd"] === undefined) this.unpriced.set(String(sent["run_id"]), { run, sent });
+    if (home !== undefined) await this.priceUnpriced(home);
+    for (const wait of PRICE_AGAIN_MS) {
+      if (!this.unpriced.has(String(sent["run_id"]))) return;
+      await this.sleep(wait);
+      await this.priceUnpriced(await this.homeQuarters());
+    }
+  }
+
+  /** The heartbeats Home's usage hadn't counted, priced now where it has; a day old, given up. */
+  private async priceUnpriced(home: Quarters | undefined): Promise<void> {
+    const priced: Payload[] = [];
+    for (const [id, { run, sent }] of this.unpriced) {
+      const start = run.runAtMs ?? 0;
+      const usd = home === undefined ? undefined : heartbeatCost(home, start, start + (run.durationMs ?? 0));
+      if (usd !== undefined) priced.push({ ...sent, cost_usd: usd });
+      if (usd !== undefined || this.now() - start > DAY_MS) this.unpriced.delete(id);
+    }
+    if (priced.length === 0) return;
+    await this.chips.runs(priced).catch((error: unknown) => this.log(`chips: heartbeats' costs not sent: ${String(error)}`));
   }
 
   /** Whether a heartbeat had nothing to say, by the reply heard in Home while it ran. */
@@ -527,20 +551,26 @@ export class Jobs {
     }
   }
 
-  /** Home's cost by quarter hour, asked again while OpenClaw is still reading its files. */
+  /**
+   * Home's cost by quarter hour. A read sets OpenClaw counting what changed since and answers with
+   * what it had, "refreshing", so it is asked again until it says it is done; what it last had, if
+   * it never does.
+   */
   private async homeQuarters(): Promise<Quarters | undefined> {
+    let last: Quarters | undefined;
     for (let tries = 1; tries <= USAGE_TRIES; tries += 1) {
       try {
-        const answer = await this.claw.request("sessions.usage", { key: this.ours().home });
-        const quarters = quartersOf(answer);
-        if (quarters !== undefined) return quarters;
+        const answer = await this.claw.request<Payload>("sessions.usage", { key: this.ours().home });
+        last = quartersOf(answer) ?? last;
+        const refreshing = (answer["cacheStatus"] as Payload | undefined)?.["status"] === "refreshing";
+        if (last !== undefined && !refreshing) return last;
       } catch (error) {
         this.log(`openclaw: could not read what Home cost: ${String(error)}`);
-        return undefined;
+        return last;
       }
       if (tries < USAGE_TRIES) await this.sleep(USAGE_EVERY_MS);
     }
-    return undefined;
+    return last;
   }
 
   /** The runs `cron.runs` keeps of one job, newest first, as far as a week. */

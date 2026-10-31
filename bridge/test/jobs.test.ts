@@ -281,6 +281,9 @@ function gateway(config: Payload = structuredClone(LIVE) as Payload) {
   let refuse: string | undefined;
   /** How many reads of Home's usage come back before it has counted the latest check. */
   let uncounted = 0;
+  /** How many reads of Home's usage answer with what it had while it counts the rest. */
+  let refreshing = 0;
+  let usageReads = 0;
   const runs = new Map<string, CronRun[]>();
   const merge = (into: Payload, patch: Payload): void => {
     for (const [key, value] of Object.entries(patch)) {
@@ -318,6 +321,14 @@ function gateway(config: Payload = structuredClone(LIVE) as Payload) {
         case "cron.runs":
           return { entries: runs.get(String(params["id"])) ?? [], hasMore: false } as T;
         case "sessions.usage":
+          usageReads += 1;
+          if (refreshing > 0) {
+            refreshing -= 1;
+            return {
+              sessions: [{ usage: { utcQuarterHourTokenUsage: [], utcQuarterHourMessageCounts: [] } }],
+              cacheStatus: { status: "refreshing" },
+            } as T;
+          }
           if (uncounted > 0) {
             uncounted -= 1;
             return { sessions: [{ usage: { utcQuarterHourTokenUsage: [], utcQuarterHourMessageCounts: [] } }] } as T;
@@ -355,6 +366,10 @@ function gateway(config: Payload = structuredClone(LIVE) as Payload) {
     uncount: (reads: number) => {
       uncounted = reads;
     },
+    refresh: (reads: number) => {
+      refreshing = reads;
+    },
+    usageReads: () => usageReads,
   };
 }
 
@@ -429,6 +444,40 @@ describe("the jobs kept in Chips", () => {
       [
         [`5ecdc04c:${BEAT_AT}`, undefined],
         [`5ecdc04c:${BEAT_AT}`, 0.342151],
+      ],
+    );
+  });
+
+  it("ask Home's usage again while OpenClaw is still counting, and price the check when it's done", async () => {
+    const r = rig();
+    await r.jobs.send();
+    r.refresh(2);
+    r.jobs.cronEvent({ jobId: "5ecdc04c", action: "finished", status: "ok", runAtMs: BEAT_AT, durationMs: 14_507 });
+    await new Promise((done) => setTimeout(done, 10));
+    await r.jobs.settled();
+    assert.equal(r.usageReads(), 3);
+    assert.deepEqual(r.posted.map((run) => run["cost_usd"]), [0.342151]);
+  });
+
+  it("price a check its start couldn't at the next check, sent again with its cost", async () => {
+    const r = rig();
+    // The start's catch-up: Home's usage hasn't counted the 15:54 check yet.
+    r.runs.set("5ecdc04c", [
+      { jobId: "5ecdc04c", action: "finished", status: "ok", runAtMs: BEAT_AT, durationMs: 14_507 },
+    ]);
+    r.uncount(1);
+    await r.jobs.catchUp();
+    assert.deepEqual(r.posted.map((run) => run["cost_usd"]), [undefined]);
+    // The next check, an hour on, in a quarter not counted yet: the 15:54 one is priced now.
+    r.jobs.cronEvent({ jobId: "5ecdc04c", action: "finished", status: "ok", runAtMs: BEAT_AT + 3_600_000, durationMs: 6000 });
+    await new Promise((done) => setTimeout(done, 10));
+    await r.jobs.settled();
+    assert.deepEqual(
+      r.posted.map((run) => [run["started_at"], run["cost_usd"]]),
+      [
+        [new Date(BEAT_AT).toISOString(), undefined],
+        [new Date(BEAT_AT + 3_600_000).toISOString(), undefined],
+        [new Date(BEAT_AT).toISOString(), 0.342151],
       ],
     );
   });
