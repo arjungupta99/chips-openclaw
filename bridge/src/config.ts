@@ -118,6 +118,7 @@ export const WANTS = [
   "models",
   "heartbeats",
   "context_windows",
+  "jobs",
 ] as const;
 
 /** Where the address of the Chips it joined is written: never its key, which the SDK keeps. */

@@ -91,7 +91,8 @@ import { type Media, mediaLinesIn, sentWithTool } from "./media.ts";
 import type { ClawEvent } from "./openclaw.ts";
 import { Contexts, type EditFrame } from "./context.ts";
 import type { ChangeFrame, Models, Whose as ModelOwner } from "./models.ts";
-import { type ChangeFrame as BeatChange, checkInOf, type Heartbeats } from "./heartbeats.ts";
+import { type ChangeFrame as BeatChange, checkInOf, type Heartbeats, replyOf } from "./heartbeats.ts";
+import type { JobChange, Jobs, Ours } from "./jobs.ts";
 import type { CompactFrame, LimitFrame, Session, Windows } from "./windows.ts";
 import { isMadeAgent, madeAgentId, type Workspaces } from "./own-agents.ts";
 import type { Projects } from "./project.ts";
@@ -883,6 +884,8 @@ export class Bridge {
     private readonly automations: Automations = new Automations(),
     /** The rooms' projects our agents work on (Chips ADR 0221); none, and no agent has one. */
     private readonly projects?: Projects,
+    /** OpenClaw's own jobs in Chips (ADR 0252); none, and nothing is sent or switched. */
+    private readonly jobs?: Jobs,
   ) {
     this.primary = self.agent;
   }
@@ -1718,7 +1721,44 @@ export class Bridge {
       this.log(`chips: a heartbeat change for ${change.agent_id}, which is not the Main agent`);
       throw new Refuse(`${change.agent_id} is not the Main agent.`);
     }
-    return this.heartbeats.change(change, this.primary);
+    const copy = await this.heartbeats.change(change, this.primary);
+    // The same switch is the Heartbeat job on the harness's page (ADR 0252).
+    void this.jobs?.send();
+    return copy;
+  }
+
+  /** Who our agents are, for OpenClaw's own jobs (ADR 0252): its heartbeat's, and each review's. */
+  ours(): Ours {
+    return {
+      primary: this.primary,
+      home: this.homeKey(),
+      agentOf: (clawAgent) => {
+        if (clawAgent === this.primary) return this.beatingAgent() ?? this.fallback;
+        for (const [agentId, key] of this.keyOf) {
+          if (key !== this.self.harnessId && (this.agentFor(key) ?? key) === clawAgent) return agentId;
+        }
+        return undefined;
+      },
+    };
+  }
+
+  /** OpenClaw's own jobs, and the runs it kept while the bridge was away, sent at start (ADR 0252). */
+  async sendJobs(): Promise<void> {
+    await this.jobs?.catchUp();
+  }
+
+  /**
+   * A person's switch of one of OpenClaw's own jobs from Chips (ADR 0252): made in OpenClaw's config,
+   * answered with the jobs as they are now. The Heartbeat job is the Main agent's heartbeat, whose
+   * copy on its page follows.
+   */
+  async onJobChange(frame: Payload): Promise<Payload> {
+    if (this.jobs === undefined) throw new Refuse("This bridge keeps no jobs of OpenClaw's.");
+    const change = frame as unknown as JobChange;
+    const copy = await this.jobs.change(change);
+    const main = this.beatingAgent();
+    if (change.job_id === "heartbeat" && main !== undefined) void this.heartbeats?.agent(main, this.primary);
+    return copy;
   }
 
   /**
@@ -1834,6 +1874,18 @@ export class Bridge {
         idempotency_key: `openclaw-heartbeat:${checkIn.id}`,
       })
       .catch((error: unknown) => this.log(`chips: a heartbeat check-in not posted: ${String(error)}`));
+  }
+
+  /**
+   * A heartbeat's reply in Home, quiet or not, for the run it was (ADR 0252): a check that said
+   * nothing shows as one on the Heartbeat job's page.
+   */
+  private heartbeatReplied(p: Payload): void {
+    if (this.jobs === undefined || str(p["sessionKey"]) !== this.homeKey()) return;
+    const reply = replyOf(p["message"]);
+    if (reply === undefined) return;
+    const at = num((p["message"] as Payload | undefined)?.["timestamp"]) ?? this.now();
+    this.jobs.replied(at, reply.notify);
   }
 
   /**
@@ -2431,10 +2483,13 @@ export class Bridge {
         return this.agent(p);
       case "session.message":
         this.heartbeatSaid(p);
+        this.heartbeatReplied(p);
         this.sentByTool(p);
         return this.committed(p);
-      // An automation added, started, finished or removed (ADR 0157).
+      // An automation added, started, finished or removed (ADR 0157), or one of OpenClaw's own
+      // jobs, whose runs and next run the harness's page shows (ADR 0252).
       case "cron":
+        this.jobs?.cronEvent(p);
         return this.automation(p);
       case "sessions.changed":
         return this.sessionChanged(p);
@@ -3237,6 +3292,7 @@ export class Bridge {
     await this.models?.settled();
     await this.heartbeats?.settled();
     await this.windows?.settled();
+    await this.jobs?.settled();
   }
 }
 

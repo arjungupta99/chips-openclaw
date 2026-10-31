@@ -10,7 +10,13 @@ import { spawn } from "node:child_process";
 import { rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import type { AgentContextCopy, AgentContextWindowCopy, AgentHeartbeatCopy, AgentModelCopy } from "@chipschat/harness";
+import type {
+  AgentContextCopy,
+  AgentContextWindowCopy,
+  AgentHeartbeatCopy,
+  AgentModelCopy,
+  HarnessJobsCopy,
+} from "@chipschat/harness";
 import { checkGit, JoinError, reportStep } from "@chipschat/harness";
 import { Automations } from "./automations.ts";
 import { Bridge } from "./bridge.ts";
@@ -18,6 +24,7 @@ import { Chips, type ChipsEvent } from "./chips.ts";
 import { loadConfig, SetupError } from "./config.ts";
 import { Contexts } from "./context.ts";
 import { Heartbeats } from "./heartbeats.ts";
+import { Jobs } from "./jobs.ts";
 import { Windows } from "./windows.ts";
 import { Models } from "./models.ts";
 import { health } from "./health.ts";
@@ -74,6 +81,7 @@ const chips = new Chips({
     context: async (edit) => (await active().onContextEdit({ ...edit })) as unknown as AgentContextCopy,
     models: async (change) => (await active().onModelChange({ ...change })) as unknown as AgentModelCopy,
     heartbeats: async (change) => (await active().onHeartbeatChange({ ...change })) as unknown as AgentHeartbeatCopy,
+    jobs: async (change) => (await active().onJobChange({ ...change })) as unknown as HarnessJobsCopy,
     contextWindows: {
       compact: async (ask) => (await active().onWindowCompact({ ...ask })) as unknown as AgentContextWindowCopy,
       change: async (ask) => (await active().onWindowChange({ ...ask })) as unknown as AgentContextWindowCopy,
@@ -192,6 +200,8 @@ bridge = new Bridge(
   new Automations(join(config.stateDir, "automations.json"), log),
   // The rooms' projects, done with this Mac's git (Chips ADR 0221).
   git.ok ? projectsIn(roots, { url: config.chipsUrl, token: config.harnessToken }, log) : undefined,
+  // What OpenClaw runs on its own, outside the rooms, and what each run cost (Chips ADR 0252).
+  new Jobs(claw, { put: (copy) => chips.putJobs(copy), runs: (runs) => chips.postJobRuns(runs) }, () => active().ours(), log),
 );
 
 /**
@@ -266,6 +276,8 @@ async function main(): Promise<void> {
   await active.sendHeartbeats();
   // How full each of them is, and the limit it compacts itself at (Chips ADR 0146).
   await active.sendWindows();
+  // What OpenClaw runs on its own, and its runs of the last week, not waited for (Chips ADR 0252).
+  void active.sendJobs().catch((error: unknown) => log(`chips: OpenClaw's own jobs not sent: ${String(error)}`));
   await catchUp(active);
   chips.stream((event) => active.onChips(event));
   // Its first words in the room it joined, once: the card that followed its link waits for them.

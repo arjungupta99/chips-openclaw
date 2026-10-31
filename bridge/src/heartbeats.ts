@@ -155,6 +155,21 @@ export function checkInOf(message: unknown): { readonly id: string; readonly tex
   return undefined;
 }
 
+/**
+ * A heartbeat's reply, from one `session.message` event's message: its `heartbeat_respond` call,
+ * and whether it told the person something. Nothing for any other message.
+ */
+export function replyOf(message: unknown): { readonly notify: boolean } | undefined {
+  if (typeof message !== "object" || message === null) return undefined;
+  const { role, content } = message as Payload;
+  if (role !== "assistant" || !Array.isArray(content)) return undefined;
+  for (const part of content as Payload[]) {
+    if (part?.["type"] !== "toolCall" || part["name"] !== "heartbeat_respond") continue;
+    return { notify: ((part["arguments"] ?? {}) as Payload)["notify"] === true };
+  }
+  return undefined;
+}
+
 /** OpenClaw refusing a write because the config moved since it was read: read it again and retry. */
 const MOVED = /config changed since last load/;
 const WRITE_TRIES = 3;

@@ -17,9 +17,11 @@ import {
   type Chips as Connection,
   connect,
   type HarnessContextCopy,
+  type HarnessJobsCopy,
   RefusedError,
   type SettingsHandlers,
 } from "@chipschat/harness";
+import type { JobRun } from "@chipschat/protocol";
 import { VERSION } from "./version.js";
 
 export type ChipsEvent = Record<string, unknown> & { readonly type: string };
@@ -305,6 +307,16 @@ export class Chips {
   /** An agent's heartbeat, as a copy (Chips ADR 0143). */
   putHeartbeat(agentId: string, copy: Payload): Promise<unknown> {
     return this.chips.settings.heartbeat(agentId, copy as unknown as AgentHeartbeatCopy);
+  }
+
+  /** OpenClaw's own jobs, as a copy (Chips ADR 0252). */
+  putJobs(copy: Payload): Promise<unknown> {
+    return this.chips.settings.jobs(copy as unknown as HarnessJobsCopy);
+  }
+
+  /** Runs of OpenClaw's own jobs that finished (Chips ADR 0252). */
+  postJobRuns(runs: readonly Payload[]): Promise<void> {
+    return this.chips.settings.jobRuns(runs as unknown as JobRun[]);
   }
 
   /** An agent's context window, as a copy (Chips ADR 0146). */
