@@ -55,7 +55,7 @@ const USAGE_TRIES = 6;
 const USAGE_EVERY_MS = 5000;
 /** How long after a heartbeat priced too soon to price it again, and again. */
 const PRICE_AGAIN_MS: readonly number[] = [120_000, 480_000];
-/** How long after a heartbeat ends its reply may still be heard. */
+/** How long after a heartbeat's run ends its check may still be heard ending. */
 const HEARD_SLACK_MS = 5000;
 
 /** One of OpenClaw's scheduled jobs, as `cron.list` and its events say it. */
@@ -363,7 +363,7 @@ export class Jobs {
   private readonly before = new Map<Own, number>();
   /** Heartbeats sent before Home's usage counted them, by run id, to price when it has. */
   private readonly unpriced = new Map<string, { readonly run: CronRun; readonly sent: Payload }>();
-  /** The heartbeat replies heard in Home: when, and whether each told the person something. */
+  /** The heartbeat's checks heard ending (its `heartbeat` events): when, and whether each told the person something. */
   private heard: { readonly at: number; readonly notify: boolean }[] = [];
 
   constructor(
@@ -447,7 +447,7 @@ export class Jobs {
     void this.finished(p as unknown as CronRun, own);
   }
 
-  /** A heartbeat's reply heard in Home, and whether it told the person something. */
+  /** A check of the heartbeat heard ending, and whether it told the person something. */
   replied(at: number, notify: boolean): void {
     this.heard = [...this.heard.filter((each) => at - each.at < DAY_MS), { at, notify }];
   }
@@ -520,7 +520,7 @@ export class Jobs {
     await this.chips.runs(priced).catch((error: unknown) => this.log(`chips: heartbeats' costs not sent: ${String(error)}`));
   }
 
-  /** Whether a heartbeat had nothing to say, by the reply heard in Home while it ran. */
+  /** Whether a heartbeat had nothing to say, by the check heard ending as it ran. */
   private quietOf(run: CronRun, own: Own): Payload {
     if (own !== HEARTBEAT || run.runAtMs === undefined) return {};
     const end = run.runAtMs + (run.durationMs ?? 0) + HEARD_SLACK_MS;

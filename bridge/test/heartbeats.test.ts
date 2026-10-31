@@ -1,7 +1,7 @@
 /**
  * The Main agent's heartbeat in Chips (Chips ADR 0143): the copy read from OpenClaw's config, the
- * patch a change is, and the check-in read from a heartbeat's tool call. A stand-in gateway keeps a
- * config and a hash, as OpenClaw does.
+ * patch a change is, and the check-in a check that told the person something posts, from OpenClaw's
+ * `heartbeat` event and Home. A stand-in gateway keeps a config and a hash, as OpenClaw does.
  */
 
 import assert from "node:assert/strict";
@@ -16,11 +16,14 @@ import {
   CHOICES,
   type ClawAgents,
   checkInOf,
+  checkInText,
+  checkOf,
   choicesWith,
   copyOf,
   Heartbeats,
   minutesOf,
   patchOf,
+  wordsIn,
 } from "../src/heartbeats.ts";
 
 describe("OpenClaw's heartbeat, as Chips is told it", () => {
@@ -87,6 +90,35 @@ describe("OpenClaw's heartbeat, as Chips is told it", () => {
     assert.equal(checkInOf({ role: "toolResult", content: [] }), undefined);
     assert.equal(checkInOf({ role: "assistant", content: [{ type: "text", text: "Hello." }] }), undefined);
     assert.equal(checkInOf(undefined), undefined);
+  });
+
+  it("reads a check from OpenClaw's heartbeat event: quiet, told and delivered, or told with no channel", () => {
+    assert.deepEqual(checkOf({ ts: 5, status: "ok-empty", reason: "interval", silent: true }), { at: 5, notify: false });
+    assert.deepEqual(checkOf({ ts: 5, status: "ok-token", preview: "Nothing new." }), { at: 5, notify: false });
+    assert.deepEqual(checkOf({ ts: 5, status: "sent", preview: "Rain at 3.", channel: "telegram" }), { at: 5, notify: true });
+    assert.deepEqual(checkOf({ ts: 5, status: "skipped", reason: "target-none", preview: "Rain at 3." }), { at: 5, notify: true, words: "Rain at 3." });
+    // Didn't run, failed, or said already: no check to speak of.
+    assert.equal(checkOf({ ts: 5, status: "skipped", reason: "cron-in-progress" }), undefined);
+    assert.equal(checkOf({ ts: 5, status: "skipped", reason: "duplicate", preview: "Rain at 3." }), undefined);
+    assert.equal(checkOf({ ts: 5, status: "skipped", reason: "target-none" }), undefined);
+    assert.equal(checkOf({ ts: 5, status: "failed", reason: "agent-runner-failure", preview: "x" }), undefined);
+    assert.equal(checkOf({ status: "ok-empty" }), undefined);
+  });
+
+  it("finds a check's words whole in Home by how the event's cut of them begins", () => {
+    const whole = `The deploy finished. ${"Every service answered its health check. ".repeat(8)}`;
+    const home = [
+      { role: "user", content: [{ type: "text", text: "Read HEARTBEAT.md if it exists." }] },
+      { role: "assistant", content: [{ type: "thinking", thinking: "Look at the deploy." }, { type: "text", text: whole }] },
+      { role: "assistant", content: "Older words, not these." },
+    ];
+    assert.equal(wordsIn(home, whole.slice(0, 200)), whole);
+    // By a tool call that notifies, on a runtime that makes one.
+    const called = [{ role: "assistant", content: [{ type: "toolCall", id: "c1", name: "heartbeat_respond", arguments: { notify: true, notificationText: whole } }] }];
+    assert.equal(wordsIn(called, whole.slice(0, 200)), whole.trim());
+    assert.equal(wordsIn(home, "Something else entirely."), undefined);
+    assert.equal(wordsIn(undefined, "x"), undefined);
+    assert.equal(checkInText("HEARTBEAT_OK\nThe deploy finished. "), "The deploy finished.");
   });
 });
 
@@ -187,12 +219,15 @@ describe("the Main agent's heartbeat through the bridge", () => {
     request: async <T>(method: string, params: Record<string, unknown>) => {
       calls.push([method, params]);
       if (method === "config.get") return { config: { agents: { entries: { main: { heartbeat: { every: "1h", target: "none" } } } } }, hash: "h1" } as T;
+      if (method === "chat.history") return { messages: home } as T;
       return {} as T;
     },
   };
+  let home: unknown[];
 
   beforeEach(async () => {
     sent = [];
+    home = [];
     puts = [];
     calls = [];
     agents = [
@@ -208,13 +243,10 @@ describe("the Main agent's heartbeat through the bridge", () => {
     sent = [];
   });
 
-  const heartbeatMessage = (sessionKey: string, args: Record<string, unknown>) => ({
-    event: "session.message",
-    payload: {
-      sessionKey,
-      agentId: "main",
-      message: { role: "assistant", content: [{ type: "toolCall", id: "call_9", name: "heartbeat_respond", arguments: args }] },
-    },
+  // OpenClaw's word as a check ends; with no channel to take its words, it says so and keeps 200.
+  const told = (ts: number, words: string) => ({
+    event: "heartbeat",
+    payload: { ts, status: "skipped", reason: "target-none", preview: words.slice(0, 200), durationMs: 9000 },
   });
 
   it("sends the Main agent's copy at start, and no other agent's", async () => {
@@ -223,10 +255,9 @@ describe("the Main agent's heartbeat through the bridge", () => {
   });
 
   it("posts a check-in in the Main room as the Main agent, marked, and once", async () => {
-    bridge.onClaw(heartbeatMessage("agent:main:main", { notify: true, outcome: "alert", notificationText: "The build finished." }));
-    bridge.onClaw(heartbeatMessage("agent:main:main", { notify: true, outcome: "alert", notificationText: "The build finished." }));
+    bridge.onClaw(told(1_793_469_298_566, "The build finished."));
+    bridge.onClaw(told(1_793_469_298_566, "The build finished."));
     await bridge.settled();
-    await new Promise((done) => setImmediate(done));
     assert.equal(sent.length, 2);
     assert.deepEqual(sent[0], {
       type: "message.post",
@@ -234,7 +265,7 @@ describe("the Main agent's heartbeat through the bridge", () => {
       text: "The build finished.",
       heartbeat: true,
       actor: { kind: "agent", id: MAIN },
-      idempotency_key: "openclaw-heartbeat:call_9",
+      idempotency_key: "openclaw-heartbeat:1793469298566",
     });
     // Heard twice, the same key: Chips takes it once.
     assert.equal(sent[1]?.["idempotency_key"], sent[0]?.["idempotency_key"]);
@@ -259,9 +290,9 @@ describe("the Main agent's heartbeat through the bridge", () => {
       },
     });
     sent = [];
-    bridge.onClaw(heartbeatMessage("agent:main:main", { notify: true, outcome: "alert", notificationText: "The build finished." }));
-    bridge.onClaw(heartbeatMessage("agent:main:main", { notify: true, outcome: "alert", notificationText: "@arjun the build failed." }));
-    await new Promise((done) => setImmediate(done));
+    bridge.onClaw(told(1, "The build finished."));
+    bridge.onClaw(told(2, "@arjun the build failed."));
+    await bridge.settled();
     // Telling the person is an @, which pushes their phone; still a check-in. One @ is enough.
     assert.deepEqual(
       sent.map((event) => [event["text"], event["heartbeat"]]),
@@ -272,10 +303,40 @@ describe("the Main agent's heartbeat through the bridge", () => {
     );
   });
 
-  it("posts nothing for a quiet check, or for a heartbeat outside Home", async () => {
-    bridge.onClaw(heartbeatMessage("agent:main:main", { notify: false, outcome: "no_change", summary: "Nothing new." }));
-    bridge.onClaw(heartbeatMessage("agent:scout:main", { notify: true, outcome: "alert", summary: "Not for a room." }));
-    await new Promise((done) => setImmediate(done));
+  it("posts a check's words whole from Home when the event cut them, and as cut when Home hasn't them", async () => {
+    const whole = `The nightly backup failed: ${"the disk on the NAS is full again. ".repeat(10)}Want me to clear the old snapshots?`;
+    home = [
+      { role: "user", content: [{ type: "text", text: "Read HEARTBEAT.md if it exists." }] },
+      { role: "assistant", content: [{ type: "text", text: whole }] },
+    ];
+    bridge.onClaw(told(1, whole));
+    await bridge.settled();
+    assert.deepEqual(calls.filter(([method]) => method === "chat.history"), [["chat.history", { sessionKey: "agent:main:main", limit: 20 }]]);
+    home = [];
+    bridge.onClaw(told(2, whole));
+    await bridge.settled();
+    assert.deepEqual(
+      sent.map((event) => event["text"]),
+      [whole, whole.slice(0, 200)],
+    );
+  });
+
+  it("posts nothing for a quiet check, one that failed or was said already, or one a channel took", async () => {
+    const check = (payload: Record<string, unknown>) => bridge.onClaw({ event: "heartbeat", payload: { ts: 1, ...payload } });
+    check({ status: "ok-empty", reason: "interval", silent: true });
+    check({ status: "ok-token", preview: "Nothing new." });
+    check({ status: "failed", reason: "agent-runner-failure", preview: "The model is unavailable." });
+    check({ status: "skipped", reason: "duplicate", preview: "The build finished." });
+    check({ status: "sent", preview: "The build finished.", channel: "telegram" });
+    // A heartbeat's turn in Home is the event's to tell, not a message's.
+    bridge.onClaw({
+      event: "session.message",
+      payload: {
+        sessionKey: "agent:main:main",
+        message: { role: "assistant", content: [{ type: "toolCall", id: "c9", name: "heartbeat_respond", arguments: { notify: true, summary: "x" } }] },
+      },
+    });
+    await bridge.settled();
     assert.deepEqual(sent, []);
   });
 

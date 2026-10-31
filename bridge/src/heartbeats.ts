@@ -16,9 +16,12 @@
  * hot, no restart (`agents.entries` reloads in place). Never `isolatedSession`, which would beat in a
  * conversation of its own rather than Home.
  *
- * A check-in is the `heartbeat_respond` tool call OpenClaw's model makes: `notify: true` with words
- * for the person, `notify: false` when there is nothing to say. OpenClaw sends no `chat` events for
- * a heartbeat's turn; the bridge reads the call from the session's `session.message` events.
+ * A check-in is what a check had to say to the person. OpenClaw sends no `chat` events for a
+ * heartbeat's turn, and hides its messages from `session.message`; what it sends is a `heartbeat`
+ * event as each check ends. One with words for the person and no channel to take them (`skipped`,
+ * `target-none`) carries their first 200 characters (`preview`); longer, the bridge reads them whole
+ * from Home, where they stay: the model's reply, or the `heartbeat_respond` call that notifies, by
+ * the model's own runtime.
  */
 
 import { Refuse } from "@chipschat/harness";
@@ -37,6 +40,12 @@ const EVERY_MAX = 10_080;
 const MESSAGE_MAX = 300;
 /** How long a check-in may be in Chips. */
 const TEXT_MAX = 64_000;
+/** How much of a check's words OpenClaw keeps on its `heartbeat` event. */
+export const PREVIEW_MAX = 200;
+/** What a check that told the person something says when no channel took its words. */
+const UNDELIVERED = new Set(["target-none", "no-target", "no-route"]);
+/** OpenClaw's word for "nothing to say", which it strips from a check's words. */
+const QUIET_TOKEN = /^\s*HEARTBEAT_OK\b|\bHEARTBEAT_OK\s*$/g;
 
 /** A heartbeat block as OpenClaw's config has it. */
 export interface ClawHeartbeat {
@@ -132,8 +141,8 @@ export function shows(body: Payload, change: Pick<ChangeFrame, "on" | "every">):
 }
 
 /**
- * What a heartbeat's turn said for the person, from one `session.message` event's message: the
- * words of a `heartbeat_respond` call that notifies, as OpenClaw would deliver them
+ * What a heartbeat's turn said for the person, from one of Home's messages: the words of a
+ * `heartbeat_respond` call that notifies, as OpenClaw would deliver them
  * (`notificationText`, else its `summary`), and the call's id. Nothing for a quiet check, or for any
  * other message.
  */
@@ -155,20 +164,67 @@ export function checkInOf(message: unknown): { readonly id: string; readonly tex
   return undefined;
 }
 
+/** One check of a heartbeat, as OpenClaw's `heartbeat` event says it ended. */
+export interface Check {
+  /** When it ended. */
+  readonly at: number;
+  /** Whether it told the person something. */
+  readonly notify: boolean;
+  /** Its words for the person, as far as the event keeps them, when no channel took them. */
+  readonly words?: string;
+}
+
 /**
- * A heartbeat's reply, from one `session.message` event's message: its `heartbeat_respond` call,
- * and whether it told the person something. Nothing for any other message.
+ * A check, from one `heartbeat` event: quiet when it answered nothing (`ok-token`, `ok-empty`), and
+ * telling the person something when a channel took its words (`sent`) or there was none to
+ * (`skipped` for want of a target, with the words). Nothing for a check that didn't run, failed, or
+ * held back words it had said already (`duplicate`).
  */
-export function replyOf(message: unknown): { readonly notify: boolean } | undefined {
-  if (typeof message !== "object" || message === null) return undefined;
-  const { role, content } = message as Payload;
-  if (role !== "assistant" || !Array.isArray(content)) return undefined;
-  for (const part of content as Payload[]) {
-    if (part?.["type"] !== "toolCall" || part["name"] !== "heartbeat_respond") continue;
-    return { notify: ((part["arguments"] ?? {}) as Payload)["notify"] === true };
+export function checkOf(p: Payload): Check | undefined {
+  const at = typeof p["ts"] === "number" ? p["ts"] : undefined;
+  if (at === undefined) return undefined;
+  const status = p["status"];
+  if (status === "ok-token" || status === "ok-empty") return { at, notify: false };
+  if (status === "sent") return { at, notify: true };
+  const words = typeof p["preview"] === "string" ? p["preview"] : "";
+  if (status !== "skipped" || !UNDELIVERED.has(String(p["reason"])) || words.trim() === "") return undefined;
+  return { at, notify: true, words };
+}
+
+/** What an assistant message says in words: its text, or a `heartbeat_respond` call's that notifies. */
+function wordsOf(message: Payload): string | undefined {
+  const call = checkInOf(message);
+  if (call !== undefined) return call.text;
+  const { role, content } = message;
+  if (role !== "assistant") return undefined;
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return undefined;
+  const text = (content as Payload[])
+    .filter((part) => part?.["type"] === "text" && typeof part["text"] === "string")
+    .map((part) => part["text"] as string)
+    .join("");
+  return text === "" ? undefined : text;
+}
+
+const squash = (words: string): string => words.replace(/\s+/g, " ").trim();
+
+/**
+ * A check's words whole, from Home's latest messages (`chat.history`): the last of the model's that
+ * begins as the event's cut of them does. Nothing when none does.
+ */
+export function wordsIn(messages: unknown, cut: string): string | undefined {
+  if (!Array.isArray(messages)) return undefined;
+  const begins = squash(cut).slice(0, PREVIEW_MAX / 2);
+  for (const message of [...(messages as Payload[])].reverse()) {
+    if (typeof message !== "object" || message === null) continue;
+    const words = wordsOf(message);
+    if (words !== undefined && squash(words).includes(begins)) return words;
   }
   return undefined;
 }
+
+/** A check-in as Chips takes it: OpenClaw's quiet word stripped, cut to what Chips holds. */
+export const checkInText = (words: string): string => words.replace(QUIET_TOKEN, "").trim().slice(0, TEXT_MAX);
 
 /** OpenClaw refusing a write because the config moved since it was read: read it again and retry. */
 const MOVED = /config changed since last load/;

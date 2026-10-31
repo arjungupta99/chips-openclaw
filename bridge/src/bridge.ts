@@ -91,7 +91,7 @@ import { type Media, mediaLinesIn, sentWithTool } from "./media.ts";
 import type { ClawEvent } from "./openclaw.ts";
 import { Contexts, type EditFrame } from "./context.ts";
 import type { ChangeFrame, Models, Whose as ModelOwner } from "./models.ts";
-import { type ChangeFrame as BeatChange, checkInOf, type Heartbeats, replyOf } from "./heartbeats.ts";
+import { type ChangeFrame as BeatChange, type Check, checkInText, checkOf, type Heartbeats, PREVIEW_MAX, wordsIn } from "./heartbeats.ts";
 import type { JobChange, Jobs, Ours } from "./jobs.ts";
 import type { CompactFrame, LimitFrame, Session, Windows } from "./windows.ts";
 import { isMadeAgent, madeAgentId, type Workspaces } from "./own-agents.ts";
@@ -854,6 +854,8 @@ export class Bridge {
    */
   private readonly askers = new Map<string, Person>();
   private readonly people = new Map<string, RoomPeople>();
+  /** The heartbeat's check-ins being posted, one after another. */
+  private checkIns: Promise<void> = Promise.resolve();
   /** The OpenClaw agent a room with no other gets: `OPENCLAW_AGENT`, else the gateway's default. */
   private primary: string;
   /** The key the Main agent is registered under in Chips, once it is seated (`seatMain`). */
@@ -1847,45 +1849,58 @@ export class Bridge {
   }
 
   /**
-   * What the primary agent's heartbeat said for the person (ADR 0143): a `heartbeat_respond` call
-   * that notifies, in a message of its Home, posted in the Main room as the Main agent and marked
-   * as a check-in. A quiet check posts nothing, and one heard again posts nothing more.
+   * A check of the primary agent's heartbeat, as OpenClaw's `heartbeat` event says it ended: quiet
+   * or not, for its run on the Heartbeat job's page (ADR 0252), and, when it had words for the person
+   * that no channel took, those words posted in the Main room (ADR 0143).
+   */
+  private heartbeatChecked(p: Payload): void {
+    const check = checkOf(p);
+    if (check === undefined) return;
+    this.jobs?.replied(check.at, check.notify);
+    if (this.heartbeats === undefined || check.words === undefined) return;
+    this.checkIns = this.checkIns.then(() => this.checkIn(check as Check & { words: string }));
+  }
+
+  /**
+   * A check's words, posted in the Main room as the Main agent and marked as a check-in, once. The
+   * event cuts them at 200 characters; cut, they are read whole from Home, else posted as cut.
    *
    * Notifying is telling the person, and an @ is what pushes their phone (Chips ADR 0158): words
    * that @ nobody in the room @ the Main room's person, by the handle Chips's note gave them. With
    * no handle known (no note heard yet, or more than one person there), the words go as they are.
    */
-  private heartbeatSaid(p: Payload): void {
-    if (this.heartbeats === undefined || str(p["sessionKey"]) !== this.homeKey()) return;
-    const checkIn = checkInOf(p["message"]);
-    if (checkIn === undefined) return;
+  private async checkIn(check: Check & { readonly words: string }): Promise<void> {
     const where = this.whereSaid(this.homeKey());
     if (where?.spaceId === undefined || where.agentId === undefined) {
-      this.log(`chips: a heartbeat check-in with no Main room to say it in: ${checkIn.text.slice(0, 80)}`);
+      this.log(`chips: a heartbeat check-in with no Main room to say it in: ${check.words.slice(0, 80)}`);
       return;
     }
-    void this.chips
+    const whole = check.words.length < PREVIEW_MAX ? check.words : ((await this.homeWords(check.words)) ?? check.words);
+    const text = checkInText(whole);
+    if (text === "") return;
+    await this.chips
       .send({
         type: "message.post",
         space_id: where.spaceId,
-        text: this.forAsker(checkIn.text, where.spaceId, undefined),
+        text: this.forAsker(text, where.spaceId, undefined),
         heartbeat: true,
         actor: { kind: "agent", id: where.agentId },
-        idempotency_key: `openclaw-heartbeat:${checkIn.id}`,
+        idempotency_key: `openclaw-heartbeat:${check.at}`,
       })
       .catch((error: unknown) => this.log(`chips: a heartbeat check-in not posted: ${String(error)}`));
   }
 
-  /**
-   * A heartbeat's reply in Home, quiet or not, for the run it was (ADR 0252): a check that said
-   * nothing shows as one on the Heartbeat job's page.
-   */
-  private heartbeatReplied(p: Payload): void {
-    if (this.jobs === undefined || str(p["sessionKey"]) !== this.homeKey()) return;
-    const reply = replyOf(p["message"]);
-    if (reply === undefined) return;
-    const at = num((p["message"] as Payload | undefined)?.["timestamp"]) ?? this.now();
-    this.jobs.replied(at, reply.notify);
+  /** A check's words whole, from Home's latest messages; nothing when they can't be read there. */
+  private async homeWords(cut: string): Promise<string | undefined> {
+    try {
+      const history = await this.claw.request<{ messages?: unknown }>("chat.history", { sessionKey: this.homeKey(), limit: 20 });
+      const words = wordsIn(history.messages, cut);
+      if (words === undefined) this.log("openclaw: a heartbeat's words not found whole in Home; posting them as the event cut them");
+      return words;
+    } catch (error) {
+      this.log(`openclaw: a heartbeat's words not read from Home: ${String(error)}`);
+      return undefined;
+    }
   }
 
   /**
@@ -2482,8 +2497,6 @@ export class Bridge {
       case "agent":
         return this.agent(p);
       case "session.message":
-        this.heartbeatSaid(p);
-        this.heartbeatReplied(p);
         this.sentByTool(p);
         return this.committed(p);
       // An automation added, started, finished or removed (ADR 0157), or one of OpenClaw's own
@@ -2493,6 +2506,9 @@ export class Bridge {
         return this.automation(p);
       case "sessions.changed":
         return this.sessionChanged(p);
+      // A check of the heartbeat, ended (ADR 0143).
+      case "heartbeat":
+        return this.heartbeatChecked(p);
       case "exec.approval.requested":
         return this.asksApproval(p);
       case "plugin.approval.requested":
@@ -3291,6 +3307,7 @@ export class Bridge {
     await this.contexts?.settled();
     await this.models?.settled();
     await this.heartbeats?.settled();
+    await this.checkIns;
     await this.windows?.settled();
     await this.jobs?.settled();
   }
