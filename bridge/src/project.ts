@@ -8,14 +8,17 @@
  */
 
 import { Project } from "@chipschat/harness";
-import { type ProjectFacts, renderProjectNote } from "@chipschat/protocol";
+import { type ProjectFacts, renderProjectAsks, renderProjectFacts } from "@chipschat/protocol";
 import { gatewayPathOf, type MediaRoots, macPathOf } from "./media.ts";
 
 export interface Projects {
   /** One agent's copy of a room's project, in its folder (`folder`, as the gateway sees it). */
   of(input: { spaceId: string; agentId: string; name: string; folder: string }): Project;
-  /** What a turn is told of the project, its copy named as the gateway sees it. */
-  note(facts: ProjectFacts, othersInRoom: boolean): string;
+  /**
+   * What a turn is told of the project, its copy named as the gateway sees it: the facts, said with
+   * every turn, and the asks, said once to a session (Chips ADR 0250).
+   */
+  note(facts: ProjectFacts, othersInRoom: boolean): { readonly facts: string; readonly asks: string };
 }
 
 /** The projects of the agents in OpenClaw's state, on Chips at `url` with the harness's token. */
@@ -26,6 +29,9 @@ export function projectsIn(
 ): Projects {
   return {
     of: (input) => new Project({ ...input, folder: macPathOf(roots, input.folder), url: chips.url, token: chips.token, log }),
-    note: (facts, othersInRoom) => renderProjectNote({ ...facts, folder: gatewayPathOf(roots, facts.folder) }, { othersInRoom }),
+    note: (facts, othersInRoom) => ({
+      facts: renderProjectFacts({ ...facts, folder: gatewayPathOf(roots, facts.folder) }),
+      asks: renderProjectAsks(facts, { othersInRoom }),
+    }),
   };
 }

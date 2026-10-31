@@ -120,12 +120,14 @@ function described(file: RoomFile): string {
 
 /**
  * What a turn is told of the room's files it was handed, of those it named and was not, and how a
- * file of its own reaches the room: with the room's project, a file that isn't in it.
+ * file of its own reaches the room: with the room's project, a file that isn't in it. A session
+ * that holds the room's rules is told the files alone (Chips ADR 0250), which may be nothing.
  */
 export function filesLine(
   handed: readonly RoomFile[],
   left: readonly { readonly file: RoomFile; readonly why: string }[],
   project = false,
+  rules = true,
 ): string {
   const lines: string[] = [];
   if (handed.length > 0) {
@@ -135,7 +137,7 @@ export function filesLine(
     );
   }
   for (const { file, why } of left) lines.push(`Not attached: ${described(file)}, ${why}.`);
-  lines.push(sendingFiles(project));
+  if (rules) lines.push(sendingFiles(project));
   return lines.join("\n");
 }
 

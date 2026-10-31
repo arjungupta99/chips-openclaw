@@ -83,8 +83,8 @@
  * same event and Chips answers it as a duplicate.
  */
 
-import { heldNote, type Project, pushedInWords, Refuse, renderReplyingTo } from "@chipschat/harness";
-import { withRole } from "@chipschat/protocol";
+import { heldNote, type Project, pushedInWords, Refuse, renderReplyingTo, SessionRules } from "@chipschat/harness";
+import { noteWithoutRules, withRole } from "@chipschat/protocol";
 import { type ChipsAgent, type ChipsEvent, ChipsRefusal, type NewAgent, type Placed, type Taken } from "./chips.ts";
 import { chipsId } from "./ids.ts";
 import { type Media, mediaLinesIn, sentWithTool } from "./media.ts";
@@ -95,7 +95,7 @@ import { type ChangeFrame as BeatChange, checkInOf, type Heartbeats } from "./he
 import type { CompactFrame, LimitFrame, Session, Windows } from "./windows.ts";
 import { isMadeAgent, madeAgentId, type Workspaces } from "./own-agents.ts";
 import type { Projects } from "./project.ts";
-import { filesLine, namedIn, ROOM_FILES, type RoomFile, roomFilesIn, STALE_FILE, staleIn } from "./room-files.ts";
+import { filesLine, namedIn, ROOM_FILES, type RoomFile, roomFilesIn, sendingFiles, STALE_FILE, staleIn } from "./room-files.ts";
 import { Automations, committedOf, forPerson, jobOf, jobOfSession, type Person, SPEAKING_LATER } from "./automations.ts";
 
 /** What the bridge needs of Chips; the `Chips` client, or a stand-in in the tests. */
@@ -570,12 +570,18 @@ function fromAgent(from: Payload, text: string, noted: boolean): string {
  * What Chips tells one who takes the turn of the room (Chips ADR 0092): who is in it, with the @
  * that reaches each, and that only those @-mentioned act. Keyed by the id `for` names it by: one of
  * our agents, or the harness itself where it takes the turn. Nothing from a Chips that sends none.
+ * Without the rules it ends with when the session holds them (Chips ADR 0250).
  */
-function noteFor(event: ChipsEvent, takerId: string): string | undefined {
-  const room = event["room"] as Payload | undefined;
-  const notes = room?.["notes"] as Payload | undefined;
-  const note = str(notes?.[takerId])?.trim();
+function noteFor(event: ChipsEvent, takerId: string, held = false): string | undefined {
+  const room = event["room"] as Parameters<typeof noteWithoutRules>[0];
+  const note = str(held ? noteWithoutRules(room, takerId) : room?.notes?.[takerId])?.trim();
   return note === undefined || note === "" ? undefined : note;
+}
+
+/** The rules Chips's note on the room ends with (Chips ADR 0250); none from a Chips that keeps them in the note alone. */
+function rulesIn(event: ChipsEvent, takerId: string): string | undefined {
+  const rules = (event["room"] as Payload | undefined)?.["rules"] as Payload | undefined;
+  return str(rules?.[takerId])?.trim();
 }
 
 /** Whether a room has agents beside the one taking the turn, from Chips's note on a message (ADR 0092). */
@@ -782,6 +788,8 @@ export class Bridge {
   private readonly forks = new Map<string, Promise<NewAgent | undefined>>();
   /** What each turn the bridge asked for was sent with, until it ends: to send it again once. */
   private readonly sends = new Map<string, Payload>();
+  /** Which rules each OpenClaw session was told, by its key, so a turn says them once (Chips ADR 0250). */
+  private readonly rules = new SessionRules();
   private readonly latest = new Map<string, string>();
   /**
    * What a session's next turn in a room is to be told, by session and room: that Chips held what
@@ -1765,6 +1773,7 @@ export class Bridge {
     if (this.windows === undefined) throw new Refuse("This bridge keeps no context windows.");
     const ask = frame as unknown as CompactFrame;
     const session = await this.windowFor(ask.agent_id, "a Compact now");
+    this.rules.forget(session.key);
     return this.windows.compact(ask, session, this.turnIn(session.key));
   }
 
@@ -1783,11 +1792,12 @@ export class Bridge {
    */
   private sessionChanged(p: Payload): void {
     const sessionKey = str(p["sessionKey"]) ?? str(p["key"]);
+    const compacted = p["reason"] === "compact" && p["compacted"] !== false;
+    if (sessionKey !== undefined && compacted) this.rules.forget(sessionKey);
     if (this.windows === undefined || sessionKey === undefined || this.turnIn(sessionKey)) return;
     const agentId = this.agentOfSession(sessionKey);
     const session = agentId === undefined ? undefined : this.windowSessionOf(agentId);
     if (agentId === undefined || session?.key !== sessionKey) return;
-    const compacted = p["reason"] === "compact" && p["compacted"] !== false;
     this.windows.changed(agentId, session, compacted);
   }
 
@@ -2033,11 +2043,18 @@ export class Bridge {
       const missed = await this.missedIn(spaceId, event["context"], heard, agentId);
       const fresh = heard?.room !== spaceId;
       if (agentId !== undefined && seq !== undefined) this.lastHeard.set(agentId, { room: spaceId, seq });
+      // And the room's project after the note (Chips ADR 0221): the agent's copy, brought up to date.
+      const project = await this.projectFor(event, spaceId, taker, agentId);
+      // The room's rules, the project's asks, how a file reaches the room and how to speak in it
+      // later, said to a session once (Chips ADR 0250): a turn whose session holds them says the facts.
+      const takerId = taker.agentId ?? this.self.harnessId;
+      const rules = [rulesIn(event, takerId), project?.asks, sendingFiles(project !== undefined), SPEAKING_LATER]
+        .filter((part): part is string => part !== undefined && part !== "")
+        .join("\n\n");
+      const held = this.rules.holds(taker.sessionKey, rules);
       // Chips's note on the room comes first, ahead of what was said and the words (ADR 0092), and
       // Chips's own word to the agent ahead of that (the referee).
-      const note = noteFor(event, taker.agentId ?? this.self.harnessId);
-      // And the room's project after it (Chips ADR 0221): the agent's copy, brought up to date.
-      const project = await this.projectFor(event, spaceId, taker, agentId);
+      const note = noteFor(event, takerId, held);
       // The message the words reply to, between what was said and the words (Chips ADR 0219).
       const replying = replyingIn(event, agentId ?? this.self.harnessId);
       const said = agentSaid ? fromAgent(from, text, note !== undefined) : text;
@@ -2052,20 +2069,28 @@ export class Bridge {
         .filter((line): line is string => line !== undefined)
         .map((line) => `Chips: ${line}`);
       // The room's files the turn's words name, at their current version (Chips ADR 0099).
-      const files = await this.roomFiles(taker.sessionKey, spaceId, event, [...chips, message].join("\n"), project !== undefined);
+      const files = await this.roomFiles(taker.sessionKey, spaceId, event, [...chips, message].join("\n"), { project: project !== undefined, held });
       const sent = [...attachments, ...files.sent];
       // Steered: into the session's turn while one runs, a turn of its own when none does. Said, not
       // left to OpenClaw's stored queue mode, which could make it wait for a turn after.
       const send: Payload = {
         sessionKey: taker.sessionKey,
-        // How a file reaches the room, and how to speak in it later (ADR 0157), with every turn.
-        message: [...chips, note, project, files.line, SPEAKING_LATER, message].filter((part) => part !== undefined).join("\n\n"),
+        // How a file reaches the room, and how to speak in it later (ADR 0157), till the session holds them.
+        message: [...chips, note, held ? project?.facts : project && `${project.facts}\n${project.asks}`, files.line, held ? undefined : SPEAKING_LATER, message]
+          .filter((part) => part !== undefined && part !== "")
+          .join("\n\n"),
         idempotencyKey: turn,
         queueMode: "steer",
         ...(sent.length === 0 ? {} : { attachments: sent }),
       };
       this.sends.set(turn, send);
-      await this.claw.request("chat.send", send);
+      try {
+        await this.claw.request("chat.send", send);
+      } catch (error) {
+        this.rules.forget(taker.sessionKey);
+        throw error;
+      }
+      this.rules.told(taker.sessionKey, rules);
       files.took();
     }
   }
@@ -2157,10 +2182,10 @@ export class Bridge {
     spaceId: string,
     event: ChipsEvent,
     words: string,
-    project: boolean,
+    { project, held }: { readonly project: boolean; readonly held: boolean },
   ): Promise<{ sent: Payload[]; line: string; took: () => void }> {
     const files = roomFilesIn(event["context"]);
-    if (files.length === 0) return { sent: [], line: filesLine([], [], project), took: () => undefined };
+    if (files.length === 0) return { sent: [], line: filesLine([], [], project, !held), took: () => undefined };
     const has = this.versionsOf(sessionKey, spaceId);
     const onMessage = attachmentsOf(event);
     const carried = files.filter((file) => carries(onMessage, file));
@@ -2193,7 +2218,7 @@ export class Bridge {
     // under its name is its next version (Chips ADR 0101): O2 had K–O posted as a new file.
     return {
       sent,
-      line: filesLine([...carried.filter(isDocument), ...handed], left, project),
+      line: filesLine([...carried.filter(isDocument), ...handed], left, project, !held),
       took: () => {
         for (const file of [...carried, ...handed]) has.set(file.name, file.attachmentId);
       },
@@ -2305,6 +2330,7 @@ export class Bridge {
    */
   private async ensureSession(key: string, firstWords: string, agent: string): Promise<void> {
     if (this.sessions.has(key)) return;
+    this.rules.forget(key);
     await this.claw.request("sessions.create", {
       key,
       agentId: agent,
@@ -2582,6 +2608,8 @@ export class Bridge {
     if (state === "final") return this.finish(run, clawRun, p);
     if (state === "error" || state === "aborted") {
       run.ended = true;
+      // A turn that failed may not have kept what it was told (Chips ADR 0250).
+      this.rules.forget(run.sessionKey);
       const error = state === "aborted" ? "Stopped." : (str(p["errorMessage"]) ?? "OpenClaw's turn failed.");
       this.write(run, { type: "run.failed", run_id: run.chipsRun, error, idempotency_key: `openclaw-run:${clawRun}:failed` });
     }
@@ -2808,6 +2836,8 @@ export class Bridge {
         return this.tool(run, p);
       case "compaction":
         // OpenClaw compacting the session on its own, near full (ADR 0146): from about what it held.
+        // What it keeps of the rules is its summary's to say, so the next turn says them again (Chips ADR 0250).
+        if (data["phase"] === "start") this.rules.forget(run.sessionKey);
         if (data["phase"] === "start" && run.compactedFrom === undefined) {
           const agentId = this.agentOfSession(run.sessionKey);
           run.compactedFrom = run.contextTokens ?? (agentId === undefined ? undefined : this.windows?.usedOf(agentId)) ?? 0;
@@ -3008,7 +3038,12 @@ export class Bridge {
    * runs, which these words join: the copy is that turn's to change. None for the primary agent and
    * OpenClaw's own, whose folder is every room's.
    */
-  private async projectFor(event: ChipsEvent, spaceId: string, taker: Taker, agentId: string | undefined): Promise<string | undefined> {
+  private async projectFor(
+    event: ChipsEvent,
+    spaceId: string,
+    taker: Taker,
+    agentId: string | undefined,
+  ): Promise<{ readonly facts: string; readonly asks: string } | undefined> {
     const { clawAgent, sessionKey } = taker;
     if (this.projects === undefined || agentId === undefined || !isMadeAgent(clawAgent) || this.turnIn(sessionKey)) return undefined;
     const name = this.nameOf.get(agentId) ?? clawAgent;

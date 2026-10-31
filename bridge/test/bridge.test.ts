@@ -41,6 +41,9 @@ import { connect } from "@chipschat/harness";
 const told = (words: string, note?: string): string =>
   [note, SENDING_FILES, SPEAKING_LATER, words].filter((part) => part !== undefined).join("\n\n");
 
+/** A session's later turn, which holds those rules (Chips ADR 0250): Chips's note, and the words. */
+const toldAgain = (words: string, note?: string): string => [note, words].filter((part) => part !== undefined).join("\n\n");
+
 const ME = "hrn_01K4ZQPX000000000000000004";
 const ROOM = "spc_01K4ZQPX000000000000000002";
 /** The room a harness's Main agent is in, which takes no other (Chips ADR 0087, rule 7). */
@@ -436,7 +439,7 @@ describe("rooms and sessions", () => {
     // A turn Chips hands nothing with is told nothing, whatever was overheard before it.
     await bridge.onChips({ ...said("an overheard line"), type: "message.overheard" });
     await bridge.onChips(said("Thanks", { message_id: "msg_01K4ZQPX0000000000000000A3" }));
-    assert.equal(calls.filter(([method]) => method === "chat.send").at(-1)?.[1]["message"], told("Thanks"));
+    assert.equal(calls.filter(([method]) => method === "chat.send").at(-1)?.[1]["message"], toldAgain("Thanks"));
   });
 
   it("reads Chips's context as lines, and nothing when it hands none over", () => {
@@ -934,7 +937,7 @@ describe("an answer's files", () => {
         `${HANDED}\n\nSaid in this space since you last spoke:\nOc3: Started it (sent ascii-alphabet.html)\n\n@OpenClaw carry on`,
       );
       await bridge.onChips(said("Still on ascii-alphabet.html?", { message_id: "msg_01K4ZQPX0000000000000000A2", ...listing([GALLERY]) }));
-      assert.equal(sends()[1]?.["message"], told("Still on ascii-alphabet.html?"));
+      assert.equal(sends()[1]?.["message"], toldAgain("Still on ascii-alphabet.html?"));
       assert.equal(sends()[1]?.["attachments"], undefined);
       const v3 = roomFile("ascii-alphabet.html", 3, { by: OC3 });
       await bridge.onChips(said("And now ascii-alphabet.html?", { message_id: "msg_01K4ZQPX0000000000000000A3", ...listing([v3]) }));
@@ -1039,8 +1042,7 @@ describe("an answer's files", () => {
         sends()[1]?.["message"],
         [
           `Chips: Your last answer here sent a file Chips did not take as its next version: ${why}`,
-          `Files in this space, attached at their current version: ascii-alphabet.html (v3, by Oc2). To change one, send it back under the same name: Chips takes it as the next version.\n${SENDING_FILES}`,
-          SPEAKING_LATER,
+          "Files in this space, attached at their current version: ascii-alphabet.html (v3, by Oc2). To change one, send it back under the same name: Chips takes it as the next version.",
           "How is it going?",
         ].join("\n\n"),
       );
@@ -1881,7 +1883,7 @@ describe("OpenClaw's agents as agents in Chips (Chips ADR 0087)", () => {
     await bridge.onChips(said("Thanks", { ...inOther, seq: 40, message_id: "msg_01K4ZQPX0000000000000000A2" }));
     assert.deepEqual(
       calls.filter(([method]) => method === "chat.send").map(([, params]) => params["message"]),
-      [told("Said in this space since you last spoke:\nDana: Book the table\n(Arjun joined the space)\nArjun: Hi all\n\n@OpenClaw which one?"), told("Thanks")],
+      [told("Said in this space since you last spoke:\nDana: Book the table\n(Arjun joined the space)\nArjun: Hi all\n\n@OpenClaw which one?"), toldAgain("Thanks")],
     );
   });
 
@@ -1908,7 +1910,7 @@ describe("OpenClaw's agents as agents in Chips (Chips ADR 0087)", () => {
     });
     calls = [];
     await bridge.onChips(said("And a blanket", { space_id: asked, seq: 50, message_id: "msg_01K4ZQPX0000000000000000A2", for: [`agt_${session}`] }));
-    assert.equal(calls.find(([method]) => method === "chat.send")?.[1]["message"], told("And a blanket"));
+    assert.equal(calls.find(([method]) => method === "chat.send")?.[1]["message"], toldAgain("And a blanket"));
   });
 
   it("puts Chips's room note first, and says the @ rule once (Chips ADR 0092)", async () => {
@@ -2016,9 +2018,9 @@ describe("OpenClaw's agents as agents in Chips (Chips ADR 0087)", () => {
     const sends = calls.filter(([method]) => method === "chat.send").map(([, params]) => String(params["message"]));
     assert.equal(
       sends[1],
-      `Chips: Your last message here was held, so the agents it named do not have it yet: messages between the agents in this space are held (they have sent each other 48 since a person last acted) until a person acts. Until then, tell the person what is done and what is blocked, rather than asking the agents again.\n\n${SENDING_FILES}\n\n${SPEAKING_LATER}\n\nWhere are we?`,
+      `Chips: Your last message here was held, so the agents it named do not have it yet: messages between the agents in this space are held (they have sent each other 48 since a person last acted) until a person acts. Until then, tell the person what is done and what is blocked, rather than asking the agents again.\n\nWhere are we?`,
     );
-    assert.equal(sends[2], told("Thanks"));
+    assert.equal(sends[2], toldAgain("Thanks"));
   });
 
   it("says nothing of an answer Chips handed over", async () => {
@@ -2029,7 +2031,41 @@ describe("OpenClaw's agents as agents in Chips (Chips ADR 0087)", () => {
     });
     await bridge.settled();
     await bridge.onChips(said("Again", { message_id: "msg_01K4ZQPX0000000000000000A2" }));
-    assert.equal(calls.filter(([method]) => method === "chat.send").at(-1)?.[1]["message"], told("Again"));
+    assert.equal(calls.filter(([method]) => method === "chat.send").at(-1)?.[1]["message"], toldAgain("Again"));
+  });
+
+  it("tells a session the room's rules once, and again once OpenClaw compacts it (Chips ADR 0250)", async () => {
+    const facts = "In this space: Arjun (person, @Arjun) and you, OpenClaw (@OpenClaw).";
+    const rules = "Everyone here reads what you write; only those you @-mention act on it.";
+    const room = { members: [], notes: { [ME]: `${facts}\n\n${rules}` }, rules: { [ME]: rules } };
+    const turn = async (words: string, n: number): Promise<void> => {
+      const runId = `msg_01K4ZQPX0000000000000000B${n}`;
+      await bridge.onChips(said(words, { message_id: runId, room }));
+      bridge.onClaw({ event: "chat", payload: { runId, sessionKey: key(), seq: 9, state: "final", message: "Ok." } });
+      await bridge.settled();
+    };
+    await turn("Hi", 1);
+    await bridge.onChips(said("Again", { message_id: "msg_01K4ZQPX0000000000000000B2", room }));
+    // OpenClaw compacting the session in that turn, near full: what it keeps of the rules is its summary's.
+    const stream = { runId: "msg_01K4ZQPX0000000000000000B2", sessionKey: key(), stream: "compaction", seq: 1 };
+    bridge.onClaw({ event: "agent", payload: { ...stream, data: { phase: "start" } } });
+    bridge.onClaw({ event: "chat", payload: { runId: stream.runId, sessionKey: key(), seq: 9, state: "final", message: "Ok." } });
+    await bridge.settled();
+    await turn("And now", 3);
+    await turn("Still there?", 4);
+    // Compacted between turns, as a person's Compact now is.
+    bridge.onClaw({ event: "sessions.changed", payload: { sessionKey: key(), reason: "compact" } });
+    await turn("Last one", 5);
+    assert.deepEqual(
+      calls.filter(([method]) => method === "chat.send").map(([, params]) => params["message"]),
+      [
+        told("Hi", `${facts}\n\n${rules}`),
+        toldAgain("Again", facts),
+        told("And now", `${facts}\n\n${rules}`),
+        toldAgain("Still there?", facts),
+        told("Last one", `${facts}\n\n${rules}`),
+      ],
+    );
   });
 
   it("takes an agent's words when Chips names it kind agent, and never its own agents' words", async () => {
@@ -2232,7 +2268,7 @@ describe("OpenClaw's agents as agents in Chips (Chips ADR 0087)", () => {
     );
     assert.deepEqual(pulls, [[ROOM, 13, 20]]);
     // The other's answer, and not its own, which it said in this conversation.
-    assert.equal(calls.find(([method]) => method === "chat.send")?.[1]["message"], told("Said in this space since you last spoke:\nOpenClaw: I'll do the letters.\n\n@OpenClaw go on"));
+    assert.equal(calls.find(([method]) => method === "chat.send")?.[1]["message"], toldAgain("Said in this space since you last spoke:\nOpenClaw: I'll do the letters.\n\n@OpenClaw go on"));
   });
 
   it("keeps a line meant for another of its agents in an agent's catch-up: that was a turn in another conversation", async () => {
@@ -2666,7 +2702,7 @@ describe("a copy of an agent for a person's Fork (Chips ADR 0087)", () => {
       `Nova's files were copied into your own folder, /home/node/.openclaw/chips/${COPY}. Work there: /home/node/.openclaw/chips/${NOVA} is still Nova's.`;
     assert.equal(sends[0]?.["message"], told("@Nova·fork what is the code word?", note));
     assert.equal(sends[1]?.["message"], told("@Nova and you?"));
-    assert.equal(sends[2]?.["message"], told("And now?"));
+    assert.equal(sends[2]?.["message"], toldAgain("And now?"));
     // From here on the two remember apart.
     assert.equal(clawSessions.get(copyKey())?.messages.length, NOVA_SAID.length + 2);
     assert.equal(clawSessions.get(novaKey())?.messages.length, NOVA_SAID.length + 1);
