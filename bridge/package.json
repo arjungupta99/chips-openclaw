@@ -35,9 +35,9 @@
     "release": "npm run build && npm test && npm pack"
   },
   "devDependencies": {
-    "@chipschat/conformance": "file:vendor/chipschat-conformance-0.0.0.tgz",
-    "@chipschat/harness": "file:vendor/chipschat-harness-0.0.0.tgz",
-    "@chipschat/protocol": "file:vendor/chipschat-protocol-0.0.0.tgz",
+    "@chipschat/conformance": "file:vendor/chipschat-conformance-1.0.0.tgz",
+    "@chipschat/harness": "file:vendor/chipschat-harness-1.0.0.tgz",
+    "@chipschat/protocol": "file:vendor/chipschat-protocol-1.0.0.tgz",
     "@openclaw/gateway-client": "2026.9.6",
     "@openclaw/gateway-protocol": "2026.9.6",
     "@types/node": "22.19.0",
