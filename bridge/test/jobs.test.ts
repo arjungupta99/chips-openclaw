@@ -100,7 +100,7 @@ describe("OpenClaw's own jobs, as Chips is told them", () => {
   });
 
   it("are the heartbeat, Dreaming and one skill review for every agent, each with its next run", () => {
-    assert.deepEqual(copyOf(LIVE, CRON, ours), {
+    assert.deepEqual(copyOf(LIVE, CRON, ours, new Map(), BEAT_AT), {
       jobs: [
         {
           job_id: "heartbeat",
@@ -131,7 +131,7 @@ describe("OpenClaw's own jobs, as Chips is told them", () => {
           about:
             "Once a week OpenClaw has each agent go over the skills it has written down, merging what repeats and dropping what's stale.",
           kind: "skills",
-          every: 10_080,
+          when: "Every week",
           for_agents: [MAIN, FEN],
           on: true,
           editable: true,
@@ -139,6 +139,13 @@ describe("OpenClaw's own jobs, as Chips is told them", () => {
         },
       ],
     });
+  });
+
+  it("never say a next run gone by, which is a run still going, and a single review's day", () => {
+    const running = review("93fb78ff", "main", BEAT_AT - 60_000);
+    const jobs = copyOf(LIVE, [heartbeatJob, running], ours, new Map(), BEAT_AT)["jobs"] as Payload[];
+    const skills = jobs.find((job) => job["job_id"] === "skill-review");
+    assert.deepEqual([skills?.["every"], skills?.["when"], skills?.["next_at"]], [10_080, undefined, undefined]);
   });
 
   it("are off, with no next run, as the config keeps them off, each with how often it ran before", () => {
@@ -354,6 +361,7 @@ function rig(g = gateway()) {
     () => ours,
     () => undefined,
     async () => undefined,
+    () => BEAT_AT,
   );
   return { jobs, copies, posted, ...g };
 }

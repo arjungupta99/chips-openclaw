@@ -139,12 +139,15 @@ const minutesOfJob = (job: CronJob | undefined): number | undefined => {
   return everyOfCron(job?.schedule?.expr);
 };
 
-/** When a job runs next, while it is on and OpenClaw has it. */
-function nextOf(on: boolean, jobs: readonly CronJob[]): Payload {
+/**
+ * When a job runs next, while it is on and OpenClaw has it: the soonest of its jobs, and never a
+ * time gone by, which is a run still going.
+ */
+function nextOf(on: boolean, jobs: readonly CronJob[], now: number): Payload {
   const next = jobs
     .filter((job) => job.enabled !== false)
     .map((job) => job.nextRunAtMs)
-    .filter((ms): ms is number => typeof ms === "number")
+    .filter((ms): ms is number => typeof ms === "number" && ms > now)
     .sort((a, b) => a - b)[0];
   const at = on ? isoOf(next) : undefined;
   return at === undefined ? {} : { next_at: at };
@@ -168,6 +171,7 @@ export function copyOf(
   cron: readonly CronJob[],
   ours: Ours,
   before: ReadonlyMap<Own, number> = new Map(),
+  now: number = Date.now(),
 ): Payload {
   const of = (own: Own) => cron.filter((job) => ownOf(job, ours.primary) === own);
   const jobs: Payload[] = [];
@@ -186,7 +190,7 @@ export function copyOf(
     ...(main === undefined ? {} : { for_agents: [main] }),
     on: beat.on,
     editable: true,
-    ...nextOf(beat.on, of(HEARTBEAT)),
+    ...nextOf(beat.on, of(HEARTBEAT), now),
   });
 
   const dreaming = of(DREAMING);
@@ -201,7 +205,7 @@ export function copyOf(
       ...howOften(dreaming[0], before.get(DREAMING), 1440),
       on,
       editable: true,
-      ...nextOf(on, dreaming),
+      ...nextOf(on, dreaming, now),
     });
   }
 
@@ -220,11 +224,14 @@ export function copyOf(
       about:
         "Once a week OpenClaw has each agent go over the skills it has written down, merging what repeats and dropping what's stale.",
       kind: "skills",
-      ...howOften(reviews[0], before.get(SKILLS), 10_080),
+      // Each agent's review has a day of its own: the next one's isn't theirs all.
+      ...(reviews.length > 1 && reviews.every((job) => minutesOfJob(job) === 10_080)
+        ? { when: "Every week" }
+        : howOften(reviews[0], before.get(SKILLS), 10_080)),
       ...(agents.length === 0 ? {} : { for_agents: agents.slice(0, 200) }),
       on,
       editable: true,
-      ...nextOf(on, reviews),
+      ...nextOf(on, reviews, now),
     });
   }
   return { jobs };
@@ -364,6 +371,7 @@ export class Jobs {
     private readonly ours: () => Ours,
     private readonly log: (message: string) => void,
     private readonly sleep: (ms: number) => Promise<void> = (ms) => new Promise((done) => setTimeout(done, ms)),
+    private readonly now: () => number = Date.now,
   ) {}
 
   /** The copy as OpenClaw has it now. */
@@ -384,7 +392,7 @@ export class Jobs {
     }
     const beat = beatOf(config?.agents, ours.primary).every;
     if (beat !== undefined) this.before.set(HEARTBEAT, beat);
-    return copyOf(config ?? {}, cron, ours, this.before);
+    return copyOf(config ?? {}, cron, ours, this.before, this.now());
   }
 
   /** The copy read and sent; the SDK sends it only when it isn't what Chips took last. */
