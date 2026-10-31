@@ -53,6 +53,8 @@ const APPLIED_EVERY_MS = 200;
 /** `sessions.usage` reads its files again when asked: how often, and how long apart, to ask. */
 const USAGE_TRIES = 5;
 const USAGE_EVERY_MS = 3000;
+/** How long after a heartbeat priced too soon to price it again. */
+const PRICE_AGAIN_MS = 120_000;
 /** How long after a heartbeat ends its reply may still be heard. */
 const HEARD_SLACK_MS = 5000;
 
@@ -485,6 +487,13 @@ export class Jobs {
     const home = own === HEARTBEAT ? await this.homeQuarters() : undefined;
     const sent = { ...made, ...this.quietOf(run, own), ...(await this.priced(run, own, job, home)) };
     await this.chips.runs([sent]).catch((error: unknown) => this.log(`chips: a run of ${own} not sent: ${String(error)}`));
+    // Home's usage may not have counted the check yet: priced once more a little later, and sent
+    // again with its cost, which Chips lays over what it has.
+    if (own !== HEARTBEAT || sent["cost_usd"] !== undefined) return;
+    await this.sleep(PRICE_AGAIN_MS);
+    const priced = await this.priced(run, own, job, await this.homeQuarters());
+    if (priced["cost_usd"] === undefined) return;
+    await this.chips.runs([{ ...sent, ...priced }]).catch((error: unknown) => this.log(`chips: a heartbeat's cost not sent: ${String(error)}`));
   }
 
   /** Whether a heartbeat had nothing to say, by the reply heard in Home while it ran. */

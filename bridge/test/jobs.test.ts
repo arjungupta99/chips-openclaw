@@ -279,6 +279,8 @@ function gateway(config: Payload = structuredClone(LIVE) as Payload) {
   let hash = 1;
   const patches: Payload[] = [];
   let refuse: string | undefined;
+  /** How many reads of Home's usage come back before it has counted the latest check. */
+  let uncounted = 0;
   const runs = new Map<string, CronRun[]>();
   const merge = (into: Payload, patch: Payload): void => {
     for (const [key, value] of Object.entries(patch)) {
@@ -316,6 +318,10 @@ function gateway(config: Payload = structuredClone(LIVE) as Payload) {
         case "cron.runs":
           return { entries: runs.get(String(params["id"])) ?? [], hasMore: false } as T;
         case "sessions.usage":
+          if (uncounted > 0) {
+            uncounted -= 1;
+            return { sessions: [{ usage: { utcQuarterHourTokenUsage: [], utcQuarterHourMessageCounts: [] } }] } as T;
+          }
           return {
             sessions: [
               {
@@ -345,6 +351,9 @@ function gateway(config: Payload = structuredClone(LIVE) as Payload) {
     runs,
     refuse: (words: string) => {
       refuse = words;
+    },
+    uncount: (reads: number) => {
+      uncounted = reads;
     },
   };
 }
@@ -406,6 +415,36 @@ describe("the jobs kept in Chips", () => {
     await r.jobs.settled();
     assert.deepEqual(r.posted.map((run) => [run["job_id"], run["quiet"], run["cost_usd"]]), [["heartbeat", true, 0.342151]]);
     assert.equal(r.copies.length, 2);
+  });
+
+  it("price a heartbeat again a little later when Home's usage hadn't counted it yet", async () => {
+    const r = rig();
+    await r.jobs.send();
+    r.uncount(1);
+    r.jobs.cronEvent({ jobId: "5ecdc04c", action: "finished", status: "ok", runAtMs: BEAT_AT, durationMs: 14_507 });
+    await new Promise((done) => setTimeout(done, 10));
+    await r.jobs.settled();
+    assert.deepEqual(
+      r.posted.map((run) => [run["run_id"], run["cost_usd"]]),
+      [
+        [`5ecdc04c:${BEAT_AT}`, undefined],
+        [`5ecdc04c:${BEAT_AT}`, 0.342151],
+      ],
+    );
+  });
+
+  it("send a heartbeat without a cost when Home's usage never counts it", async () => {
+    const r = rig();
+    await r.jobs.send();
+    // A check in a quarter the stand-in's usage hasn't counted: no cost the first time or the second.
+    const late = BEAT_AT + 3_600_000;
+    r.jobs.cronEvent({ jobId: "5ecdc04c", action: "finished", status: "ok", runAtMs: late, durationMs: 6000 });
+    await new Promise((done) => setTimeout(done, 10));
+    await r.jobs.settled();
+    assert.deepEqual(
+      r.posted.map((run) => [run["started_at"], run["cost_usd"]]),
+      [[new Date(late).toISOString(), undefined]],
+    );
   });
 
   it("let an agent's automation go by", async () => {
