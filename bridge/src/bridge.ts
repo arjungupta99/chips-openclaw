@@ -584,11 +584,16 @@ function rulesIn(event: ChipsEvent, takerId: string): string | undefined {
   return str(rules?.[takerId])?.trim();
 }
 
-/** Whether a room has agents beside the one taking the turn, from Chips's note on a message (ADR 0092). */
-function othersIn(event: ChipsEvent, takerId: string): boolean {
+/**
+ * Whether a room has agents beside the one taking the turn, from Chips's note on a message (ADR 0092).
+ * `selves` are the turn's own ids: its agent's, and the harness's where the harness takes it, as in a
+ * room asked of it, whose first turn claims it for the agent made there and whose note lists the
+ * harness as a member.
+ */
+export function othersIn(event: ChipsEvent, selves: readonly string[]): boolean {
   const members = (event["room"] as Payload | undefined)?.["members"];
   if (!Array.isArray(members)) return false;
-  return (members as Payload[]).some((each) => isAgentKind(each?.["kind"]) && each["participant_id"] !== takerId);
+  return (members as Payload[]).some((each) => isAgentKind(each?.["kind"]) && !selves.includes(String(each["participant_id"])));
 }
 
 /** A room's people, each by the @ that reaches them, and the handles of everybody in it. */
@@ -3051,7 +3056,7 @@ export class Bridge {
     try {
       const facts = await this.onCopy(sessionKey, () => project.pull());
       this.copies.set(sessionKey, { project, spaceId });
-      return this.projects.note(facts, othersIn(event, agentId));
+      return this.projects.note(facts, othersIn(event, taker.agentId === undefined ? [agentId, this.self.harnessId] : [agentId]));
     } catch (error) {
       this.log(`${name}'s copy of the room's project couldn't be readied: ${String(error)}`);
       return undefined;

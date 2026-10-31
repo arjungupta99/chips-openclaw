@@ -14,6 +14,7 @@ import {
   type FilesPort,
   forkName,
   heardIn,
+  othersIn,
   replyingIn,
   spentIn,
   textOf,
@@ -2481,6 +2482,22 @@ describe("an OpenClaw agent of its own for each agent Chips asks for", () => {
     await bridge.settled();
     assert.deepEqual(sent.map((event) => event.type), ["run.started", "run.failed"]);
     assert.equal(calls.filter(([method]) => method === "chat.send").length, 3);
+  });
+});
+
+describe("other agents in a room, for the project's asks (Chips ADR 0221)", () => {
+  const room = (...members: { participant_id: string; kind: string }[]): ChipsEvent => said("Hi", { room: { members, notes: {} } });
+  const GINO = "agt_01K4ZQPX0000000000000GINO";
+
+  it("leaves out the harness where it takes the turn: a room asked of it, which its first turn claims for its agent", () => {
+    const asked = room({ participant_id: ARJUN.participant_id, kind: "person" }, { participant_id: ME, kind: "harness" });
+    assert.equal(othersIn(asked, [GINO, ME]), false);
+    assert.equal(othersIn(asked, [GINO]), true);
+  });
+
+  it("counts any other agent there, and none from a Chips that lists no members", () => {
+    assert.equal(othersIn(room({ participant_id: GINO, kind: "agent" }, { participant_id: "agt_hello", kind: "agent" }), [GINO]), true);
+    assert.equal(othersIn(said("Hi"), [GINO]), false);
   });
 });
 
