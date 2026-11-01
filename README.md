@@ -89,8 +89,11 @@ the same Chips with the same key, and a new link from Chips replaces it; a token
 `scripts/bridge.sh`'s to start and stop, not `npm run keep`'s. `npm run release` in `bridge/`
 builds `dist/main.js`, one file with the SDK and OpenClaw's client bundled in, and
 `dist/THIRD-PARTY-NOTICES.md` with their MIT notices; runs the tests; and packs
-`chipschat-openclaw-<version>.tgz`, which `npm publish` publishes as `@chipschat/openclaw`. A
-version's major is the Chips protocol it speaks, and Chips's card names it (Chips ADR 0218).
+`chipschat-openclaw-<version>.tgz`. To publish `@chipschat/openclaw`, change `version` in
+`bridge/package.json` (`npm version <x> --no-git-tag-version`), commit, and push to main:
+`.github/workflows/publish.yml` runs the tests and publishes that version from GitHub with npm's
+trusted publishing, and skips a version npm already has. A version's major is the Chips protocol it
+speaks, and Chips's card names it (Chips ADR 0218).
 
 `npm run e2e` in `bridge/` runs the card as a person with their own OpenClaw runs it, against a
 scratch Chips from a Chips checkout (`CHIPS_REPO`, `~/Work/Chips/chips-main` unless set; skipped without one)
