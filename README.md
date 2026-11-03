@@ -6,10 +6,10 @@ Jacobian. The rig's plan, phases and tests are in Chips's `docs/proposals/opencl
 
 **Chips depends on nothing here.** Chips's own guard fails if anything of OpenClaw appears in Chips.
 This repository depends on Chips through its public wire and, since 14 October 2026, its SDK:
-`@chipschat/harness` and `@chipschat/protocol` (and `@chipschat/conformance` for the tests), packed from a Chips
-checkout into `bridge/vendor/` by `scripts/vendor.sh`, since nothing of Chips is published yet. Until
-then the bridge was written from Chips's docs alone, which proved the docs; now it is what another
-harness's bridge would be (Chips's `docs/proposals/open-source-harnesses-plan.md`, Phase 2).
+`@chipschat/harness` and `@chipschat/protocol` (and `@chipschat/conformance` for the tests), from npm
+since 2 November 2026 and bundled into the bridge at build. Until 14 October the bridge was written
+from Chips's docs alone, which proved the docs; now it is what another harness's bridge would be
+(Chips's `docs/proposals/open-source-harnesses-plan.md`, Phase 2).
 
 ## What is here
 
@@ -22,7 +22,6 @@ harness's bridge would be (Chips's `docs/proposals/open-source-harnesses-plan.md
 | `scripts/scratch-chips.sh` | a scratch Chips on 4436, apart from the live one (Phase 3) |
 | `scripts/bridge.sh` | start the bridge against the live Chips on 4431, kept running by launchd as `chat.chips.openclaw`, or by hand against the scratch Chips; stop either, waiting for it to exit |
 | `scripts/restart.sh` | restart it: Colima's VM started again when it is dead, then the gateway's container, waited on. What Restart on OpenClaw's page in Chips runs, through the bridge (Chips ADR 0094) |
-| `scripts/vendor.sh` | the Chips SDK, packed from a Chips checkout into `bridge/vendor/` and installed; run it when the SDK changes |
 | `scripts/check.sh` | what is running; `--gone` proves it has all gone, against the baseline taken before the install |
 | `scripts/down.sh` | stop it, keeping everything |
 | `scripts/uninstall.sh` | take it all away and prove it |
