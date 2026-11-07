@@ -41,7 +41,11 @@ stopIfAsked(LABEL);
 
 // `connect <link>`: a link a person made in Chips, taken up before anything else starts.
 // What OpenClaw's side needs is checked first, and stops it with what to do: a link works once.
-const config = await loadConfig({ link: process.argv[2] === "connect" ? process.argv[3] : undefined, log }).catch(
+const config = await loadConfig({
+  link: process.argv[2] === "connect" ? process.argv[3] : undefined,
+  log,
+  moveOld: !process.argv.includes("--keep"),
+}).catch(
   (error: unknown) => {
     // What isn't set up, or a link Chips refuses (spent, expired, not a link): its words, no stack.
     if (!(error instanceof SetupError) && !(error instanceof JoinError)) throw error;

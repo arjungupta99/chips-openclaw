@@ -242,4 +242,12 @@ describe("a person's own OpenClaw", () => {
     assert.ok(!existsSync(join(home, ".chips-openclaw")));
     assert.deepEqual(said.filter((line) => line.includes("chips-openclaw")), ["moved ~/.chips-openclaw to ~/Chips/.bridges/openclaw"]);
   });
+
+  it("leaves the move to the kept copy when it hands over to one", async () => {
+    const { home, env } = own({ gateway: { auth: { token: "t" } } });
+    mkdirSync(join(home, ".chips-openclaw"));
+    const config = await loadConfig({ env, link: LINK, join: player().join, reach: up, moveOld: false });
+    assert.equal(config.stateDir, join(home, ".chips-openclaw"));
+    assert.ok(!existsSync(join(home, "Chips", ".bridges", "openclaw")));
+  });
 });

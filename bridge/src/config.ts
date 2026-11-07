@@ -139,6 +139,12 @@ export interface LoadOptions {
   /** Whether OpenClaw's gateway answers at its address, unless a test says. */
   readonly reach?: (url: string) => Promise<boolean>;
   readonly log?: (message: string) => void;
+  /**
+   * Whether the bridge's own state is moved from where it was until 1.0.10 (Chips ADR 0283): not by
+   * a run that hands over to a copy kept running, which moves it once the one it replaces has
+   * stopped, so nothing that one writes as it stops is left in the old place.
+   */
+  readonly moveOld?: boolean;
 }
 
 /** Whether something answers at a `ws:` or `http:` address: a connection, and nothing sent. */
@@ -318,8 +324,9 @@ export function placesOf(home: string) {
  * from `~/.chips-openclaw` the first time, by a rename. Where both are there, or the rename fails,
  * the old one is left, said, and used.
  */
-function ownState(places: ReturnType<typeof placesOf>, log?: (message: string) => void): string {
+function ownState(places: ReturnType<typeof placesOf>, move: boolean, log?: (message: string) => void): string {
   if (!existsSync(places.oldState)) return places.state;
+  if (!move) return existsSync(places.state) ? places.state : places.oldState;
   if (existsSync(places.state)) {
     log?.(`~/.chips-openclaw was left where it is: ~/Chips/.bridges/openclaw is there already`);
     return places.state;
@@ -347,7 +354,7 @@ export async function loadConfig(options: LoadOptions = {}): Promise<Config> {
   // The test rig when it is named or its `.env` is there; else a person's own OpenClaw.
   const own = env["CHIPS_OPENCLAW_DIR"] === undefined && !existsSync(join(rigDir, ".env"));
   const sandbox = own ? undefined : rigDir;
-  const stateDir = own ? ownState(places, options.log) : join(rigDir, "bridge");
+  const stateDir = own ? ownState(places, options.moveOld !== false, options.log) : join(rigDir, "bridge");
   mkdirSync(stateDir, { recursive: true, mode: 0o700 });
   const files = { ...(own ? {} : readEnvFile(join(rigDir, ".env"))), ...readEnvFile(join(stateDir, "chips.env")) };
   const values = { ...files, ...env };
