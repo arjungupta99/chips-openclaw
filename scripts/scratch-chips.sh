@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # A scratch Chips server for the test (Phase 3), apart from the live one on 4431: port 4436, dev mode
-# on loopback, its database in ~/chips-openclaw/chips. Runs the Chips checkout's own server code.
+# on loopback, its database in ~/Chips/.bridges/openclaw-rig/chips. Runs the Chips checkout's own server code.
 #   scratch-chips.sh start | stop | status
 set -euo pipefail
 . "$(dirname "$0")/lib.sh"

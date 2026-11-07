@@ -1,6 +1,7 @@
 /**
- * Where the bridge's two sides are, and where it keeps what it keeps. Everything it writes is under
- * ~/chips-openclaw/bridge, which the uninstall deletes.
+ * Where the bridge's two sides are, and where it keeps what it keeps: under `~/Chips/.bridges` (Chips
+ * ADR 0283), in `openclaw-rig/bridge` for the test rig, which the uninstall deletes, and in `openclaw`
+ * beside a person's own OpenClaw.
  *
  * Chips's side is one of two things. A link a person made in Chips's gallery (`connect <link>`, or
  * CHIPS_JOIN_LINK), taken up through the SDK's `join()` (Chips ADR 0122): the key it is handed is
@@ -10,17 +11,20 @@
  * from `chips.env` beside the bridge's state.
  *
  * OpenClaw's side is one of two too. The test rig: OpenClaw in the container `scripts/up.sh` runs,
- * its token in `~/chips-openclaw/.env`, its paths the container's. Or a person's own OpenClaw on
- * this machine (Chips's setup audit HS-7): its gateway's port and token read from its own
+ * its token in `~/Chips/.bridges/openclaw-rig/.env`, its paths the container's. Or a person's own
+ * OpenClaw on this machine (Chips's setup audit HS-7): its gateway's port and token read from its own
  * `~/.openclaw/openclaw.json` (a token there, or named as an environment variable, found in the
  * environment or OpenClaw's own `.env`), its paths this machine's, and the bridge's state in
- * `~/.chips-openclaw`. The rig is the one when `CHIPS_OPENCLAW_DIR` is set or its `.env` is there.
+ * `~/Chips/.bridges/openclaw`. The rig is the one when `CHIPS_OPENCLAW_DIR` is set or its `.env` is there.
+ *
+ * Until 1.0.10 the rig was `~/chips-openclaw` and the bridge's own state `~/.chips-openclaw`. A rig
+ * still there is used there until its scripts move it; the state is moved the first time 1.0.10 starts.
  */
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { connect as tcp } from "node:net";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { filledIn, helloOnce, type Joined, type JoinOptions, join as joinChips, reportStep, type StopWords } from "@chipschat/harness";
 import { type MediaRoots, rootsFor } from "./media.ts";
 
@@ -299,14 +303,51 @@ function ownGateway(
   };
 }
 
+/** Where the bridge keeps things (Chips ADR 0283), and where it kept them until 1.0.10. */
+export function placesOf(home: string) {
+  return {
+    state: join(home, "Chips", ".bridges", "openclaw"),
+    rig: join(home, "Chips", ".bridges", "openclaw-rig"),
+    oldState: join(home, ".chips-openclaw"),
+    oldRig: join(home, "chips-openclaw"),
+  };
+}
+
+/**
+ * The bridge's own state, beside a person's own OpenClaw: `~/Chips/.bridges/openclaw`, moved there
+ * from `~/.chips-openclaw` the first time, by a rename. Where both are there, or the rename fails,
+ * the old one is left, said, and used.
+ */
+function ownState(places: ReturnType<typeof placesOf>, log?: (message: string) => void): string {
+  if (!existsSync(places.oldState)) return places.state;
+  if (existsSync(places.state)) {
+    log?.(`~/.chips-openclaw was left where it is: ~/Chips/.bridges/openclaw is there already`);
+    return places.state;
+  }
+  try {
+    mkdirSync(dirname(dirname(places.state)), { recursive: true });
+    mkdirSync(dirname(places.state), { recursive: true, mode: 0o700 });
+    renameSync(places.oldState, places.state);
+    log?.("moved ~/.chips-openclaw to ~/Chips/.bridges/openclaw");
+    return places.state;
+  } catch (error) {
+    log?.(`~/.chips-openclaw couldn't be moved to ~/Chips/.bridges/openclaw, so it is used where it is: ${(error as Error).message}`);
+    return places.oldState;
+  }
+}
+
 export async function loadConfig(options: LoadOptions = {}): Promise<Config> {
   const env = options.env ?? process.env;
   const userHome = env["HOME"] || homedir();
-  const rigDir = env["CHIPS_OPENCLAW_DIR"] ?? join(userHome, "chips-openclaw");
+  const places = placesOf(userHome);
+  // The rig where it is named, else in ~/Chips, or where it was until its scripts move it.
+  const rigDir =
+    env["CHIPS_OPENCLAW_DIR"] ??
+    (existsSync(join(places.oldRig, ".env")) && !existsSync(join(places.rig, ".env")) ? places.oldRig : places.rig);
   // The test rig when it is named or its `.env` is there; else a person's own OpenClaw.
   const own = env["CHIPS_OPENCLAW_DIR"] === undefined && !existsSync(join(rigDir, ".env"));
   const sandbox = own ? undefined : rigDir;
-  const stateDir = own ? join(userHome, ".chips-openclaw") : join(rigDir, "bridge");
+  const stateDir = own ? ownState(places, options.log) : join(rigDir, "bridge");
   mkdirSync(stateDir, { recursive: true, mode: 0o700 });
   const files = { ...(own ? {} : readEnvFile(join(rigDir, ".env"))), ...readEnvFile(join(stateDir, "chips.env")) };
   const values = { ...files, ...env };

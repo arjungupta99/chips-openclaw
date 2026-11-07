@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Start OpenClaw for testing Chips. The first run makes ~/chips-openclaw, a gateway token, and
+# Start OpenClaw for testing Chips. The first run makes ~/Chips/.bridges/openclaw-rig, a gateway token, and
 # OpenClaw's config: local mode, token auth, no model yet (`login.sh`), no channels, no service,
 # and every command the agent runs asked about first. Later runs only start the container.
 set -euo pipefail

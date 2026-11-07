@@ -6,11 +6,11 @@
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$HERE/.." && pwd)"
-export CHIPS_OPENCLAW_DIR="${CHIPS_OPENCLAW_DIR:-$HOME/chips-openclaw}"
+export CHIPS_OPENCLAW_DIR="${CHIPS_OPENCLAW_DIR:-$HOME/Chips/.bridges/openclaw-rig}"
 DIR="$CHIPS_OPENCLAW_DIR"
 PROJECT="chips-openclaw"
 IMAGE="ghcr.io/openclaw/openclaw:2026.9.6"
-BASELINE="$HOME/chips-openclaw-baseline.txt"
+BASELINE="$HOME/Chips/.bridges/openclaw-rig-baseline.txt"
 PORT=18789
 
 say() { printf '  %s\n' "$*"; }

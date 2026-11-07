@@ -1,7 +1,7 @@
 # OpenClaw for testing Chips (the plan is Chips's docs/proposals/openclaw-test-plan.md).
 #
 # One pinned image, one container, and everything it keeps under $CHIPS_OPENCLAW_DIR
-# (~/chips-openclaw). Loopback only, never a launch agent, restart never. The scripts beside this file
+# (~/Chips/.bridges/openclaw-rig). Loopback only, never a launch agent, restart never. The scripts beside this file
 # run it; `uninstall.sh` takes all of it away. Every Docker command they run is scoped to this
 # project, so the other containers on the same Colima are never touched.
 #

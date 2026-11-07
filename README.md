@@ -16,8 +16,8 @@ from Chips's docs alone, which proved the docs; now it is what another harness's
 | Path | What it is |
 |---|---|
 | `compose.yaml` | OpenClaw 2026.9.6 in one container, compose project `chips-openclaw`, on `127.0.0.1:18789` only, never a service |
-| `scripts/up.sh` | start it; the first run makes `~/chips-openclaw`, a gateway token, and OpenClaw's config (no model, no channels, ask before every command) |
-| `scripts/login.sh` | sign OpenClaw in to ChatGPT by device code; the sign-in stays in `~/chips-openclaw` |
+| `scripts/up.sh` | start it; the first run makes `~/Chips/.bridges/openclaw-rig`, a gateway token, and OpenClaw's config (no model, no channels, ask before every command) |
+| `scripts/login.sh` | sign OpenClaw in to ChatGPT by device code; the sign-in stays in `~/Chips/.bridges/openclaw-rig` |
 | `scripts/cli.sh` | OpenClaw's own CLI inside the container, e.g. `scripts/cli.sh doctor` |
 | `scripts/scratch-chips.sh` | a scratch Chips on 4436, apart from the live one (Phase 3) |
 | `scripts/bridge.sh` | start the bridge against the live Chips on 4431, kept running by launchd as `chat.chips.openclaw`, or by hand against the scratch Chips; stop either, waiting for it to exit |
@@ -61,7 +61,7 @@ Before it takes the link up, which works once, it reads OpenClaw's own `~/.openc
 the gateway answers. Anything missing stops it with what to do, and the link is still good.
 `OPENCLAW_URL` and `OPENCLAW_GATEWAY_TOKEN` override what the config says. Its files are this
 machine's, so an agent's `MEDIA:` path is read where it is; its agents' folders are under
-`~/.openclaw/chips/`; the bridge's own state is in `~/.chips-openclaw`. Restart on OpenClaw's page in
+`~/.openclaw/chips/`; the bridge's own state is in `~/Chips/.bridges/openclaw`. Restart on OpenClaw's page in
 Chips runs `openclaw gateway restart`.
 
 Joined, `npm run keep` writes a launch agent (`~/Library/LaunchAgents/chat.chips.openclaw.plist`;
@@ -78,9 +78,9 @@ With the rig's OpenClaw up (`scripts/up.sh`), the same line works, or
 cd bridge && npm run connect -- 'http://192.168.1.20:4431/j/chips_j_…'
 ```
 
-The rig is the one when `~/chips-openclaw/.env` is there (`scripts/up.sh` writes it) or
+The rig is the one when `~/Chips/.bridges/openclaw-rig/.env` is there (`scripts/up.sh` writes it) or
 `CHIPS_OPENCLAW_DIR` is set. Before it takes the link up it checks OpenClaw's side: the gateway's
-token (in `~/chips-openclaw/.env`) and the gateway answering. Then it takes the link up through
+token (in `~/Chips/.bridges/openclaw-rig/.env`) and the gateway answering. Then it takes the link up through
 the SDK's `join()` (Chips ADR 0122), keeps the key the SDK is handed, writes the address to
 `bridge/joined.env`, starts, and says hello in its room once. After that, `npm start` comes back to
 the same Chips with the same key, and a new link from Chips replaces it; a token in the environment
@@ -105,7 +105,11 @@ bridge's own tests.
 
 ## Where things are kept
 
-Everything OpenClaw and the bridge keep is under `~/chips-openclaw/`:
+Everything OpenClaw and the bridge keep is under `~/Chips/.bridges/openclaw-rig/` (Chips ADR 0283),
+its baseline beside it in `openclaw-rig-baseline.txt`. Until 1.0.10 they were `~/chips-openclaw` and
+`~/chips-openclaw-baseline.txt`, where the bridge still finds a rig. To move one: `scripts/bridge.sh
+stop` and `scripts/down.sh`, move both into `~/Chips/.bridges`, then `scripts/up.sh` and
+`scripts/bridge.sh start live`.
 - `state/`: OpenClaw's config, sessions, workspace and logs; `state/chips/<agent>/` is the folder of
   each OpenClaw agent the bridge made for an agent in Chips (`bridge/src/own-agents.ts`), a Fork's
   copy's begun as a copy of its original's

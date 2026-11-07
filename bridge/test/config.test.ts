@@ -164,7 +164,7 @@ describe("a person's own OpenClaw", () => {
     assert.equal(config.gatewayUrl, "ws://127.0.0.1:19001");
     assert.equal(config.gatewayToken, "tok-own");
     assert.equal(config.sandbox, undefined);
-    assert.equal(config.stateDir, join(home, ".chips-openclaw"));
+    assert.equal(config.stateDir, join(home, "Chips", ".bridges", "openclaw"));
     assert.deepEqual(config.roots, {
       gatewayStateDir: join(home, ".openclaw"),
       gatewayWorkspaceDir: join(home, ".openclaw", "workspace"),
@@ -217,11 +217,29 @@ describe("a person's own OpenClaw", () => {
     });
   });
 
-  it("is the test rig instead when its .env is there", async () => {
+  it("is the test rig instead when its .env is there, in ~/Chips or where it was until its scripts move it", async () => {
     const { home, env } = own({ gateway: { auth: { token: "own" } } });
     mkdirSync(join(home, "chips-openclaw"));
-    writeFileSync(join(home, "chips-openclaw", ".env"), "OPENCLAW_GATEWAY_TOKEN=rig\n");
+    writeFileSync(join(home, "chips-openclaw", ".env"), "OPENCLAW_GATEWAY_TOKEN=old-rig\n");
+    const before = await loadConfig({ env, link: LINK, join: player().join, reach: up });
+    assert.deepEqual([before.own, before.gatewayToken, before.sandbox], [false, "old-rig", join(home, "chips-openclaw")]);
+
+    const rig = join(home, "Chips", ".bridges", "openclaw-rig");
+    mkdirSync(rig, { recursive: true });
+    writeFileSync(join(rig, ".env"), "OPENCLAW_GATEWAY_TOKEN=rig\n");
     const config = await loadConfig({ env, link: LINK, join: player().join, reach: up });
-    assert.deepEqual([config.own, config.gatewayToken, config.sandbox], [false, "rig", join(home, "chips-openclaw")]);
+    assert.deepEqual([config.own, config.gatewayToken, config.sandbox, config.stateDir], [false, "rig", rig, join(rig, "bridge")]);
+  });
+
+  it("moves its own state from where it was until 1.0.10, once", async () => {
+    const { home, env } = own({ gateway: { auth: { token: "t" } } });
+    mkdirSync(join(home, ".chips-openclaw"));
+    writeFileSync(join(home, ".chips-openclaw", "device.json"), "{}");
+    const said: string[] = [];
+    const config = await loadConfig({ env, link: LINK, join: player().join, reach: up, log: (line) => said.push(line) });
+    assert.equal(config.stateDir, join(home, "Chips", ".bridges", "openclaw"));
+    assert.ok(existsSync(join(home, "Chips", ".bridges", "openclaw", "device.json")));
+    assert.ok(!existsSync(join(home, ".chips-openclaw")));
+    assert.deepEqual(said.filter((line) => line.includes("chips-openclaw")), ["moved ~/.chips-openclaw to ~/Chips/.bridges/openclaw"]);
   });
 });

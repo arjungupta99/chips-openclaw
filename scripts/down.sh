@@ -3,4 +3,4 @@
 set -euo pipefail
 . "$(dirname "$0")/lib.sh"
 compose stop
-say "stopped; ~/chips-openclaw is kept"
+say "stopped; ~/Chips/.bridges/openclaw-rig is kept"
