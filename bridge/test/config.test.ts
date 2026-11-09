@@ -212,8 +212,33 @@ describe("a person's own OpenClaw", () => {
     assert.deepEqual(stopped.words, {
       detail: "Nothing answers on port 18789",
       says: "OpenClaw's gateway isn't running.",
-      doing: "Start it in a terminal, then try again.",
+      doing: "Run this in Terminal, then try again.",
       copy: "openclaw gateway",
+    });
+  });
+
+  it("gives OpenClaw's own install line when it isn't on this Mac, and its setup when it is", async () => {
+    const wordsWith = async (path: string) => {
+      const stopped = await loadConfig({ env: { ...own().env, PATH: path }, link: LINK, join: player().join, reach: up }).then(
+        () => undefined,
+        (error: unknown) => error,
+      );
+      assert.ok(stopped instanceof SetupError);
+      return stopped.words;
+    };
+    assert.deepEqual(await wordsWith("/nowhere"), {
+      detail: "OpenClaw isn't on this Mac",
+      says: "OpenClaw isn't installed on this Mac.",
+      doing: "Run this in Terminal. OpenClaw's installer starts its own setup. Then try again.",
+      copy: "curl -fsSL https://openclaw.ai/install.sh | bash",
+    });
+    const bin = mkdtempSync(join(tmpdir(), "bridge-bin-"));
+    writeFileSync(join(bin, "openclaw"), "#!/bin/sh\n", { mode: 0o755 });
+    assert.deepEqual(await wordsWith(bin), {
+      detail: "OpenClaw isn't set up here",
+      says: "OpenClaw isn't set up on this Mac.",
+      doing: "Run this in Terminal, then try again.",
+      copy: "openclaw onboard",
     });
   });
 

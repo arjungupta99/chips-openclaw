@@ -21,10 +21,10 @@
  * still there is used there until its scripts move it; the state is moved the first time 1.0.10 starts.
  */
 
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { accessSync, constants, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { connect as tcp } from "node:net";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { delimiter, dirname, join } from "node:path";
 import { filledIn, helloOnce, type Joined, type JoinOptions, join as joinChips, reportStep, type StopWords } from "@chipschat/harness";
 import { type MediaRoots, rootsFor } from "./media.ts";
 
@@ -242,6 +242,19 @@ export function parseLoose(text: string): unknown {
   }
 }
 
+/** Whether `openclaw` is on this PATH. */
+function openclawOnPath(path: string | undefined): boolean {
+  return (path ?? "").split(delimiter).some((dir) => {
+    if (dir === "") return false;
+    try {
+      accessSync(join(dir, "openclaw"), constants.X_OK);
+      return true;
+    } catch {
+      return false;
+    }
+  });
+}
+
 const tildeIn = (home: string) => (path: string) => (path.startsWith("~/") ? join(home, path.slice(2)) : path);
 
 /** A person's own OpenClaw: where its config says its gateway is, and its token. */
@@ -256,12 +269,19 @@ function ownGateway(
   if (!existsSync(path)) {
     throw new SetupError(
       `OpenClaw isn't set up on this machine: there is no ${path}. Install OpenClaw (openclaw.ai) and run \`openclaw onboard\`.${still}`,
-      {
-        detail: "OpenClaw isn't set up here",
-        says: "OpenClaw isn't set up on this Mac.",
-        doing: "Install OpenClaw (openclaw.ai), run this in a terminal, then try again.",
-        copy: "openclaw onboard",
-      },
+      openclawOnPath(values["PATH"])
+        ? {
+            detail: "OpenClaw isn't set up here",
+            says: "OpenClaw isn't set up on this Mac.",
+            doing: "Run this in Terminal, then try again.",
+            copy: "openclaw onboard",
+          }
+        : {
+            detail: "OpenClaw isn't on this Mac",
+            says: "OpenClaw isn't installed on this Mac.",
+            doing: "Run this in Terminal. OpenClaw's installer starts its own setup. Then try again.",
+            copy: "curl -fsSL https://openclaw.ai/install.sh | bash",
+          },
     );
   }
   let config: Record<string, unknown>;
@@ -293,7 +313,7 @@ function ownGateway(
       {
         detail: "No gateway token",
         says: "OpenClaw's gateway has no token here.",
-        doing: "Run this in a terminal, then try again.",
+        doing: "Run this in Terminal, then try again.",
         copy: "openclaw onboard",
       },
     );
@@ -384,7 +404,7 @@ export async function loadConfig(options: LoadOptions = {}): Promise<Config> {
         detail: `Nothing answers on port ${portOf(gatewayUrl)}`,
         says: "OpenClaw's gateway isn't running.",
         ...(own
-          ? { doing: "Start it in a terminal, then try again.", copy: "openclaw gateway" }
+          ? { doing: "Run this in Terminal, then try again.", copy: "openclaw gateway" }
           : { doing: "Start OpenClaw with scripts/up.sh, then try again." }),
       },
     );
