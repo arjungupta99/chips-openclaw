@@ -48,11 +48,22 @@ asked for it, as this one does when it joins with a code (`WANTS` in `bridge/src
 
 The bridge serves an OpenClaw installed on this machine as well as the test rig below (Chips's
 setup audit HS-7). With OpenClaw set up (`openclaw onboard`) and its gateway running, Chips's
-gallery card (Chips ADR 0171; **Agents → Connect a harness → OpenClaw**) gives this line, run once:
+gallery card (Chips ADR 0171; **Agents → Connect a harness → OpenClaw**) gives the line to run once.
+On the computer Chips runs on, Chips for Mac runs it for you, or in Terminal:
 
 ```sh
-cd bridge && npm install && CHIPS_JOIN_LINK='<link>' npm run keep
+chips connect openclaw '<link>'
 ```
+
+On another computer it is Chips's installer, which installs Chips there first if it has none:
+
+```sh
+curl -fsSL https://chipschat.ai/install | CHIPS_JOIN_LINK='<link>' sh -s -- connect openclaw
+```
+
+Either fetches this bridge from npm (`@chipschat/openclaw`) and keeps it running from login. From a
+checkout of this repository, for working on the bridge: `cd bridge && npm install &&
+CHIPS_JOIN_LINK='<link>' npm run keep`.
 
 Before it takes the link up, which works once, it reads OpenClaw's own `~/.openclaw/openclaw.json`
 (`OPENCLAW_STATE_DIR` or `OPENCLAW_CONFIG_PATH` say otherwise): the gateway's `gateway.port`

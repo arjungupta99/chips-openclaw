@@ -290,7 +290,8 @@ async function main(): Promise<void> {
       chips.send({
         type: "message.post",
         space_id: spaceId,
-        text: "Hi, OpenClaw here, connected to Chips. Ask me anything.",
+        // In the shape every bridge's hello has (the onboarding audit, item 39).
+        text: "Hi, I'm OpenClaw. Ask me anything.",
         idempotency_key: `openclaw-hello:${spaceId}`,
       }),
     )

@@ -19,7 +19,7 @@ import { STILL_GOOD } from "../../src/config.ts";
 import { type FakeGateway, startFakeGateway } from "../fake-gateway.ts";
 import { type CardLink, here, type ScratchChips, scratchChips, skip } from "./kit.ts";
 
-const HELLO = /^Hi, OpenClaw here, connected to Chips\. Ask me anything\.$/;
+const HELLO = /^Hi, I'm OpenClaw\. Ask me anything\.$/;
 const UP = /openclaw: connected, protocol 4/;
 
 /** A port nothing is listening on yet: where the gateway will be. */
