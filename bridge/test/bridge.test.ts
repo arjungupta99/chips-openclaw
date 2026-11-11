@@ -2105,6 +2105,32 @@ describe("OpenClaw's agents as agents in Chips (Chips ADR 0087)", () => {
   });
 
   /**
+   * Chips hands an agent its own message back when the agent it was for did not pick it up (Chips
+   * ADR 0291): the one case where its own words are its turn. The room's note says who did not.
+   */
+  it("takes its own words as its turn when Chips hands them back", async () => {
+    agents = [agentIn("agt_fallback", ME, OTHER_ROOM), agentIn("agt_main", "main", ROOM), agentIn("agt_scout", "scout", ROOM, "Scout")];
+    await bridge.adoptAgents({ defaultId: "main", agents: [{ id: "main" }, { id: "scout", name: "Scout" }] });
+    calls = [];
+    const scout = { participant_id: "agt_scout", kind: "agent", display_name: "Scout", role: "member" };
+    const note = "Hello hasn't picked up this message of yours, sent 1 minute ago: its harness is offline. Do the work yourself, hand it to another agent with an @, or tell Arjun it is waiting on Hello.";
+    await bridge.onChips(
+      said("@Hello reconcile March.", {
+        from: scout,
+        message_id: "msg_01K4ZQPX0000000000000000B1",
+        addressed_to: ["agt_scout"],
+        for: ["agt_scout"],
+        handed: true,
+        room: { members: [], notes: { agt_scout: note } },
+      }),
+    );
+    const sends = calls.filter(([method]) => method === "chat.send").map(([, params]) => [params["sessionKey"], params["message"]]);
+    assert.equal(sends.length, 1);
+    assert.equal(sends[0]?.[0], bridge.keyFor(ROOM, "scout"));
+    assert.match(String(sends[0]?.[1]), /Hello hasn't picked up this message of yours[^]*\n\nYou said this, and it was not picked up:\n@Hello reconcile March\.$/);
+  });
+
+  /**
    * Two of our agents in one room, as in Arjun's "Hey both…" room on 1 October 2026: OpenClaw's own
    * agent, added to a room claimed before claims had keys of their own. The claim had taken the
    * room's session, which is also the OpenClaw agent's own name there, so the two were one OpenClaw

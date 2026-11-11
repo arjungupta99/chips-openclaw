@@ -568,6 +568,14 @@ function fromAgent(from: Payload, text: string, noted: boolean): string {
 }
 
 /**
+ * The agent's own words, handed back to it by Chips because the agent they were for did not pick
+ * them up (Chips ADR 0291). The room's note, ahead of them, says who did not and why.
+ */
+function ownAgain(text: string): string {
+  return `You said this, and it was not picked up:\n${text}`;
+}
+
+/**
  * What Chips tells one who takes the turn of the room (Chips ADR 0092): who is in it, with the @
  * that reaches each, and that only those @-mentioned act. Keyed by the id `for` names it by: one of
  * our agents, or the harness itself where it takes the turn. Nothing from a Chips that sends none.
@@ -2080,6 +2088,9 @@ export class Bridge {
     const sayer = String(from["participant_id"]);
     const own = this.isOwn(sayer);
     if (own && !Array.isArray(event["for"])) return;
+    // Handed back by Chips, its own message is its turn after all (Chips ADR 0291): the agent it was
+    // for did not pick it up, and the room's note says who and why.
+    const back = own && event["handed"] === true;
     // Chips says who a message is for (ADR 0081), and a `message.new` that says is this
     // harness's. A Chips from before then says nothing, and hands every harness everything:
     // there another harness's words are this one's only when they name it (ADR 0077's rule).
@@ -2091,7 +2102,8 @@ export class Bridge {
     const words = wordsOf(event);
     const messageId = String(event["message_id"] ?? event["id"]);
     const seq = num(event["seq"]);
-    const takers = own ? this.othersThan(sayer, spaceId, await this.turnTakers(event, spaceId)) : await this.turnTakers(event, spaceId);
+    const named = await this.turnTakers(event, spaceId);
+    const takers = own && !back ? this.othersThan(sayer, spaceId, named) : named;
     const attachments = takers.length === 0 ? [] : await this.attachments(event);
     // Who is here, and who asked: what a turn schedules is for them (ADR 0157).
     const room = peopleOf(event);
@@ -2107,7 +2119,9 @@ export class Bridge {
       await this.ensureSession(taker.sessionKey, words, taker.clawAgent);
       if (asker !== undefined) this.askers.set(taker.sessionKey, asker);
       const agentId = claiming ? await this.claim(spaceId, taker.sessionKey, words) : await this.speakerFor(spaceId, taker);
-      const turn = this.turnOf(messageId, spaceId, taker);
+      // A message Chips hands on is a turn of its own: its session may have taken one on the same
+      // message when it was said, and OpenClaw gives one turn to a key (Chips ADRs 0097, 0104, 0291).
+      const turn = `${this.turnOf(messageId, spaceId, taker)}${event["handed"] === true ? ":handed" : ""}`;
       this.asks.set(turn, { words, spaceId, agentId });
       this.latest.set(taker.sessionKey, words);
       const caughtUp = agentId === undefined ? undefined : this.caughtUpIn(agentId, spaceId);
@@ -2129,7 +2143,7 @@ export class Bridge {
       const note = noteFor(event, takerId, held);
       // The message the words reply to, between what was said and the words (Chips ADR 0219).
       const replying = replyingIn(event, agentId ?? this.self.harnessId);
-      const said = agentSaid ? fromAgent(from, text, note !== undefined) : text;
+      const said = back ? ownAgain(text) : agentSaid ? fromAgent(from, text, note !== undefined) : text;
       const message = this.withOverheard(replying === "" ? said : `${replying}\n\n${said}`, event["context"], {
         caughtUp,
         missed,
