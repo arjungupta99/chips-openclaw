@@ -64,6 +64,8 @@ let registered: Record<string, unknown>[] = [];
 let opened: string[] = [];
 /** The rooms the bridge named this harness's home, as it named them. */
 let homes: ChipsEvent[] = [];
+/** What runs said of themselves (`run.status`), as that each can pause (Chips ADR 0293). */
+let statuses: ChipsEvent[] = [];
 /** A room's lines as Chips's pull route reads them (ADR 0088), and what the bridge asked of it. */
 let roomLines: Record<string, unknown>[] = [];
 let pulls: [string, number, number][] = [];
@@ -82,6 +84,8 @@ let history: unknown[] | Error = [];
  * after it answers.
  */
 let refuseClaw = new Set<string>();
+/** Whether `chat.abort` finds no turn going to stop, as OpenClaw answers for one not begun or ended. */
+let nothingToAbort = false;
 let clawAgents: { id: string; name?: string }[] = [];
 let listLag = 0;
 /**
@@ -131,6 +135,11 @@ const chips: ChipsPort = {
     // A room named the harness's home, kept apart from what is said in rooms (Chips ADR 0069).
     if (event.type === "space.updated" && event["home"] === true) {
       homes.push(event);
+      return undefined;
+    }
+    // What a run says of itself, kept apart too: every run says it can pause (Chips ADR 0293).
+    if (event.type === "run.status") {
+      statuses.push(event);
       return undefined;
     }
     const refusal = event.type === "message.post" ? refusePost?.(event) : undefined;
@@ -221,6 +230,7 @@ const claw: ClawPort = {
       return { sessionKey: params["sessionKey"], messages: history } as T;
     }
     if (method === "sessions.create") return clawSession(params) as T;
+    if (method === "chat.abort") return { ok: true, aborted: !nothingToAbort, runIds: nothingToAbort ? [] : [params["runId"]] } as T;
     if (method === "chat.send") {
       clawSessions.get(String(params["sessionKey"]))?.messages.push({ role: "user", content: params["message"] });
     }
@@ -245,6 +255,7 @@ beforeEach(() => {
   registered = [];
   opened = [];
   homes = [];
+  statuses = [];
   roomLines = [];
   pulls = [];
   uploads = [];
@@ -253,6 +264,7 @@ beforeEach(() => {
   fetched = [];
   history = [];
   refuseClaw = new Set();
+  nothingToAbort = false;
   clawAgents = [];
   listLag = 0;
   pending = undefined;
@@ -627,6 +639,232 @@ describe("a turn as a run", () => {
     await bridge.settled();
     await bridge.onChips({ type: "run.cancel", run_id: sent[0]?.["run_id"], by: ARJUN.participant_id });
     assert.deepEqual(calls, [["chat.abort", { sessionKey: key(), runId: "r5" }]]);
+  });
+});
+
+describe("a person's Pause (Chips ADR 0293)", () => {
+  const R1 = "msg_01K4ZQPX0000000000000000A1";
+  const CARRY_ON = "You were paused partway through this. Carry on from where you stopped. Nothing you wrote before the pause reached the room, so write your whole reply.";
+  const chat = (runId: string, state: string, extra: Record<string, unknown> = {}): void =>
+    bridge.onClaw({ event: "chat", payload: { runId, sessionKey: key(), seq: 1, state, ...extra } });
+  const sends = (): Record<string, unknown>[] => calls.filter(([method]) => method === "chat.send").map(([, params]) => params);
+  const aborts = (): Record<string, unknown>[] => calls.filter(([method]) => method === "chat.abort").map(([, params]) => params);
+  /** A person's words, and the run their turn is in Chips, working; what OpenClaw was asked before, forgotten. */
+  async function working(): Promise<string> {
+    await bridge.onChips(said("Plan a weekend in Big Sur"));
+    chat(R1, "status");
+    await bridge.settled();
+    calls = [];
+    return String(sent[0]?.["run_id"]);
+  }
+
+  it("says once, as each run starts, that the run can pause, on the run's own envelope", async () => {
+    const run = await working();
+    chat(R1, "delta", { deltaText: "Day one" });
+    bridge.onClaw({ event: "agent", payload: { runId: R1, sessionKey: key(), seq: 2, stream: "tool", data: { phase: "start", name: "web_search", toolCallId: "call_1" } } });
+    chat(R1, "final", { message: "Ewoldsen, then Pfeiffer Falls." });
+    await bridge.settled();
+    assert.deepEqual(statuses, [
+      {
+        type: "run.status",
+        run_id: run,
+        space_id: ROOM,
+        phase: "thinking",
+        verb_phrase: "Thinking…",
+        pausable: true,
+        idempotency_key: `openclaw-run:${R1}:pausable`,
+      },
+    ]);
+    // Each run says it for itself, as the agent the run is by (Chips ADR 0087).
+    statuses = [];
+    await bridge.adoptAgents({ defaultId: "main", agents: [{ id: "main" }] });
+    bridge.onClaw({ event: "chat", payload: { runId: "heartbeat-1", sessionKey: "agent:main:main", seq: 1, state: "status" } });
+    await bridge.settled();
+    assert.deepEqual(
+      statuses.map((event) => [event["space_id"], event["actor"], event["pausable"]]),
+      [[MAIN_ROOM, { kind: "agent", id: "agt_agent:main:chips-main" }, true]],
+    );
+  });
+
+  it("goes on with the run when Chips refuses the word, as a strict Chips might", async () => {
+    const logged: string[] = [];
+    const refusing: ChipsPort = {
+      ...chips,
+      send: async (event) => {
+        if (event.type === "run.status") throw new ChipsRefusal(0, "invalid_event", "run.status: unknown field pausable");
+        return chips.send(event);
+      },
+    };
+    bridge = new Bridge(refusing, claw, { harnessId: ME, agent: "main" }, (line) => logged.push(line));
+    await bridge.onChips(said("Plan a weekend in Big Sur"));
+    chat(R1, "final", { message: "Two hikes." });
+    await bridge.settled();
+    assert.deepEqual(sent.map((event) => event.type), ["run.started", "message.post", "run.completed"]);
+    assert.ok(logged.some((line) => line.startsWith("chips refused run.status")));
+  });
+
+  it("stops the turn on a pause, posts and ends nothing, and on a resume carries on in the same session to one answer", async () => {
+    const run = await working();
+    chat(R1, "delta", { deltaText: "Day one: Ewoldsen" });
+    await bridge.onChips({ type: "run.pause", run_id: run, by: ARJUN.participant_id });
+    // Stopped as Stop stops it, with OpenClaw's abort, which keeps the session.
+    assert.deepEqual(calls, [["chat.abort", { sessionKey: key(), runId: R1 }]]);
+    // OpenClaw ends the turn as aborted, with what it had written so far, and cancels what the turn
+    // was asking as the abort reached it.
+    chat(R1, "aborted", { message: { role: "assistant", content: [{ type: "text", text: "Day one: Ewoldsen" }] }, stopReason: "rpc" });
+    bridge.onClaw({ event: "agent", payload: { runId: R1, sessionKey: key(), seq: 3, stream: "lifecycle", data: { phase: "end", status: "cancelled", aborted: true } } });
+    bridge.onClaw({ event: "exec.approval.requested", payload: { id: "ap-7", request: { command: "curl wttr.in", sessionKey: key(), runId: R1 } } });
+    await bridge.settled();
+    assert.deepEqual(sent.map((event) => event.type), ["run.started"]);
+    await bridge.onChips({ type: "run.resume", run_id: run, by: ARJUN.participant_id });
+    const resumed = `${R1}:resumed-1`;
+    assert.deepEqual(calls.slice(1), [["chat.send", { sessionKey: key(), message: CARRY_ON, idempotencyKey: resumed, queueMode: "steer" }]]);
+    chat(resumed, "status");
+    chat(resumed, "final", { message: "Day one: Ewoldsen. Day two: Pfeiffer Falls, then dinner at Nepenthe." });
+    await bridge.settled();
+    // One run and one answer: what the stopped turn had written was not posted on its own.
+    assert.deepEqual(sent.map((event) => event.type), ["run.started", "message.post", "run.completed"]);
+    assert.ok(sent.every((event) => event["run_id"] === run));
+    assert.equal(sent[1]?.["text"], "Day one: Ewoldsen. Day two: Pfeiffer Falls, then dinner at Nepenthe.");
+    assert.equal(statuses.length, 1);
+  });
+
+  it("ends quietly when the run is stopped while paused", async () => {
+    const run = await working();
+    await bridge.onChips({ type: "run.pause", run_id: run });
+    chat(R1, "aborted");
+    await bridge.onChips({ type: "run.cancel", run_id: run, by: ARJUN.participant_id });
+    // The turn the pause stopped is over, so there is nothing more to stop; Chips ended the run.
+    assert.deepEqual(aborts(), [{ sessionKey: key(), runId: R1 }]);
+    await bridge.onChips({ type: "run.resume", run_id: run });
+    chat(R1, "aborted");
+    await bridge.settled();
+    assert.deepEqual(sent.map((event) => event.type), ["run.started"]);
+    assert.deepEqual(sends(), []);
+  });
+
+  it("holds a turn that has not begun, and sends it at the resume", async () => {
+    const replaced = "PreparedModelCatalogConfigReplacedError: prepared model catalog owner config was replaced during the read (x)";
+    await bridge.onChips(said("Plan a weekend in Big Sur"));
+    chat(R1, "error", { errorMessage: replaced });
+    await bridge.settled();
+    const run = String(sent[0]?.["run_id"]);
+    // The turn OpenClaw refused as it began waits to be sent again, so there is none to stop.
+    nothingToAbort = true;
+    await bridge.onChips({ type: "run.pause", run_id: run });
+    await new Promise((resolve) => setTimeout(resolve, 1_100));
+    assert.deepEqual(sends().map((params) => params["idempotencyKey"]), [R1]);
+    await bridge.onChips({ type: "run.resume", run_id: run });
+    // Sent as it would have been: it never began, so there is nothing to carry on from.
+    assert.deepEqual(sends().map((params) => params["idempotencyKey"]), [R1, `${R1}:again`]);
+    assert.equal(sends()[1]?.["message"], sends()[0]?.["message"]);
+    chat(`${R1}:again`, "final", { message: "Two hikes and Nepenthe." });
+    await bridge.settled();
+    assert.deepEqual(sent.map((event) => event.type), ["run.started", "message.post", "run.completed"]);
+  });
+
+  it("stops nothing while the run waits on a person, and passes their answer on at the resume", async () => {
+    const run = await working();
+    bridge.onClaw({ event: "exec.approval.requested", payload: { id: "ap-1", request: { command: "ls -la", sessionKey: key(), runId: R1 } } });
+    await bridge.settled();
+    const card = sent.find((event) => event.type === "approval.request");
+    await bridge.onChips({ type: "run.pause", run_id: run });
+    await bridge.onChips({ type: "approval.resolved", approval_id: card?.["approval_id"], run_id: run, decision: "approved", scope: "once" });
+    await bridge.onChips({ type: "run.steer", id: "evt_01K4ZQPX0000000000000000S1", run_id: run, text: "And skip the long one", mode: "steer" });
+    await bridge.settled();
+    // OpenClaw's turn waits on the answer, and the answer waits for the resume.
+    assert.deepEqual(calls, []);
+    await bridge.onChips({ type: "run.resume", run_id: run });
+    assert.deepEqual(calls, [
+      ["exec.approval.resolve", { id: "ap-1", decision: "allow-once" }],
+      ["chat.send", { sessionKey: key(), message: "And skip the long one", idempotencyKey: "evt_01K4ZQPX0000000000000000S1", queueMode: "steer" }],
+    ]);
+    chat(R1, "final", { message: "Listed." });
+    await bridge.settled();
+    assert.deepEqual(sent.map((event) => event.type), ["run.started", "approval.request", "approval.executed", "message.post", "run.completed"]);
+  });
+
+  it("drops an answer given while paused when the run is stopped instead, and stops the turn that waited on it", async () => {
+    const run = await working();
+    bridge.onClaw({
+      event: "question.requested",
+      payload: { id: "q-1", sessionKey: key(), runId: R1, questions: [{ questionId: "day", question: "Which day?", options: [{ label: "Saturday" }] }] },
+    });
+    await bridge.settled();
+    const ask = sent.find((event) => event.type === "question.ask");
+    await bridge.onChips({ type: "run.pause", run_id: run });
+    await bridge.onChips({ type: "question.answered", ask_id: ask?.["ask_id"], run_id: run, answers: [{ question_id: "day", values: ["Saturday"] }] });
+    await bridge.onChips({ type: "run.cancel", run_id: run });
+    await bridge.onChips({ type: "run.resume", run_id: run });
+    chat(R1, "aborted");
+    await bridge.settled();
+    assert.deepEqual(calls, [["chat.abort", { sessionKey: key(), runId: R1 }]]);
+    assert.deepEqual(sent.map((event) => event.type), ["run.started", "question.ask"]);
+  });
+
+  it("stops a paused turn whose ask is answered in OpenClaw itself, which would let it go on", async () => {
+    const run = await working();
+    bridge.onClaw({ event: "exec.approval.requested", payload: { id: "ap-1", request: { command: "ls", sessionKey: key(), runId: R1 } } });
+    await bridge.settled();
+    await bridge.onChips({ type: "run.pause", run_id: run });
+    assert.deepEqual(aborts(), []);
+    bridge.onClaw({ event: "exec.approval.resolved", payload: { id: "ap-1", decision: "allow-once" } });
+    await bridge.settled();
+    assert.deepEqual(aborts(), [{ sessionKey: key(), runId: R1 }]);
+    chat(R1, "aborted");
+    await bridge.onChips({ type: "run.resume", run_id: run });
+    assert.deepEqual(sends().map((params) => params["message"]), [CARRY_ON]);
+  });
+
+  it("posts the answer of a turn that ended before the pause's abort reached it", async () => {
+    const run = await working();
+    await bridge.onChips({ type: "run.pause", run_id: run });
+    // An abort never ends a turn with `final`: the turn had answered.
+    chat(R1, "final", { message: "Ewoldsen and Pfeiffer Falls." });
+    await bridge.settled();
+    assert.deepEqual(sent.map((event) => event.type), ["run.started", "message.post", "run.completed"]);
+    await bridge.onChips({ type: "run.resume", run_id: run });
+    assert.deepEqual(sends(), []);
+  });
+
+  it("takes pauses, resumes and steers in any order and as often as they come", async () => {
+    const run = await working();
+    // A resume of a run that is not paused is nothing, and so is a second pause.
+    await bridge.onChips({ type: "run.resume", run_id: run });
+    await bridge.onChips({ type: "run.pause", run_id: run });
+    await bridge.onChips({ type: "run.pause", run_id: run });
+    chat(R1, "aborted");
+    await bridge.onChips({ type: "run.steer", id: "evt_01K4ZQPX0000000000000000S1", run_id: run, text: "Make it three hikes" });
+    await bridge.onChips({ type: "run.resume", run_id: run });
+    await bridge.onChips({ type: "run.resume", run_id: run });
+    const first = `${R1}:resumed-1`;
+    chat(first, "status");
+    // Paused again, the turn it went on in is the one stopped; what the first turn says late is not the run's.
+    await bridge.onChips({ type: "run.pause", run_id: run });
+    chat(R1, "aborted");
+    chat(R1, "final", { message: "Day one: Ewoldsen" });
+    chat(first, "aborted");
+    await bridge.onChips({ type: "run.steer", id: "evt_01K4ZQPX0000000000000000S2", run_id: run, text: "And a dinner spot" });
+    await bridge.onChips({ type: "run.steer", id: "evt_01K4ZQPX0000000000000000S3", run_id: run, text: "With a view" });
+    await bridge.onChips({ type: "run.resume", run_id: run });
+    const second = `${R1}:resumed-2`;
+    chat(second, "final", { message: "Three hikes, and Nepenthe for the view." });
+    await bridge.settled();
+    assert.deepEqual(aborts().map((params) => params["runId"]), [R1, first]);
+    assert.deepEqual(
+      sends().map((params) => [params["idempotencyKey"], params["message"]]),
+      [
+        [first, `${CARRY_ON}\n\nMake it three hikes`],
+        [second, `${CARRY_ON}\n\nAnd a dinner spot\n\nWith a view`],
+      ],
+    );
+    assert.deepEqual(sent.map((event) => event.type), ["run.started", "message.post", "run.completed"]);
+    assert.equal(sent[1]?.["text"], "Three hikes, and Nepenthe for the view.");
+    // Ended, a pause or a resume is nothing.
+    await bridge.onChips({ type: "run.pause", run_id: run });
+    await bridge.onChips({ type: "run.resume", run_id: run });
+    assert.equal(aborts().length, 2);
+    assert.equal(sends().length, 2);
   });
 });
 

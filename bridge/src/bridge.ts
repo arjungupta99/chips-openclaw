@@ -54,6 +54,11 @@
  *   nothing.
  * - OpenClaw's `chat` events for a turn become a run: started on the first, answered and completed
  *   on `final`, failed on `error` or `aborted`. Its tool events become steps.
+ * - Every run says, as it starts, that it can pause (Chips ADR 0293). A person's Pause stops its
+ *   turn as Stop does, with OpenClaw's abort, which keeps the session and what the turn had said
+ *   so far; the run posts nothing for the half-finished turn and waits. Resume tells the session to
+ *   carry on, as a turn of its own and the same run. A run waiting on a person's answer is stopped
+ *   nowhere: the answer waits for the resume.
  * - A file the answer sends (a `MEDIA:` line of its own, which the gateway takes out of the words
  *   and reports on the turn's `assistant` stream) is read where OpenClaw keeps it, uploaded, and
  *   posted with the answer's words as one message (`media.ts`). One that cannot go is said in the
@@ -182,6 +187,21 @@ const AGAIN_AFTER_MS = 1_000;
 /** How the gateway refuses to fork a session it does not have: an agent that never spoke there. */
 const UNKNOWN_PARENT = /unknown parent session/i;
 
+/**
+ * A person's pause of a run (Chips ADR 0293). `stopped` is the OpenClaw turn it stopped, as Stop
+ * stops one, whose abort is not the run's end; none when it stopped nothing, the run waiting on a
+ * person's answer or between two sends. What is sent for the run meanwhile waits for the resume: a
+ * person's answers and a turn sent again (`held`), and the words steered into it (`steered`).
+ */
+interface Pause {
+  stopped?: string;
+  readonly held: (() => Promise<unknown>)[];
+  readonly steered: ChipsEvent[];
+}
+
+/** What a session is told when a person resumes the run whose turn a pause stopped (Chips ADR 0293). */
+const CARRY_ON = "You were paused partway through this. Carry on from where you stopped. Nothing you wrote before the pause reached the room, so write your whole reply.";
+
 interface Run {
   readonly chipsRun: string;
   /**
@@ -199,6 +219,16 @@ interface Run {
   /** Writes for one run go in order. */
   chain: Promise<void>;
   ended: boolean;
+  /**
+   * The OpenClaw turn the run is now, by its run id: the one it began as, else the one it went on
+   * in, sent again after a reload or resumed after a pause (Chips ADR 0293). What a turn it went on
+   * from says is not the run's.
+   */
+  turn: string;
+  /** How many times the run was resumed in a turn of its own (Chips ADR 0293), for each one's key. */
+  resumes: number;
+  /** A person's pause of the run (Chips ADR 0293), until it is resumed or stopped. */
+  pause?: Pause;
   /** What the turn's answer named to send (`MEDIA:` lines), as its `assistant` stream reported them. */
   readonly media: string[];
   /** The files its answer uploaded, by upload id: each one's name. */
@@ -2026,6 +2056,11 @@ export class Bridge {
         return;
       case "run.cancel":
         return this.cancel(event);
+      // A person's Pause and Resume (Chips ADR 0293).
+      case "run.pause":
+        return this.pause(event);
+      case "run.resume":
+        return this.resume(event);
       case "run.steer":
         return this.steer(event);
       case "approval.resolved":
@@ -2440,12 +2475,129 @@ export class Bridge {
   private async cancel(event: ChipsEvent): Promise<void> {
     const run = this.runByChips.get(String(event["run_id"]));
     if (run === undefined) return;
-    await this.claw.request("chat.abort", { sessionKey: run.sessionKey, runId: this.clawRunOf(run) });
+    const pause = run.pause;
+    if (pause !== undefined && !run.ended) {
+      // Stopped while paused (Chips ADR 0293), the run ends quietly: Chips ended it already, and
+      // what waited for the resume goes nowhere. A turn the pause stopped is over; one waiting on a
+      // person's answer is stopped now, and its abort says nothing.
+      run.pause = undefined;
+      run.ended = true;
+      this.rules.forget(run.sessionKey);
+      if (pause.stopped === run.turn) return;
+    }
+    await this.claw.request("chat.abort", { sessionKey: run.sessionKey, runId: run.turn });
+  }
+
+  /**
+   * A person's Pause (Chips ADR 0293). The run's turn is stopped as Stop stops it, with OpenClaw's
+   * abort, which keeps the session: the words the turn was sent, what its tools did, and what it
+   * had written so far, which OpenClaw saves to the conversation. The run does not end: nothing is
+   * posted for the half-finished turn, no completion is sent, and it waits for a resume or a stop.
+   * A run waiting on a person's answer has nothing going to stop, and the answer waits for the
+   * resume. Paused again, it is paused already.
+   */
+  private async pause(event: ChipsEvent): Promise<void> {
+    const run = this.runByChips.get(String(event["run_id"]));
+    if (run === undefined || run.ended || run.pause !== undefined) return;
+    run.pause = { held: [], steered: [] };
+    if (!this.waitsOnPerson(run)) await this.stopTurn(run);
+  }
+
+  /**
+   * The turn a paused run is in, stopped and marked as the pause's, so that its abort is not taken
+   * for the run's end (Chips ADR 0293). Where OpenClaw says nothing was going, the turn had not
+   * begun (it waits to be sent again after a reload) or had ended: the pause stopped nothing, and a
+   * send still to come waits for the resume. One OpenClaw would not stop is not marked.
+   */
+  private async stopTurn(run: Run): Promise<void> {
+    const pause = run.pause;
+    if (pause === undefined || pause.stopped !== undefined) return;
+    const turn = run.turn;
+    pause.stopped = turn;
+    let answer: { aborted?: unknown };
+    try {
+      answer = await this.claw.request<{ aborted?: unknown }>("chat.abort", { sessionKey: run.sessionKey, runId: turn });
+    } catch (error) {
+      if (pause.stopped === turn) pause.stopped = undefined;
+      throw error;
+    }
+    if (answer.aborted === false && pause.stopped === turn) pause.stopped = undefined;
+  }
+
+  /**
+   * A paused run whose last open ask was answered in OpenClaw itself (Chips ADR 0293): its turn goes
+   * on there, so it is stopped now, as the pause would have stopped it.
+   */
+  private stopIfPaused(run: Run): void {
+    if (run.pause === undefined || run.ended || this.waitsOnPerson(run)) return;
+    this.stopTurn(run).catch((error: unknown) => this.log(`openclaw: ${run.chipsRun}'s turn not stopped for its pause: ${String(error)}`));
+  }
+
+  /** Whether a run waits on a person: an approval or a question of its is open in Chips. */
+  private waitsOnPerson(run: Run): boolean {
+    return [...this.approvals.values(), ...this.questions.values()].some((asked) => asked.run === run);
+  }
+
+  /**
+   * A person's Resume (Chips ADR 0293). A run whose turn the pause stopped goes on in the same
+   * session (`carryOn`). Then what waited for the resume is sent, in order: a person's answers, a
+   * turn sent again after a reload, and, where the pause stopped nothing, the words steered into
+   * the run, into the turn still going.
+   */
+  private async resume(event: ChipsEvent): Promise<void> {
+    const run = this.runByChips.get(String(event["run_id"]));
+    const pause = run?.pause;
+    if (run === undefined || pause === undefined || run.ended) return;
+    run.pause = undefined;
+    if (pause.stopped !== undefined) await this.carryOn(run, pause.steered);
+    const steers = pause.stopped === undefined ? pause.steered.map((steer) => () => this.steer(steer)) : [];
+    for (const send of [...pause.held, ...steers]) {
+      await send().catch((error: unknown) => this.log(`openclaw: what waited for ${run.chipsRun}'s resume was not sent: ${String(error)}`));
+    }
+  }
+
+  /**
+   * A run whose turn a pause stopped, going on (Chips ADR 0293): the session is told it was paused
+   * and to carry on, with what was steered meanwhile after, as a turn of its own that is the same
+   * run in Chips. OpenClaw kept what the stopped turn had written in the conversation, and the
+   * bridge posted none of it: the answer the room sees is the one this turn ends with. Steered, as
+   * every send is.
+   */
+  private async carryOn(run: Run, steered: readonly ChipsEvent[]): Promise<void> {
+    run.resumes += 1;
+    const turn = `${run.turn.replace(/:resumed-\d+$/, "")}:resumed-${run.resumes}`;
+    this.runs.set(turn, run);
+    run.turn = turn;
+    const words = steered.map((steer) => String(steer["text"] ?? "").trim()).filter((text) => text !== "");
+    const send: Payload = { sessionKey: run.sessionKey, message: [CARRY_ON, ...words].join("\n\n"), idempotencyKey: turn, queueMode: "steer" };
+    this.sends.set(turn, send);
+    try {
+      await this.claw.request("chat.send", send);
+    } catch (error) {
+      this.sends.delete(turn);
+      run.ended = true;
+      this.write(run, { type: "run.failed", run_id: run.chipsRun, error: String(error), idempotency_key: `openclaw-run:${turn}:failed` });
+    }
+  }
+
+  /**
+   * A send for a run a pause holds (Chips ADR 0293), kept to be made at its resume. False when
+   * nothing holds the run, and the send is the caller's to make now.
+   */
+  private held(run: Run, send: () => Promise<unknown>): boolean {
+    if (run.pause === undefined || run.ended) return false;
+    run.pause.held.push(send);
+    return true;
   }
 
   private async steer(event: ChipsEvent): Promise<void> {
     const run = this.runByChips.get(String(event["run_id"]));
     if (run === undefined) return;
+    // Steered while the run is paused (Chips ADR 0293), the words wait for its resume.
+    if (run.pause !== undefined && !run.ended) {
+      run.pause.steered.push(event);
+      return;
+    }
     const mode = str(event["mode"]) ?? "steer";
     await this.claw.request("chat.send", {
       sessionKey: run.sessionKey,
@@ -2460,6 +2612,9 @@ export class Bridge {
     if (this.isOwn(String(event["resolved_by"]))) return;
     const asked = this.approvals.get(String(event["approval_id"]));
     if (asked === undefined) return;
+    // An answer given while its run is paused reaches OpenClaw once the run is resumed (Chips ADR
+    // 0293), and till then the run still waits on it.
+    if (this.held(asked.run, () => this.decided(event))) return;
     // Forgotten before OpenClaw is told, so its `resolved` event is not taken for an answer there.
     this.approvals.delete(String(event["approval_id"]));
     const decision = str(event["decision"]);
@@ -2487,8 +2642,11 @@ export class Bridge {
 
   private async answered(event: ChipsEvent): Promise<void> {
     if (this.isOwn(String(event["answered_by"]))) return;
-    const clawId = this.questions.get(String(event["ask_id"]))?.id;
-    if (clawId === undefined) return;
+    const asked = this.questions.get(String(event["ask_id"]));
+    if (asked === undefined) return;
+    // As an approval's: an answer given while the run is paused waits for its resume (Chips ADR 0293).
+    if (this.held(asked.run, () => this.answered(event))) return;
+    const clawId = asked.id;
     this.questions.delete(String(event["ask_id"]));
     const answers = Array.isArray(event["answers"]) ? (event["answers"] as Payload[]) : [];
     await this.claw.request("question.resolve", {
@@ -2552,6 +2710,7 @@ export class Bridge {
     const decision = str(p["decision"]);
     if (decision !== "allow-once" && decision !== "allow-always" && decision !== "deny") return;
     this.approvals.delete(approvalId);
+    this.stopIfPaused(asked.run);
     this.write(asked.run, {
       type: "approval.resolved",
       run_id: asked.run.chipsRun,
@@ -2570,6 +2729,7 @@ export class Bridge {
     if (entry === undefined || p["status"] !== "answered") return;
     const [askId, asked] = entry;
     this.questions.delete(askId);
+    this.stopIfPaused(asked.run);
     const given = ((p["answers"] ?? {}) as Payload)["answers"];
     const answers = Object.entries((given ?? {}) as Record<string, unknown>).map(([questionId, values]) => ({
       question_id: questionId,
@@ -2608,6 +2768,8 @@ export class Bridge {
       job: jobId,
       chain: Promise.resolve(),
       ended: false,
+      turn: clawRun,
+      resumes: 0,
       media: [],
       uploaded: new Map(),
       cwds: new Map(),
@@ -2637,6 +2799,18 @@ export class Bridge {
       // for, has a goal nobody typed.
       ...(asked === undefined || asked.ownGoal === true ? {} : { goal_from: "chips" }),
       idempotency_key: `openclaw-run:${clawRun}:started`,
+    });
+    // That it can pause (Chips ADR 0293), said once as it starts, on a status no client draws as a
+    // thought: the run's own envelope, as the SDK's `run.status()` would send it if it took the
+    // word. A Chips from before the ADR drops it, and a refusal is only logged.
+    this.write(run, {
+      type: "run.status",
+      run_id: run.chipsRun,
+      space_id: where.spaceId,
+      phase: "thinking",
+      verb_phrase: "Thinking…",
+      pausable: true,
+      idempotency_key: `openclaw-run:${clawRun}:pausable`,
     });
     for (const early of this.early.get(clawRun) ?? []) this.stream(run, early);
     this.early.delete(clawRun);
@@ -2671,9 +2845,13 @@ export class Bridge {
     return { spaceId, agentId: this.speakerIn(spaceId, this.agentFor(sessionKey)) };
   }
 
-  private clawRunOf(run: Run): string | undefined {
-    for (const [clawRun, each] of this.runs) if (each === run) return clawRun;
-    return undefined;
+  /**
+   * Whether a turn of a run's is one a pause stopped (Chips ADR 0293): the one the pause stopped,
+   * or one the run has gone on from. An ask that names no turn is the run's turn now.
+   */
+  private stoppedTurn(run: Run, clawRun: string | undefined): boolean {
+    const turn = clawRun ?? run.turn;
+    return turn !== run.turn || run.pause?.stopped === turn;
   }
 
   private chat(p: Payload): void {
@@ -2693,6 +2871,17 @@ export class Bridge {
     // A turn in none of our rooms (OpenClaw's own work, an automation made elsewhere) holds nothing past its end.
     if (run === undefined && (state === "final" || state === "error" || state === "aborted")) this.early.delete(clawRun);
     if (run === undefined || run.ended) return;
+    // A turn a pause stopped ends as OpenClaw aborts it, which is not the run's end: the run waits
+    // for its resume (Chips ADR 0293). A `final` is never an abort's: the turn answered before the
+    // abort reached it, and that answer is the run's.
+    if (this.stoppedTurn(run, clawRun) && !(state === "final" && clawRun === run.turn)) {
+      if (state === "aborted" || state === "error") {
+        this.sends.delete(clawRun);
+        // As any turn that failed, it may not have kept what it was told (Chips ADR 0250).
+        this.rules.forget(run.sessionKey);
+      }
+      return;
+    }
     if (state === "error" && this.againAfterReload(run, clawRun, p)) return;
     if (state === "final" || state === "error" || state === "aborted") this.sends.delete(clawRun);
     if (state === "final") return this.finish(run, clawRun, p);
@@ -2717,12 +2906,16 @@ export class Bridge {
     const again = `${clawRun}:again`;
     this.runs.delete(clawRun);
     this.runs.set(again, run);
+    run.turn = again;
     this.log(`openclaw: ${clawRun} began as OpenClaw took in a config change; sent again as ${again}`);
     setTimeout(() => {
-      this.claw.request("chat.send", { ...sent, idempotencyKey: again }).catch((error: unknown) => {
-        run.ended = true;
-        this.write(run, { type: "run.failed", run_id: run.chipsRun, error: String(error), idempotency_key: `openclaw-run:${again}:failed` });
-      });
+      const send = (): Promise<unknown> =>
+        this.claw.request("chat.send", { ...sent, idempotencyKey: again }).catch((error: unknown) => {
+          run.ended = true;
+          this.write(run, { type: "run.failed", run_id: run.chipsRun, error: String(error), idempotency_key: `openclaw-run:${again}:failed` });
+        });
+      // Stopped meanwhile, it is not sent; paused, it is sent at the resume (Chips ADR 0293).
+      if (!run.ended && !this.held(run, send)) void send();
     }, AGAIN_AFTER_MS);
     return true;
   }
@@ -3009,8 +3202,9 @@ export class Bridge {
     const clawRun = str(request["runId"]);
     if (clawId === undefined || sessionKey === undefined) return;
     const run = clawRun === undefined ? this.latestRun(sessionKey) : this.runFor(clawRun, sessionKey);
-    // A turn stopped or ended already has no card to ask on: Chips refuses one on a closed run.
-    if (run === undefined || run.ended) return;
+    // A turn stopped or ended already has no card to ask on: Chips refuses one on a closed run, and
+    // OpenClaw cancels the asks of a turn a pause stopped with its abort (Chips ADR 0293).
+    if (run === undefined || run.ended || this.stoppedTurn(run, clawRun)) return;
     const given = str(plan["commandText"]) ?? str(request["command"]);
     const command = given ?? "a command";
     const cwd = str(plan["cwd"]) ?? str(request["cwd"]);
@@ -3051,8 +3245,9 @@ export class Bridge {
     const clawRun = str(request["runId"]);
     if (clawId === undefined || sessionKey === undefined) return;
     const run = clawRun === undefined ? this.latestRun(sessionKey) : this.runFor(clawRun, sessionKey);
-    // A turn stopped or ended already has no card to ask on: Chips refuses one on a closed run.
-    if (run === undefined || run.ended) return;
+    // A turn stopped or ended already has no card to ask on: Chips refuses one on a closed run, and
+    // OpenClaw cancels the asks of a turn a pause stopped with its abort (Chips ADR 0293).
+    if (run === undefined || run.ended || this.stoppedTurn(run, clawRun)) return;
     const title = str(request["title"]) ?? "Allow this?";
     const description = str(request["description"]) ?? "";
     const command = /^Command: (.+)$/m.exec(description)?.[1];
@@ -3096,8 +3291,9 @@ export class Bridge {
     const clawRun = str(p["runId"]);
     if (clawId === undefined || sessionKey === undefined) return;
     const run = clawRun === undefined ? this.latestRun(sessionKey) : this.runFor(clawRun, sessionKey);
-    // A turn stopped or ended already has no card to ask on: Chips refuses one on a closed run.
-    if (run === undefined || run.ended) return;
+    // A turn stopped or ended already has no card to ask on: Chips refuses one on a closed run, and
+    // OpenClaw cancels the asks of a turn a pause stopped with its abort (Chips ADR 0293).
+    if (run === undefined || run.ended || this.stoppedTurn(run, clawRun)) return;
     const askId = chipsId("qst", `openclaw-question:${clawId}`);
     this.questions.set(askId, { id: clawId, run });
     const questions = (Array.isArray(p["questions"]) ? (p["questions"] as Payload[]) : []).map((q) => ({
