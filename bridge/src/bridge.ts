@@ -328,6 +328,25 @@ export function wordsOf(event: Record<string, unknown>): string {
  */
 const CATCH_UP = { lines: 20, chars: 4000 } as const;
 
+/**
+ * Whom a line was for, after who said it, in the words Chips's SDK writes it with (Chips ADR 0088,
+ * addendum of 13 November 2026): ", to Scout", ", to you and Scout". A person who picks an agent in
+ * the field leaves no @ in the words, so without it a line for another agent reads as the room's.
+ * Nothing when it was for no agent, for `self` alone, or from a Chips that names nobody (`to`).
+ */
+function toWords(to: unknown, self?: string): string {
+  const named = (Array.isArray(to) ? (to as unknown[]) : []).flatMap((each) => {
+    const one = typeof each === "object" && each !== null ? (each as Payload) : undefined;
+    const name = str(one?.["name"]);
+    return name === undefined || name === "" ? [] : [{ id: str(one?.["id"]), name }];
+  });
+  const others = named.filter((each) => self === undefined || each.id !== self).map((each) => each.name);
+  if (others.length === 0) return "";
+  const names = others.length === named.length ? others : ["you", ...others];
+  const listed = names.length > 6 ? [...names.slice(0, 6), `${names.length - 6} more`] : names;
+  return `, to ${listed.length === 1 ? listed[0] : `${listed.slice(0, -1).join(", ")} and ${listed.at(-1)}`}`;
+}
+
 /** One of the room's lines Chips handed over with a message (Chips ADR 0088), as OpenClaw is told it. */
 function contextLineOf(line: Payload, self?: string): string | undefined {
   const from = line["from"] as Payload | undefined;
@@ -342,7 +361,7 @@ function contextLineOf(line: Payload, self?: string): string | undefined {
       const words = [flat(line["text"]) || flat(line["transcript"]), sent].filter((part) => part !== "").join(" ");
       // A person's standing after their name, as the SDK's lines say it (Chips SEC-15, SEC-49).
       const who = name === "You" ? name : withRole(name, { kind: str(from?.["kind"]), workspace_role: str(from?.["workspace_role"]) });
-      return words === "" ? undefined : `${who}: ${words}`;
+      return words === "" ? undefined : `${who}${toWords(line["to"], self)}: ${words}`;
     }
     case "joined":
       return `(${name} joined the space)`;

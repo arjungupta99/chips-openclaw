@@ -487,6 +487,33 @@ describe("rooms and sessions", () => {
     );
   });
 
+  // Chips finding NR-13, 13 November 2026: one ask to each of three agents by the field's pick, the
+  // same but for a word. The agent asked for "echo" read the ask for "delta" as a line of the
+  // room's and answered "delta".
+  it("says whom a line for another agent was for, and nothing more of one for itself or from an older Chips", () => {
+    const arjun = { name: "Arjun", kind: "person", workspace_role: "owner" };
+    const codex = { id: "agt_codex", name: "Check Codex" };
+    const hermes = { id: "agt_hermes", name: "Check Hermes" };
+    const lines = {
+      lines: [
+        { kind: "said", from: arjun, text: "Reply with the single word delta", addressed_to: [codex.id], to: [codex] },
+        { kind: "said", from: arjun, text: "Both of you, hold on", addressed_to: [codex.id, ME], to: [codex, { id: ME, name: "Claw" }] },
+        { kind: "said", from: arjun, text: "Yours alone", addressed_to: [ME], to: [{ id: ME, name: "Claw" }] },
+        { kind: "said", from: arjun, text: "For two others", addressed_to: [codex.id, hermes.id], to: [codex, hermes] },
+        { kind: "said", from: arjun, text: "From a Chips that names nobody", addressed_to: [codex.id] },
+        { kind: "said", from: arjun, text: "Lunch?", addressed_to: [] },
+      ],
+    };
+    assert.deepEqual(heardIn(lines, () => false, ME), [
+      "Arjun (owner), to Check Codex: Reply with the single word delta",
+      "Arjun (owner), to you and Check Codex: Both of you, hold on",
+      "Arjun (owner): Yours alone",
+      "Arjun (owner), to Check Codex and Check Hermes: For two others",
+      "Arjun (owner): From a Chips that names nobody",
+      "Arjun (owner): Lunch?",
+    ]);
+  });
+
   it("sends a person's photo inline, as base64", async () => {
     await bridge.onChips(
       said("What is this?", { attachments: [{ url: "https://chips/a", mime_type: "image/png", filename: "cat.png" }] }),
