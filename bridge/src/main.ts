@@ -175,6 +175,11 @@ restart = restarter({
 });
 
 const { roots } = config;
+// A stop is heard from here on, before the first wait since bridge.pid was written. Heard only once
+// the bridge was made, a stop while git was looked for ended the process by the signal, and left
+// bridge.pid behind.
+process.on("SIGTERM", stop);
+process.on("SIGINT", stop);
 // Each agent the bridge made works on its room's project in a copy of its own (Chips ADR 0221), where git will.
 const git = await checkGit();
 if (!git.ok) log(`rooms' projects are off: ${git.why}`);
@@ -305,8 +310,6 @@ function stop(): void {
   rmSync(pidFile, { force: true });
   process.exit(0);
 }
-process.on("SIGTERM", stop);
-process.on("SIGINT", stop);
 
 main().catch((error: unknown) => {
   log(`bridge: failed to start: ${error instanceof Error ? error.message : String(error)}`);

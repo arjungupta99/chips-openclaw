@@ -432,6 +432,67 @@ describe("the jobs kept in Chips", () => {
     assert.equal(r.copies.length, 2);
   });
 
+  it("say a job is running from when a run of it starts until it finishes", async () => {
+    const r = rig();
+    await r.jobs.send();
+    assert.equal(jobOf(r.copies.at(-1), "heartbeat")?.["running_since"], undefined);
+
+    r.jobs.cronEvent({ jobId: "5ecdc04c", action: "started", runAtMs: BEAT_AT - 4000 });
+    await r.jobs.settled();
+    assert.equal(jobOf(r.copies.at(-1), "heartbeat")?.["running_since"], new Date(BEAT_AT - 4000).toISOString());
+    // Only that job: Dreaming isn't running.
+    assert.equal(jobOf(r.copies.at(-1), "dreaming")?.["running_since"], undefined);
+
+    r.jobs.cronEvent({ jobId: "5ecdc04c", action: "finished", status: "ok", runAtMs: BEAT_AT - 4000, durationMs: 3000 });
+    await new Promise((done) => setTimeout(done, 10));
+    await r.jobs.settled();
+    assert.equal(jobOf(r.copies.at(-1), "heartbeat")?.["running_since"], undefined);
+  });
+
+  it("say a job is running from now when the start names no time, and from the earliest of several runs", async () => {
+    const r = rig();
+    await r.jobs.send();
+    r.jobs.cronEvent({ jobId: "d9d49888", action: "started" });
+    await r.jobs.settled();
+    assert.equal(jobOf(r.copies.at(-1), "skill-review")?.["running_since"], new Date(BEAT_AT).toISOString());
+    // Another agent's review began a minute before: the job has been running since that one.
+    r.jobs.cronEvent({ jobId: "28e992c3", action: "started", runAtMs: BEAT_AT - 60_000 });
+    await r.jobs.settled();
+    assert.equal(jobOf(r.copies.at(-1), "skill-review")?.["running_since"], new Date(BEAT_AT - 60_000).toISOString());
+    // That agent's review is taken away, and the first is still going.
+    r.jobs.cronEvent({ jobId: "28e992c3", action: "removed" });
+    await r.jobs.settled();
+    assert.equal(jobOf(r.copies.at(-1), "skill-review")?.["running_since"], new Date(BEAT_AT).toISOString());
+  });
+
+  it("stop saying a job is running when its job is removed, or six hours on with no word that it finished", async () => {
+    const r = rig();
+    await r.jobs.send();
+    r.jobs.cronEvent({ jobId: "5ecdc04c", action: "started", runAtMs: BEAT_AT - 6 * 3_600_000 + 1000 });
+    await r.jobs.settled();
+    assert.ok(jobOf(r.copies.at(-1), "heartbeat")?.["running_since"] !== undefined);
+    // The same run, a moment past the six hours when the copy is next read.
+    r.jobs.cronEvent({ jobId: "5ecdc04c", action: "started", runAtMs: BEAT_AT - 6 * 3_600_000 });
+    await r.jobs.settled();
+    assert.equal(jobOf(r.copies.at(-1), "heartbeat")?.["running_since"], undefined);
+
+    r.jobs.cronEvent({ jobId: "5ecdc04c", action: "started", runAtMs: BEAT_AT - 1000 });
+    await r.jobs.settled();
+    assert.ok(jobOf(r.copies.at(-1), "heartbeat")?.["running_since"] !== undefined);
+    r.jobs.cronEvent({ jobId: "5ecdc04c", action: "removed" });
+    await r.jobs.settled();
+    assert.equal(jobOf(r.copies.at(-1), "heartbeat")?.["running_since"], undefined);
+  });
+
+  it("take no start of a job that isn't one of OpenClaw's own for a run of ours", async () => {
+    const r = rig();
+    await r.jobs.send();
+    const before = r.copies.length;
+    r.jobs.cronEvent({ jobId: "somebody-elses", action: "started", runAtMs: BEAT_AT });
+    await r.jobs.settled();
+    assert.equal(r.copies.length, before);
+  });
+
   it("price a heartbeat again a little later when Home's usage hadn't counted it yet", async () => {
     const r = rig();
     await r.jobs.send();

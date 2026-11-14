@@ -57,6 +57,11 @@ const USAGE_EVERY_MS = 5000;
 const PRICE_AGAIN_MS: readonly number[] = [120_000, 480_000];
 /** How long after a heartbeat's run ends its check may still be heard ending. */
 const HEARD_SLACK_MS = 5000;
+/**
+ * How long a run heard starting is said to be going when nothing says it finished: a gateway that
+ * restarts mid-run never does. As long as Chips itself believes a job that says it is running.
+ */
+const RUNNING_FOR_MS = 6 * 3_600_000;
 
 /** One of OpenClaw's scheduled jobs, as `cron.list` and its events say it. */
 export interface CronJob {
@@ -365,6 +370,8 @@ export class Jobs {
   private readonly unpriced = new Map<string, { readonly run: CronRun; readonly sent: Payload }>();
   /** The heartbeat's checks heard ending (its `heartbeat` events): when, and whether each told the person something. */
   private heard: { readonly at: number; readonly notify: boolean }[] = [];
+  /** Runs of ours heard starting and not yet finishing, by OpenClaw's job: whose, and since when. */
+  private readonly going = new Map<string, { readonly own: Own; readonly at: number }>();
 
   constructor(
     private readonly claw: ClawPort,
@@ -396,7 +403,28 @@ export class Jobs {
     }
     const beat = beatOf(config?.agents, ours.primary).every;
     if (beat !== undefined) this.before.set(HEARTBEAT, beat);
-    return copyOf(config ?? {}, cron, ours, this.before, this.now());
+    return this.withRunning(copyOf(config ?? {}, cron, ours, this.before, this.now()));
+  }
+
+  /**
+   * The copy with `running_since` on each job a run of which is going now, the earliest where
+   * several are (each agent's skill review is a run of its own). Chips starts neither this bridge
+   * nor itself again on a new release while a job says so: a check that ends while the bridge is
+   * away never reaches its room.
+   */
+  private withRunning(copy: Payload): Payload {
+    const now = this.now();
+    const since = new Map<Own, number>();
+    for (const [jobId, run] of this.going) {
+      if (now - run.at >= RUNNING_FOR_MS) this.going.delete(jobId);
+      else since.set(run.own, Math.min(since.get(run.own) ?? run.at, run.at));
+    }
+    if (since.size === 0) return copy;
+    const jobs = (copy["jobs"] as Payload[]).map((job) => {
+      const at = since.get(job["job_id"] as Own);
+      return at === undefined ? job : { ...job, running_since: new Date(at).toISOString() };
+    });
+    return { ...copy, jobs };
   }
 
   /** The copy read and sent; the SDK sends it only when it isn't what Chips took last. */
@@ -433,14 +461,21 @@ export class Jobs {
 
   /**
    * A `cron` event: a run of ours that finished is priced and sent, then the copy, whose next run
-   * has moved; one of ours added, changed or removed sends the copy.
+   * has moved; one of ours added, changed or removed sends the copy, and so does a run starting,
+   * which the copy then says is going.
    */
   cronEvent(p: Payload): void {
     const jobId = typeof p["jobId"] === "string" ? p["jobId"] : undefined;
     const job = p["job"] as CronJob | undefined;
     const own = jobId === undefined ? undefined : (this.cron.get(jobId)?.own ?? (job ? ownOf(job, this.ours().primary) : undefined));
-    if (own === undefined) return;
-    if (p["action"] !== "finished") {
+    if (jobId === undefined || own === undefined) return;
+    const action = p["action"];
+    if (action === "started") {
+      this.going.set(jobId, { own, at: typeof p["runAtMs"] === "number" ? p["runAtMs"] : this.now() });
+    } else if (action === "finished" || action === "removed") {
+      this.going.delete(jobId);
+    }
+    if (action !== "finished") {
       void this.send();
       return;
     }
