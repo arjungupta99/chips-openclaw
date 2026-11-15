@@ -1904,6 +1904,21 @@ describe("OpenClaw's agents as agents in Chips (Chips ADR 0087)", () => {
       );
     });
 
+    // Chips gives no agent the name Main or You (its SEC-33), and numbers one asked for: "Main 2"
+    // (finding HS-25). Such a name is taken as none, as an agent with no name of its own is.
+    it("names its Main and any agent the harness, not a name Chips gives no agent", async () => {
+      const fresh = joined();
+      await fresh.adoptAgents({
+        defaultId: "main",
+        agents: [{ id: "main", name: "Main" }, { id: "helper", identity: { name: " you " } }, { id: "scout", name: "Scout" }],
+      });
+      assert.deepEqual(registered[0], { key: ME, name: "OpenClaw", lead: true });
+      assert.deepEqual(
+        registered.slice(1).map((each) => [each["key"], each["name"]]),
+        [["helper", "OpenClaw"], ["scout", "Scout"]],
+      );
+    });
+
     it("answers in its own room as the primary agent, in Home, said as the default agent", async () => {
       const fresh = joined();
       await fresh.adoptAgents({ defaultId: "main", agents: [{ id: "main" }] });

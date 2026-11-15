@@ -97,9 +97,11 @@ describe("OpenClaw's card, from a link to its hello", { skip, timeout: 180_000 }
         [request.harness_id],
       );
       // One agent, as its Main: the default agent the join made, with no "2" beside it (Chips ON-10).
+      // The fake gateway calls the primary agent Main, which Chips gives no agent (its SEC-33), so
+      // it keeps the harness's name rather than coming back "Main 2" (finding HS-25).
       const agents = await chips.agents(request.harness_id);
       assert.deepEqual(agents.map((each) => each.lead), [true], JSON.stringify(agents));
-      assert.doesNotMatch(agents[0]?.name ?? "", / \d+$/);
+      assert.equal(agents[0]?.name, "OpenClaw");
     } finally {
       await running.stop();
     }

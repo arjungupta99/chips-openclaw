@@ -89,7 +89,7 @@
  */
 
 import { heldNote, type Project, pushedInWords, Refuse, renderReplyingTo, SessionRules } from "@chipschat/harness";
-import { noteWithoutRules, withRole } from "@chipschat/protocol";
+import { notAnAgentName, noteWithoutRules, withRole } from "@chipschat/protocol";
 import { type ChipsAgent, type ChipsEvent, ChipsRefusal, type NewAgent, type Placed, type Taken } from "./chips.ts";
 import { chipsId } from "./ids.ts";
 import { type Media, mediaLinesIn, sentWithTool } from "./media.ts";
@@ -1071,9 +1071,11 @@ export class Bridge {
     );
     const known = await this.chips.agents();
     const harnessName = known.find((each) => each.key === this.self.harnessId)?.name ?? "OpenClaw";
+    // A name Chips gives no agent, Main or You (Chips SEC-33), would come back numbered, "Main 2":
+    // it is taken as none, as an agent with no name of its own is (finding HS-25).
     const nameOf = (agent: ClawAgent): string => {
-      const named = agent.identity?.name ?? agent.name;
-      return named === undefined || named === agent.id || named.trim() === "" ? harnessName : named.trim();
+      const named = (agent.identity?.name ?? agent.name)?.trim();
+      return named === undefined || named === "" || named === agent.id || notAnAgentName(named) ? harnessName : named;
     };
     await this.seatMain(known, nameOf(listedAgents.find((each) => each.id === this.primary) ?? { id: this.primary }));
     for (const agent of agents) {
