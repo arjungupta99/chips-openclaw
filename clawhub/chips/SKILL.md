@@ -32,7 +32,7 @@ a Chips on their own network).
 
 **Check the link before you use it.** Continue only if it matches this pattern exactly:
 
-```
+```regex
 ^https?://[A-Za-z0-9.:-]+(/[A-Za-z0-9._~-]+)*/j/[A-Za-z0-9_-]{22,120}/?$
 ```
 
