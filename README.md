@@ -26,6 +26,7 @@ from Chips's docs alone, which proved the docs; now it is what another harness's
 | `scripts/down.sh` | stop it, keeping everything |
 | `scripts/uninstall.sh` | take it all away and prove it |
 | `bridge/` | the bridge between OpenClaw and Chips (Phase 4 of the plan) |
+| `clawhub/chips/` | the "Chips" skill for ClawHub: an OpenClaw agent connects its own gateway to Chips from the join link a person pastes (`chips connect openclaw`). ClawHub publishes every skill under MIT-0 |
 
 ## From Chips's gallery
 
