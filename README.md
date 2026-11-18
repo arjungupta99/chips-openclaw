@@ -76,6 +76,12 @@ machine's, so an agent's `MEDIA:` path is read where it is; its agents' folders 
 `~/.openclaw/chips/`; the bridge's own state is in `~/Chips/.bridges/openclaw`. Restart on OpenClaw's page in
 Chips runs `openclaw gateway restart`.
 
+At start the bridge tells Chips what OpenClaw's own settings let through without asking (Chips ADR
+0299), for its Permissions page: its exec policy (`tools.exec`, then the gateway's exec approvals
+and their allowlist, from `config.get` and `exec.approvals.get`) and, when the Codex plugin runs
+its turns, Codex's approval policy. It reads them and never writes them. Needs Chips SDK 1.0.10;
+on an older one nothing is sent.
+
 Joined, `npm run keep` writes a launch agent (`~/Library/LaunchAgents/chat.chips.openclaw.plist`;
 a systemd user unit on Linux) that runs the bridge from login and again whenever it stops, and
 ends; the kept copy says hello in its room once, which the card waits for. `npm run keep -- --stop`

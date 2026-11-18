@@ -22,6 +22,7 @@ import {
   type SettingsHandlers,
 } from "@chipschat/harness";
 import type { JobRun } from "@chipschat/protocol";
+import { type OwnRules, sendOwnRules } from "./own-rules.ts";
 import { VERSION } from "./version.js";
 
 export type ChipsEvent = Record<string, unknown> & { readonly type: string };
@@ -312,6 +313,14 @@ export class Chips {
   /** OpenClaw's own jobs, as a copy (Chips ADR 0252). */
   putJobs(copy: Payload): Promise<unknown> {
     return this.chips.settings.jobs(copy as unknown as HarnessJobsCopy);
+  }
+
+  /**
+   * What OpenClaw's own settings let through without asking (Chips ADR 0299). Through SDK 1.0.10's
+   * `settings.ownRules`; false where the SDK has none or Chips refused it, and nothing else changes.
+   */
+  putOwnRules(copy: OwnRules): Promise<boolean> {
+    return sendOwnRules(this.chips.settings, copy);
   }
 
   /** Runs of OpenClaw's own jobs that finished (Chips ADR 0252). */

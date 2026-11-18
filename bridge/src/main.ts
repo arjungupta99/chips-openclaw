@@ -32,6 +32,7 @@ import { readMedia } from "./media.ts";
 import { workspacesIn } from "./own-agents.ts";
 import { projectsIn } from "./project.ts";
 import { OpenClaw } from "./openclaw.ts";
+import { openclawOwnRules, readPolicy } from "./own-rules.ts";
 import { keepIfAsked, stopIfAsked } from "./keep.ts";
 import { type Restarter, restarter } from "./restart.ts";
 
@@ -287,6 +288,10 @@ async function main(): Promise<void> {
   await active.sendWindows();
   // What OpenClaw runs on its own, and its runs of the last week, not waited for (Chips ADR 0252).
   void active.sendJobs().catch((error: unknown) => log(`chips: OpenClaw's own jobs not sent: ${String(error)}`));
+  // What its own exec policy lets through without asking, for its Permissions page (Chips ADR 0299).
+  void readPolicy(claw)
+    .then((policy) => (policy.config === undefined && policy.approvals === undefined ? false : chips.putOwnRules(openclawOwnRules(policy))))
+    .catch((error: unknown) => log(`openclaw: its exec policy not read: ${String(error)}`));
   await catchUp(active);
   chips.stream((event) => active.onChips(event));
   // Its first words in the room it joined, once: the card that followed its link waits for them.
