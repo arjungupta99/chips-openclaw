@@ -19,6 +19,7 @@ import {
   spentIn,
   textOf,
   titleFrom,
+  UNANSWERED,
   usageOf,
   withSpend,
   wordsOf,
@@ -1381,7 +1382,11 @@ describe("supervision", () => {
     assert.deepEqual(calls, [["exec.approval.resolve", { id: "ap-1", decision: "allow-always" }]]);
   });
 
-  it("passes a yes for always back as allow-always for a plugin's ask that is not a command", async () => {
+  /** What the bridge asked of OpenClaw, but for its reads of a turn's history. */
+  const toClaw = (): [string, Record<string, unknown>][] => calls.filter(([method]) => method !== "chat.history");
+
+  /** A plugin's ask that is no command: a tool of its own. */
+  function pluginAsked(): void {
     bridge.onClaw({ event: "chat", payload: { runId: "r10", sessionKey: key(), seq: 1, state: "status" } });
     bridge.onClaw({
       event: "plugin.approval.requested",
@@ -1396,11 +1401,44 @@ describe("supervision", () => {
         },
       },
     });
+  }
+
+  it("passes a yes for always back as allow-once for a plugin's ask that is not a command too, while Chips keeps the rule", async () => {
+    pluginAsked();
     await bridge.settled();
     const card = sent.find((event) => event.type === "approval.request");
     assert.equal((card?.["action"] as { kind: string }).kind, "tool.call");
     await bridge.onChips({ type: "approval.resolved", approval_id: card?.["approval_id"], decision: "approved", scope: "always" });
+    // Chips wrote the rule. An always OpenClaw kept too would outlive that rule being switched off.
+    assert.deepEqual(calls, [["plugin.approval.resolve", { id: "plugin:ap-9", decision: "allow-once" }]]);
+  });
+
+  it("passes a yes for always back as allow-always for a plugin's ask when OpenClaw keeps it (Chips ADR 0300)", async () => {
+    pluginAsked();
+    await bridge.settled();
+    const card = sent.find((event) => event.type === "approval.request");
+    await bridge.onChips({
+      type: "approval.resolved",
+      approval_id: card?.["approval_id"],
+      decision: "approved",
+      scope: "always",
+      keeps: "harness",
+    });
     assert.deepEqual(calls, [["plugin.approval.resolve", { id: "plugin:ap-9", decision: "allow-always" }]]);
+  });
+
+  it("passes a yes for this session back as allow-once, whoever keeps the rule", async () => {
+    pluginAsked();
+    await bridge.settled();
+    const card = sent.find((event) => event.type === "approval.request");
+    await bridge.onChips({
+      type: "approval.resolved",
+      approval_id: card?.["approval_id"],
+      decision: "approved",
+      scope: "session",
+      keeps: "harness",
+    });
+    assert.deepEqual(calls, [["plugin.approval.resolve", { id: "plugin:ap-9", decision: "allow-once" }]]);
   });
 
   it("takes a yes for always as a yes for once when OpenClaw offers only once", async () => {
@@ -1425,12 +1463,54 @@ describe("supervision", () => {
     assert.deepEqual(calls, [["exec.approval.resolve", { id: "ap-2", decision: "allow-once" }]]);
   });
 
-  it("passes a no, or an expiry, back as deny", async () => {
+  it("passes a no back as deny", async () => {
     asked();
     await bridge.settled();
     const card = sent.find((event) => event.type === "approval.request");
-    await bridge.onChips({ type: "approval.resolved", approval_id: card?.["approval_id"], decision: "expired" });
+    await bridge.onChips({ type: "approval.resolved", approval_id: card?.["approval_id"], decision: "denied" });
     assert.deepEqual(calls, [["exec.approval.resolve", { id: "ap-1", decision: "deny" }]]);
+  });
+
+  it("ends the run on one line when nobody answers an ask, and gives OpenClaw no answer", async () => {
+    asked();
+    await bridge.settled();
+    const card = sent.find((event) => event.type === "approval.request");
+    await bridge.onChips({ type: "approval.resolved", approval_id: card?.["approval_id"], run_id: card?.["run_id"], decision: "expired" });
+    await bridge.settled();
+    // Not a deny, which the agent would take as "try another way": its turn is aborted. (What the
+    // turn cost is then read from OpenClaw's history, as at any end.)
+    assert.deepEqual(toClaw(), [["chat.abort", { sessionKey: key(), runId: "r6" }]]);
+    const post = sent.find((event) => event.type === "message.post");
+    assert.equal(post?.["text"], UNANSWERED);
+    assert.equal(UNANSWERED, "Nobody answered, so I stopped. Ask me to carry on.");
+    assert.equal(sent.at(-1)?.type, "run.completed");
+    assert.equal(sent.at(-1)?.["summary"], UNANSWERED);
+    // OpenClaw ends the turn as aborted and lets go of its ask: neither is the run's news now.
+    const before = sent.length;
+    bridge.onClaw({ event: "chat", payload: { runId: "r6", sessionKey: key(), seq: 2, state: "aborted", stopReason: "rpc" } });
+    bridge.onClaw({ event: "exec.approval.resolved", payload: { id: "ap-1", decision: "deny" } });
+    await bridge.settled();
+    assert.equal(sent.length, before, "nothing more is said");
+    assert.equal(sent.some((event) => event.type === "run.failed"), false);
+    assert.equal(toClaw().length, 1);
+  });
+
+  it("lets go of every ask of the run when one expires, with one line for them all", async () => {
+    asked();
+    bridge.onClaw({
+      event: "exec.approval.requested",
+      payload: { id: "ap-1b", expiresAtMs: Date.now() + 120_000, request: { command: "cat notes.md", sessionKey: key(), runId: "r6" } },
+    });
+    await bridge.settled();
+    const cards = sent.filter((event) => event.type === "approval.request");
+    assert.equal(cards.length, 2);
+    await bridge.onChips({ type: "approval.resolved", approval_id: cards[0]?.["approval_id"], run_id: cards[0]?.["run_id"], decision: "expired" });
+    // The other card's own expiry, an instant later, finds the run over and changes nothing.
+    await bridge.onChips({ type: "approval.resolved", approval_id: cards[1]?.["approval_id"], run_id: cards[1]?.["run_id"], decision: "expired" });
+    await bridge.settled();
+    assert.deepEqual(toClaw(), [["chat.abort", { sessionKey: key(), runId: "r6" }]]);
+    assert.deepEqual(sent.filter((event) => event.type === "message.post").map((event) => event["text"]), [UNANSWERED]);
+    assert.equal(sent.filter((event) => event.type === "run.completed").length, 1);
   });
 
   it("asks for Codex's own command as a card, and answers it as a plugin approval", async () => {

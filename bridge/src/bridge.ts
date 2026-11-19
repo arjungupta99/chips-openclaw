@@ -75,9 +75,12 @@
  *   room, at the container's path. A turn that ends with none other running in its session has
  *   what it changed committed under the agent's name and sent, before its words are posted. The
  *   primary agent and OpenClaw's own work in a folder every room of theirs shares, and have none.
- * - An exec approval becomes an approval card, and the person's answer goes back as allow-once,
- *   allow-always or deny. An `ask_user` question becomes a question card. An ask answered in
- *   OpenClaw's own tools instead is settled in Chips, once, so its card cools (Chips ADR 0079).
+ * - An exec approval becomes an approval card, and the person's answer goes back as allow-once
+ *   or deny: a yes for always too is allow-once while Chips keeps the rule, and allow-always only
+ *   when Chips says OpenClaw keeps it (Chips ADR 0300). An ask that expires with nobody's answer
+ *   is given none: its turn is aborted and the run ends on one line in the room (`UNANSWERED`).
+ *   An `ask_user` question becomes a question card. An ask answered in OpenClaw's own tools
+ *   instead is settled in Chips, once, so its card cools (Chips ADR 0079).
  * - What an agent schedules with OpenClaw's automations is said, when it fires, in the room whose
  *   turn made it, as that room's agent, with an @ for the person who asked (Chips ADR 0157,
  *   `automations.ts`): a job's run as a turn OpenClaw started on its own, its answer with the @, and
@@ -201,6 +204,9 @@ interface Pause {
 
 /** What a session is told when a person resumes the run whose turn a pause stopped (Chips ADR 0293). */
 const CARRY_ON = "You were paused partway through this. Carry on from where you stopped. Nothing you wrote before the pause reached the room, so write your whole reply.";
+
+/** What a run ends on, in the room, when an ask of its expired with nobody's answer. */
+export const UNANSWERED = "Nobody answered, so I stopped. Ask me to carry on.";
 
 interface Run {
   readonly chipsRun: string;
@@ -869,16 +875,15 @@ export class Bridge {
   private readonly early = new Map<string, Payload[]>();
   /**
    * Chips's approval id to OpenClaw's, the method that answers it (an exec approval and a plugin
-   * approval are resolved apart), whether OpenClaw takes allow-always for it, and whether it is a
-   * command. A command's yes for always is OpenClaw's always only when OpenClaw keeps it (Chips
-   * ADR 0300); while Chips keeps it, Chips remembers how each part starts (Chips ADR 0239).
+   * approval are resolved apart), and whether OpenClaw takes allow-always for it. A yes for always
+   * is OpenClaw's always only when OpenClaw keeps it (Chips ADR 0300); while Chips keeps it, Chips
+   * remembers it and answers the next ask itself (Chips ADR 0239).
    */
   private readonly approvals = new Map<
     string,
     {
       readonly id: string;
       readonly takesAlways: boolean;
-      readonly command: boolean;
       readonly method: "exec.approval.resolve" | "plugin.approval.resolve";
       readonly run: Run;
     }
@@ -2640,13 +2645,14 @@ export class Bridge {
     // Forgotten before OpenClaw is told, so its `resolved` event is not taken for an answer there.
     this.approvals.delete(String(event["approval_id"]));
     const decision = str(event["decision"]);
+    if (decision === "expired") return this.unanswered(asked.run);
     const allowed = decision === "approved" || decision === "edited";
     // Chips offers every scope; OpenClaw may take only allow-once for a command (a native Codex
     // command does). A yes for always is then a yes for this once, rather than a refusal that
-    // leaves the turn waiting for an answer that never comes. A command's always is OpenClaw's
-    // only when the harness's Chips's rules are off and Chips says OpenClaw keeps it.
-    const kept = !asked.command || event["keeps"] === "harness";
-    const always = event["scope"] === "always" && asked.takesAlways && kept;
+    // leaves the turn waiting for an answer that never comes. And an always is OpenClaw's only
+    // when the harness's Chips's rules are off and Chips says OpenClaw keeps it: while Chips keeps
+    // the rule, an always OpenClaw kept too would outlive that rule being switched off.
+    const always = event["scope"] === "always" && asked.takesAlways && event["keeps"] === "harness";
     await this.claw.request(asked.method, {
       id: asked.id,
       decision: !allowed ? "deny" : always ? "allow-always" : "allow-once",
@@ -2662,6 +2668,31 @@ export class Bridge {
         idempotency_key: `${event["approval_id"]}-executed`,
       });
     }
+  }
+
+  /**
+   * An ask expired with nobody's answer, so its run ends: the turn is aborted as Stop aborts it,
+   * which lets go of everything it asked, and the run ends on `UNANSWERED` in the room. OpenClaw
+   * is not given a deny. A deny reads as "try another way", and its next try asks again, all night.
+   */
+  private async unanswered(run: Run): Promise<void> {
+    if (run.ended) return;
+    // Ended before the abort, so the turn's `aborted` is not taken for a failure of the run's.
+    run.ended = true;
+    for (const [id, asked] of this.approvals) if (asked.run === run) this.approvals.delete(id);
+    for (const [id, asked] of this.questions) if (asked.run === run) this.questions.delete(id);
+    const turn = run.turn;
+    this.sends.delete(turn);
+    // As any turn cut short, it may not have kept what it was told (Chips ADR 0250).
+    this.rules.forget(run.sessionKey);
+    await this.claw
+      .request("chat.abort", { sessionKey: run.sessionKey, runId: turn })
+      .catch((error: unknown) => this.log(`openclaw: ${run.chipsRun}'s turn not stopped for an ask nobody answered: ${String(error)}`));
+    // What it had named to send belongs to an answer it never gave.
+    run.media.length = 0;
+    run.said = undefined;
+    this.log(`openclaw: ${run.chipsRun} ended on an ask nobody answered`);
+    this.finish(run, turn, { message: UNANSWERED });
   }
 
   private async answered(event: ChipsEvent): Promise<void> {
@@ -3240,7 +3271,6 @@ export class Bridge {
     this.approvals.set(approvalId, {
       id: clawId,
       takesAlways,
-      command: true,
       method: "exec.approval.resolve",
       run,
     });
@@ -3289,7 +3319,6 @@ export class Bridge {
     this.approvals.set(approvalId, {
       id: clawId,
       takesAlways,
-      command: command !== undefined,
       method: "plugin.approval.resolve",
       run,
     });
