@@ -1364,6 +1364,23 @@ describe("supervision", () => {
     assert.equal(sent.at(-1)?.type, "approval.executed");
   });
 
+  it("passes a command's yes for always back as allow-always when OpenClaw keeps it (Chips ADR 0300)", async () => {
+    asked();
+    await bridge.settled();
+    const card = sent.find((event) => event.type === "approval.request");
+    await bridge.onChips({
+      type: "approval.resolved",
+      approval_id: card?.["approval_id"],
+      run_id: card?.["run_id"],
+      decision: "approved",
+      scope: "always",
+      keeps: "harness",
+    });
+    await bridge.settled();
+    // The harness's Chips's rules are off: OpenClaw keeps the always in its own exec policy.
+    assert.deepEqual(calls, [["exec.approval.resolve", { id: "ap-1", decision: "allow-always" }]]);
+  });
+
   it("passes a yes for always back as allow-always for a plugin's ask that is not a command", async () => {
     bridge.onClaw({ event: "chat", payload: { runId: "r10", sessionKey: key(), seq: 1, state: "status" } });
     bridge.onClaw({
@@ -1397,7 +1414,14 @@ describe("supervision", () => {
     });
     await bridge.settled();
     const card = sent.find((event) => event.type === "approval.request");
-    await bridge.onChips({ type: "approval.resolved", approval_id: card?.["approval_id"], decision: "approved", scope: "always" });
+    await bridge.onChips({
+      type: "approval.resolved",
+      approval_id: card?.["approval_id"],
+      decision: "approved",
+      scope: "always",
+      keeps: "harness",
+    });
+    // Once, even when OpenClaw keeps it, since it takes no always for this one.
     assert.deepEqual(calls, [["exec.approval.resolve", { id: "ap-2", decision: "allow-once" }]]);
   });
 
@@ -1434,7 +1458,7 @@ describe("supervision", () => {
     assert.equal(card?.["question"], "Run `ls -la`?");
     assert.equal(card?.["effect"], undefined);
     await bridge.onChips({ type: "approval.resolved", approval_id: card?.["approval_id"], decision: "approved", scope: "always" });
-    // A command: Codex's own always is not given (Chips ADR 0239).
+    // A command: Codex's own always is not given while Chips keeps it (Chips ADR 0239).
     assert.deepEqual(calls, [["plugin.approval.resolve", { id: "plugin:ap-3", decision: "allow-once" }]]);
   });
 
