@@ -19,12 +19,29 @@ export interface OwnEntry {
   readonly raw?: string | undefined;
 }
 
-/** The copy, as Chips's `ownRules` has it (SDK 1.0.10's `OwnRules`). */
+/** A mode a person may pick in Chips for its sessions, as Chips's `ownMode` has it (Chips ADR 0300). */
+export interface OwnMode {
+  readonly id: string;
+  readonly name: string;
+  readonly words?: string | undefined;
+  readonly everything?: true | undefined;
+}
+
+/** The modes a person may pick, the one its sessions start in, and the one they run in. */
+export interface OwnModes {
+  readonly base: string;
+  readonly running?: string | undefined;
+  readonly offers: readonly OwnMode[];
+}
+
+/** The copy, as Chips's `ownRules` has it (SDK 1.0.11's `OwnRules`). */
 export interface OwnRules {
   readonly read_from: string[];
   readonly note?: string | undefined;
   readonly mode?: string | undefined;
   readonly everything?: boolean | undefined;
+  /** The modes a person may pick in Chips (Chips ADR 0300), as `modes.ts` writes them. */
+  readonly modes?: OwnModes | undefined;
   readonly runs: OwnEntry[];
   readonly asks?: OwnEntry[] | undefined;
   readonly refuses?: OwnEntry[] | undefined;
@@ -49,19 +66,26 @@ const at = (value: unknown, ...path: string[]): unknown =>
   path.reduce<unknown>((into, key) => (isRecord(into) ? into[key] : undefined), value);
 const clip = (text: string, most: number) => (text.length > most ? text.slice(0, most) : text);
 
-/** How commands go, as one word: each runs, those on the allowlist run, each asks, or none runs. */
-export type ExecWay = "full" | "allowlist" | "ask" | "deny";
+/**
+ * How commands go, as one word: each runs, those on the allowlist run, each asks, OpenClaw's own
+ * reviewer judges those off the allowlist (`auto`), or none runs.
+ */
+export type ExecWay = "full" | "allowlist" | "ask" | "auto" | "deny";
+
+const EXEC_WAYS: readonly ExecWay[] = ["full", "allowlist", "ask", "auto", "deny"];
+const isExecWay = (value: string | undefined): value is ExecWay => EXEC_WAYS.some((way) => way === value);
 
 /**
  * How OpenClaw's exec tool treats a command: `tools.exec.mode` where its config says one; else its
  * `security` and `ask`, from the config, else the exec approvals' defaults. `ask: always` asks
- * whatever the allowlist says.
+ * whatever the allowlist says. `auto` runs what is on the allowlist and has OpenClaw's own reviewer
+ * judge the rest, which asks a person only about one it can't clear.
  */
 export function execWay(policy: ClawPolicy): ExecWay {
   const exec = at(policy.config, "tools", "exec");
   const defaults = at(policy.approvals?.file, "defaults");
   const mode = str(at(exec, "mode"));
-  if (mode === "full" || mode === "allowlist" || mode === "ask" || mode === "deny") return mode;
+  if (isExecWay(mode)) return mode;
   const security = str(at(exec, "security")) ?? str(at(defaults, "security")) ?? "allowlist";
   const ask = str(at(exec, "ask")) ?? str(at(defaults, "ask")) ?? "on-miss";
   if (security === "deny") return "deny";
@@ -115,7 +139,23 @@ function codexPolicy(config: Payload | undefined): { readonly policy: string; re
   return { policy: str(at(server, "approvalPolicy")) ?? "on-request", sandbox: str(at(server, "sandbox")) };
 }
 
-const WAY_NAMES: Readonly<Record<ExecWay, string>> = { full: "Full", allowlist: "Allowlist", ask: "Ask", deny: "Deny" };
+const WAY_NAMES: Readonly<Record<ExecWay, string>> = { full: "Full", allowlist: "Allowlist", ask: "Ask", auto: "Auto", deny: "Deny" };
+
+const SETTINGS_WORDS: Readonly<Record<ExecWay, string>> = {
+  full: "Yours run every command without asking.",
+  allowlist: "Yours run commands on its allowlist and ask before the rest.",
+  ask: "Yours ask before every command.",
+  auto: "Yours run commands on its allowlist, and OpenClaw asks about the rest only when one looks risky.",
+  deny: "Yours run no commands.",
+};
+
+/**
+ * What its settings say of commands, in a few words after "Runs as its settings say." on the Mode
+ * picker's Default (Chips ADR 0300): "Yours ask before every command."
+ */
+export function settingsWords(policy: ClawPolicy): string {
+  return SETTINGS_WORDS[execWay(policy)];
+}
 
 /** OpenClaw's copy, from what the gateway said of its config and its exec approvals. */
 export function openclawOwnRules(policy: ClawPolicy): OwnRules {
@@ -131,8 +171,14 @@ export function openclawOwnRules(policy: ClawPolicy): OwnRules {
         ? "Commands on its allowlist run without asking; the rest ask."
         : way === "ask"
           ? "Every command asks."
-          : "It runs no commands.",
-    way === "ask" || way === "allowlist" ? (fallbackOf(policy) === "deny" ? "One nobody answers is a no." : undefined) : undefined,
+          : way === "auto"
+            ? "Commands on its allowlist run without asking; OpenClaw judges the rest and asks only about one it finds risky."
+            : "It runs no commands.",
+    way === "ask" || way === "allowlist" || way === "auto"
+      ? fallbackOf(policy) === "deny"
+        ? "One nobody answers is a no."
+        : undefined
+      : undefined,
     codex === undefined
       ? undefined
       : codexRunsAll
@@ -143,7 +189,8 @@ export function openclawOwnRules(policy: ClawPolicy): OwnRules {
   if (way === "full" && (codex === undefined || codexRunsAll)) {
     return { read_from, note: notes.join(" "), mode, everything: true, runs: [] };
   }
-  const runs = way === "full" || codexRunsAll ? [anyCommand] : way === "allowlist" ? allowlisted(policy.approvals?.file) : [];
+  const runs =
+    way === "full" || codexRunsAll ? [anyCommand] : way === "allowlist" || way === "auto" ? allowlisted(policy.approvals?.file) : [];
   return {
     read_from,
     note: notes.join(" "),
@@ -174,7 +221,8 @@ export async function readPolicy(claw: ClawPort): Promise<ClawPolicy> {
 }
 
 /**
- * Send the copy where the connection takes it: SDK 1.0.10's `settings.ownRules`. An older SDK has
+ * Send the copy where the connection takes it: SDK 1.0.10's `settings.ownRules`, which takes the
+ * modes since 1.0.11. An older SDK has
  * no such method and an older Chips refuses it; either way nothing else changes.
  */
 export async function sendOwnRules(settings: unknown, copy: OwnRules): Promise<boolean> {

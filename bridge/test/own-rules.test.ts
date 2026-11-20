@@ -6,7 +6,7 @@
 import { strict as assert } from "node:assert";
 import { describe, it } from "node:test";
 import type { ClawPort } from "../src/bridge.ts";
-import { allowlisted, execWay, openclawOwnRules, readPolicy, sendOwnRules } from "../src/own-rules.ts";
+import { allowlisted, execWay, openclawOwnRules, readPolicy, sendOwnRules, settingsWords } from "../src/own-rules.ts";
 
 /** The rig's config, as `scripts/up.sh` writes it on a first run. */
 const RIG = {
@@ -25,6 +25,23 @@ describe("OpenClaw's exec policy", () => {
     assert.equal(execWay({ config: { tools: { exec: { security: "allowlist", ask: "always" } } } }), "ask");
     assert.equal(execWay({ config: {}, approvals: { file: { version: 1, defaults: { security: "deny" } } } }), "deny");
     assert.equal(execWay({}), "allowlist");
+  });
+
+  it("reads tools.exec.mode auto as OpenClaw's own reviewer, not as the allowlist its security says", () => {
+    assert.equal(execWay({ config: { tools: { exec: { mode: "auto" } } }, approvals: { file: { version: 1, defaults: { security: "allowlist" } } } }), "auto");
+    // A mode it doesn't know is read from its security and ask, as before.
+    assert.equal(execWay({ config: { tools: { exec: { mode: "later", security: "full", ask: "off" } } } }), "full");
+  });
+
+  it("says in a few words what its settings let commands do, for the Mode picker's Default", () => {
+    assert.equal(settingsWords({ config: RIG }), "Yours ask before every command.");
+    assert.equal(settingsWords({ config: { tools: { exec: { mode: "full" } } } }), "Yours run every command without asking.");
+    assert.equal(settingsWords({ config: { tools: { exec: { mode: "deny" } } } }), "Yours run no commands.");
+    assert.equal(settingsWords({}), "Yours run commands on its allowlist and ask before the rest.");
+    assert.equal(
+      settingsWords({ config: { tools: { exec: { mode: "auto" } } } }),
+      "Yours run commands on its allowlist, and OpenClaw asks about the rest only when one looks risky.",
+    );
   });
 
   it("names each program on any agent's allowlist once", () => {
@@ -74,6 +91,19 @@ describe("OpenClaw's copy", () => {
       config: { ...RIG, plugins: { entries: { codex: { enabled: true, config: { appServer: { approvalPolicy: "never" } } } } } },
     });
     assert.deepEqual(never.runs.map((entry) => entry.words), [undefined]);
+  });
+
+  it("says auto runs the allowlist and OpenClaw judges the rest", () => {
+    const auto = openclawOwnRules({
+      config: { tools: { exec: { mode: "auto" } } },
+      approvals: { file: { version: 1, agents: { main: { allowlist: [{ pattern: "/usr/bin/git" }] } } } },
+    });
+    assert.equal(auto.mode, "Auto");
+    assert.deepEqual(auto.runs.map((entry) => entry.words), [["git"]]);
+    assert.equal(
+      auto.note,
+      "Commands on its allowlist run without asking; OpenClaw judges the rest and asks only about one it finds risky. One nobody answers is a no.",
+    );
   });
 });
 
