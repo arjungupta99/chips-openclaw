@@ -82,6 +82,15 @@ and their allowlist, from `config.get` and `exec.approvals.get`) and, when the C
 its turns, Codex's approval policy. It reads them and never writes them. Needs Chips SDK 1.0.10;
 on an older one nothing is sent.
 
+A person can pick another mode for a while on OpenClaw's settings page in Chips (Chips ADR 0300):
+Read only, Ask me, Auto-review or Full access, OpenClaw's own session modes (`permissionMode`
+`read-only`, `guarded`, `workspace` and `full`), or Default, which is what its settings say. The
+bridge puts each of its own sessions in a space into the pick with `sessions.patch`, opens new
+ones in it, and sends `null` when the time is up. Home (`agent:<agent>:main`), your own
+conversation on every channel, is never changed. An ask still open when a session's mode changes
+is told no and its card ends. A run that refuses the change keeps its mode, and the bridge logs
+why and tries again when the run ends. Needs Chips SDK 1.0.11; on an older one nothing changes.
+
 Joined, `npm run keep` writes a launch agent (`~/Library/LaunchAgents/chat.chips.openclaw.plist`;
 a systemd user unit on Linux) that runs the bridge from login and again whenever it stops, and
 ends; the kept copy says hello in its room once, which the card waits for. `npm run keep -- --stop`
