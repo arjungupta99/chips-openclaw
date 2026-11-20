@@ -81,6 +81,11 @@
  *   is given none: its turn is aborted and the run ends on one line in the room (`UNANSWERED`).
  *   An `ask_user` question becomes a question card. An ask answered in OpenClaw's own tools
  *   instead is settled in Chips, once, so its card cools (Chips ADR 0079).
+ * - Each of the bridge's own sessions in a room runs in the mode a person picks in Chips while it
+ *   holds, and as OpenClaw's settings say otherwise (Chips ADR 0300, `modes.ts`): each one open is
+ *   patched when the pick changes or its time is up, and each new one opens in it. Home, where the
+ *   Main agent speaks, is the person's own conversation on every channel, and keeps its own mode.
+ *   OpenClaw cancels a session's asks still open when its mode changes, so their cards end.
  * - What an agent schedules with OpenClaw's automations is said, when it fires, in the room whose
  *   turn made it, as that room's agent, with an @ for the person who asked (Chips ADR 0157,
  *   `automations.ts`): a job's run as a turn OpenClaw started on its own, its answer with the @, and
@@ -106,6 +111,7 @@ import { isMadeAgent, madeAgentId, type Workspaces } from "./own-agents.ts";
 import type { Projects } from "./project.ts";
 import { filesLine, namedIn, ROOM_FILES, type RoomFile, roomFilesIn, sendingFiles, STALE_FILE, staleIn } from "./room-files.ts";
 import { Automations, committedOf, forPerson, jobOf, jobOfSession, type Person, SPEAKING_LATER } from "./automations.ts";
+import { type ClawMode, type Modes, modeNameOf } from "./modes.ts";
 
 /** What the bridge needs of Chips; the `Chips` client, or a stand-in in the tests. */
 export interface ChipsPort {
@@ -923,6 +929,8 @@ export class Bridge {
   private primary: string;
   /** The key the Main agent is registered under in Chips, once it is seated (`seatMain`). */
   private seatedKey: string | undefined;
+  /** Its sessions put in the mode in force (Chips ADR 0300), one pass after another. */
+  private remodes: Promise<void> = Promise.resolve();
 
   constructor(
     private readonly chips: ChipsPort,
@@ -951,6 +959,8 @@ export class Bridge {
     private readonly projects?: Projects,
     /** OpenClaw's own jobs in Chips (ADR 0252); none, and nothing is sent or switched. */
     private readonly jobs?: Jobs,
+    /** The mode a person picks in Chips for its sessions (Chips ADR 0300); none, and no session is moved. */
+    private readonly modes?: Modes,
   ) {
     this.primary = self.agent;
   }
@@ -1012,6 +1022,15 @@ export class Bridge {
   /** The session one of ours speaks in, by its key: the key's own, and Home for the Main agent. */
   private sessionOfKey(key: string): string {
     return this.isMain(key) ? this.homeKey() : key;
+  }
+
+  /**
+   * Whether a session is one of the bridge's own in a Chips room (`agent:<agent>:chips-<room>`),
+   * which runs in the mode a person picks in Chips (Chips ADR 0300). Home is the person's own
+   * conversation on every channel, and never one of them.
+   */
+  private ownSession(sessionKey: string): boolean {
+    return sessionKey !== this.homeKey() && this.spaceFor(sessionKey) !== undefined;
   }
 
   /** Which of ours a session is: the one keyed by it, and the Main agent for Home. */
@@ -1442,6 +1461,9 @@ export class Bridge {
     try {
       await this.claw.request("agents.delete", { agentId: agent, deleteFiles: true });
       await this.workspaces.clear(agent);
+      // Its sessions went with it: none is put in a mode again.
+      for (const key of [...this.sessions]) if (this.agentFor(key) === agent) this.sessions.delete(key);
+      this.modes?.forgetAgent(agent);
       this.log(`openclaw: deleted agent ${agent}`);
     } catch (error) {
       this.log(`openclaw: could not delete agent ${agent}: ${String(error)}`);
@@ -2475,16 +2497,121 @@ export class Bridge {
    * The session for a room, made the first time. Making it again with the same key adopts it and
    * changes nothing, so the key is its identity; no idempotency key is sent, because OpenClaw
    * refuses one reused with other parameters (a later room's words as the name, after a restart).
+   * Then it is put in the mode in force (Chips ADR 0300), where it is in another.
    */
   private async ensureSession(key: string, firstWords: string, agent: string): Promise<void> {
-    if (this.sessions.has(key)) return;
-    this.rules.forget(key);
-    await this.claw.request("sessions.create", {
-      key,
-      agentId: agent,
-      displayName: titleFrom(firstWords),
-    });
-    this.sessions.add(key);
+    if (!this.sessions.has(key)) {
+      this.rules.forget(key);
+      await this.openSession({ key, agentId: agent, displayName: titleFrom(firstWords) });
+      this.sessions.add(key);
+    }
+    await this.inMode(key);
+  }
+
+  /**
+   * `sessions.create`. One of the bridge's own opens in the mode a person picked in Chips while it
+   * holds (Chips ADR 0300); one OpenClaw won't open in it opens as its settings say, and is put in
+   * it as any other session is, or keeps its mode, which is logged.
+   */
+  private async openSession(made: Payload): Promise<void> {
+    const key = String(made["key"]);
+    const modes = this.ownSession(key) ? this.modes : undefined;
+    const mode: ClawMode | undefined = modes?.opening().permissionMode;
+    if (modes === undefined || mode === undefined) {
+      const answer = await this.claw.request("sessions.create", made);
+      modes?.opened(key, answer, null);
+      return;
+    }
+    let answer: unknown;
+    try {
+      answer = await this.claw.request("sessions.create", { ...made, permissionMode: mode });
+    } catch (error) {
+      this.log(`openclaw: ${key} opens as its settings say, not in ${modeNameOf(mode)}: ${String(error)}`);
+      modes.opened(key, await this.claw.request("sessions.create", made), null);
+      return;
+    }
+    modes.opened(key, answer, mode);
+  }
+
+  // ------------------------------------------------------------------ the mode a person picks
+
+  /**
+   * The mode a person picked in Chips, at start (Chips ADR 0300): what OpenClaw's settings say,
+   * read for the copy, its own sessions OpenClaw keeps, listed with the mode each is in, and each
+   * put in the mode in force. A session a pick left in its mode while the bridge was away goes back.
+   */
+  async startModes(): Promise<void> {
+    if (this.modes === undefined) return;
+    await this.modes.readPolicy();
+    await this.modes.readSessions((key) => this.ownSession(key));
+    await this.remode("start");
+  }
+
+  /** A person picked a mode in Chips, put it back, or its time is up (SDK 1.0.11's `mode` event). */
+  onModeChange(): void {
+    this.remode("change").catch((error: unknown) => this.log(`openclaw: its sessions not put in their mode: ${String(error)}`));
+  }
+
+  /** Every session of its own into the mode in force, one pass after another; one line says how it went. */
+  private remode(at: "start" | "change"): Promise<void> {
+    const done = this.remodes.then(() => this.remodeNow(at));
+    this.remodes = done.catch(() => undefined);
+    return done;
+  }
+
+  private async remodeNow(at: "start" | "change"): Promise<void> {
+    const modes = this.modes;
+    if (modes === undefined) return;
+    const keys = [...new Set([...this.sessions, ...modes.known()])].filter((key) => this.ownSession(key));
+    let moved = 0;
+    let kept = 0;
+    for (const key of keys) {
+      const put = await modes.put(key);
+      if (put === "moved") this.cancelledAsks(key);
+      if (put === "moved" || put === "set") moved += 1;
+      if (put === "kept") kept += 1;
+    }
+    const target = modes.inForce();
+    const until = target === null ? undefined : modes.picked?.until;
+    const which = target === null && at === "change" ? "back to Default" : `${modeNameOf(target)}${until === undefined ? "" : ` until ${until}`}`;
+    const sessions = `${moved} ${moved === 1 ? "session" : "sessions"} moved${kept === 0 ? "" : `, ${kept} kept their own`}`;
+    this.log(`openclaw: mode ${at === "start" ? "at start" : "from Chips"}, ${which}: ${sessions}`);
+    await modes.send();
+  }
+
+  /**
+   * One session of its own into the mode in force, where it is in another: its asks still open are
+   * cancelled by OpenClaw when it moves, so their cards end. The copy says the mode it runs in.
+   */
+  private async inMode(key: string): Promise<void> {
+    if (this.modes === undefined || !this.ownSession(key)) return;
+    const put = await this.modes.put(key);
+    if (put === "same") return;
+    if (put === "moved") this.cancelledAsks(key);
+    await this.modes.send();
+  }
+
+  /**
+   * The cards of a session's asks still open, ended: OpenClaw cancels them when the session's mode
+   * changes (Chips ADR 0300), so no answer would reach it. Settled as an ask answered in OpenClaw's
+   * own tools is, and a paused run whose last open ask that was is stopped, as then.
+   */
+  private cancelledAsks(sessionKey: string): void {
+    const name = modeNameOf(this.modes?.inForce() ?? null);
+    for (const [approvalId, asked] of [...this.approvals]) {
+      if (asked.run.sessionKey !== sessionKey) continue;
+      this.approvals.delete(approvalId);
+      this.write(asked.run, {
+        type: "approval.resolved",
+        run_id: asked.run.chipsRun,
+        approval_id: approvalId,
+        decision: "denied",
+        scope: "once",
+        reason: `OpenClaw cancelled it when its mode changed to ${name}.`,
+        idempotency_key: `openclaw-approval:${asked.id}:cancelled`,
+      });
+      this.stopIfPaused(asked.run);
+    }
   }
 
   /** A message's photos and files, fetched from their signed URLs and sent inline. */
@@ -2977,6 +3104,12 @@ export class Bridge {
 
   private finish(run: Run, clawRun: string, p: Payload): void {
     run.ended = true;
+    // A session whose run refused the mode a person picked in Chips is put in it again (Chips ADR 0300).
+    if (this.modes?.keeps(run.sessionKey) === true) {
+      this.remodes = this.remodes
+        .then(() => this.inMode(run.sessionKey))
+        .catch((error: unknown) => this.log(`openclaw: ${run.sessionKey} not put in its mode: ${String(error)}`));
+    }
     // A turn may have changed the files its agent is built from (its memory, its soul): the copy
     // in Chips is read again, and sent if it moved (Chips ADR 0134).
     const agentId = this.agentOfSession(run.sessionKey);
@@ -3585,6 +3718,7 @@ export class Bridge {
     await this.checkIns;
     await this.windows?.settled();
     await this.jobs?.settled();
+    await this.remodes;
   }
 }
 

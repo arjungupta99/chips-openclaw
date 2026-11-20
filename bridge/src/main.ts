@@ -32,7 +32,7 @@ import { readMedia } from "./media.ts";
 import { workspacesIn } from "./own-agents.ts";
 import { projectsIn } from "./project.ts";
 import { OpenClaw } from "./openclaw.ts";
-import { openclawOwnRules, readPolicy } from "./own-rules.ts";
+import { Modes } from "./modes.ts";
 import { keepIfAsked, stopIfAsked } from "./keep.ts";
 import { type Restarter, restarter } from "./restart.ts";
 
@@ -82,6 +82,8 @@ const chips = new Chips({
   stateDir: config.stateDir,
   log,
   onRestart: (ask) => void restart?.restart(ask),
+  // A mode a person picked in Chips for OpenClaw's sessions, or its end (Chips ADR 0300).
+  onMode: () => bridge?.onModeChange(),
   settings: {
     context: async (edit) => (await active().onContextEdit({ ...edit })) as unknown as AgentContextCopy,
     models: async (change) => (await active().onModelChange({ ...change })) as unknown as AgentModelCopy,
@@ -212,6 +214,8 @@ bridge = new Bridge(
   git.ok ? projectsIn(roots, { url: config.chipsUrl, token: config.harnessToken }, log) : undefined,
   // What OpenClaw runs on its own, outside the rooms, and what each run cost (Chips ADR 0252).
   new Jobs(claw, { put: (copy) => chips.putJobs(copy), runs: (runs) => chips.postJobRuns(runs) }, () => active().ours(), log),
+  // The mode a person picks in Chips for its sessions, and what its settings let through (Chips ADRs 0299, 0300).
+  new Modes(claw, chips, log),
 );
 
 /**
@@ -288,10 +292,9 @@ async function main(): Promise<void> {
   await active.sendWindows();
   // What OpenClaw runs on its own, and its runs of the last week, not waited for (Chips ADR 0252).
   void active.sendJobs().catch((error: unknown) => log(`chips: OpenClaw's own jobs not sent: ${String(error)}`));
-  // What its own exec policy lets through without asking, for its Permissions page (Chips ADR 0299).
-  void readPolicy(claw)
-    .then((policy) => (policy.config === undefined && policy.approvals === undefined ? false : chips.putOwnRules(openclawOwnRules(policy))))
-    .catch((error: unknown) => log(`openclaw: its exec policy not read: ${String(error)}`));
+  // What its own exec policy lets through without asking, for its Permissions page (Chips ADR 0299),
+  // and its own sessions in the mode a person picked in Chips, with the modes they may pick (ADR 0300).
+  void active.startModes().catch((error: unknown) => log(`openclaw: its exec policy or its sessions' mode not read: ${String(error)}`));
   await catchUp(active);
   chips.stream((event) => active.onChips(event));
   // Its first words in the room it joined, once: the card that followed its link waits for them.

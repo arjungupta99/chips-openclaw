@@ -35,6 +35,8 @@ import { workspacesIn } from "../src/own-agents.ts";
 import { projectsIn } from "../src/project.ts";
 import { type FakeChips, startFakeChips } from "@chipschat/conformance";
 import { connect } from "@chipschat/harness";
+import { HOME_NOTE, Modes } from "../src/modes.ts";
+import type { OwnRules } from "../src/own-rules.ts";
 
 /**
  * A turn's words as a room sends them: behind how a file reaches the room (Chips AW-19) and how to
@@ -98,6 +100,15 @@ let listLag = 0;
  */
 let clawSessions = new Map<string, { agentId: string; messages: Record<string, unknown>[] }>();
 let runningIn = new Set<string>();
+/**
+ * For the mode a person picks (Chips ADR 0300): OpenClaw's config as `config.get` answers it, the
+ * sessions `sessions.list` names, why a session's `sessions.patch` is refused, and whether
+ * `sessions.create` refuses a mode, as for an active CLI-backed run.
+ */
+let clawConfig: Record<string, unknown> | undefined;
+let clawRows: Record<string, unknown>[] = [];
+let refusePatch: ((key: string) => string | undefined) | undefined;
+let refuseCreateMode = false;
 let bridge: Bridge;
 
 /** A history up to its last answer, as OpenClaw's `last-completed` fork copies it. */
@@ -230,7 +241,16 @@ const claw: ClawPort = {
       if (history instanceof Error) throw history;
       return { sessionKey: params["sessionKey"], messages: history } as T;
     }
-    if (method === "sessions.create") return clawSession(params) as T;
+    if (method === "sessions.create") {
+      if (refuseCreateMode && params["permissionMode"] !== undefined) throw new Error("permission mode refused for a CLI-backed run");
+      return clawSession(params) as T;
+    }
+    if (method === "sessions.patch") {
+      const why = refusePatch?.(String(params["key"]));
+      if (why !== undefined) throw new Error(why);
+    }
+    if (method === "sessions.list") return { sessions: clawRows } as T;
+    if (method === "config.get" && clawConfig !== undefined) return { config: clawConfig, path: "/home/node/.openclaw/openclaw.json" } as T;
     if (method === "chat.abort") return { ok: true, aborted: !nothingToAbort, runIds: nothingToAbort ? [] : [params["runId"]] } as T;
     if (method === "chat.send") {
       clawSessions.get(String(params["sessionKey"]))?.messages.push({ role: "user", content: params["message"] });
@@ -271,6 +291,10 @@ beforeEach(() => {
   pending = undefined;
   clawSessions = new Map();
   runningIn = new Set();
+  clawConfig = undefined;
+  clawRows = [];
+  refusePatch = undefined;
+  refuseCreateMode = false;
   bridge = new Bridge(chips, claw, { harnessId: ME, agent: "main" }, () => undefined);
 });
 
@@ -3466,5 +3490,159 @@ describe("automations answer in the room they were asked in (Chips ADR 0157)", (
     // An isolated job's announce has no route here: OpenClaw would keep it disabled after it ran.
     assert.match(SPEAKING_LATER, /"isolated" with delivery \{mode: "none"\}/);
     assert.match(SPEAKING_LATER, /without one is read as UTC/);
+  });
+});
+
+describe("the mode a person picks in Chips (Chips ADR 0300)", () => {
+  const R1 = "msg_01K4ZQPX0000000000000000A1";
+  const UNTIL = "2026-11-19T18:41:00.000Z";
+  let picked: { id: string; until?: string } | undefined;
+  let copies: OwnRules[] = [];
+  let logged: string[] = [];
+  const patches = (): Record<string, unknown>[] => calls.filter(([method]) => method === "sessions.patch").map(([, params]) => params);
+  const creates = (): Record<string, unknown>[] => calls.filter(([method]) => method === "sessions.create").map(([, params]) => params);
+  const chat = (runId: string, state: string, extra: Record<string, unknown> = {}): void =>
+    bridge.onClaw({ event: "chat", payload: { runId, sessionKey: key(), seq: 1, state, ...extra } });
+
+  beforeEach(() => {
+    picked = undefined;
+    copies = [];
+    logged = [];
+    const modes = new Modes(
+      claw,
+      {
+        get mode() {
+          return picked;
+        },
+        putOwnRules: async (copy) => {
+          copies.push(copy);
+          return true;
+        },
+      },
+      (line) => logged.push(line),
+    );
+    const log = (line: string): void => void logged.push(line);
+    bridge = new Bridge(chips, claw, { harnessId: ME, agent: "main" }, log, undefined, Date.now, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, modes);
+  });
+
+  it("opens a room's session in the pick while it holds, with nothing more to patch", async () => {
+    picked = { id: "full", until: UNTIL };
+    await bridge.onChips(said("What can you do?"));
+    assert.deepEqual(calls.map(([method]) => method), ["sessions.create", "chat.send"]);
+    assert.deepEqual(creates(), [{ key: key(), agentId: "main", displayName: "What can you do?", permissionMode: "full" }]);
+  });
+
+  it("opens one as its settings say while nothing is picked, and sends no mode", async () => {
+    await bridge.onChips(said("What can you do?"));
+    assert.deepEqual(calls.map(([method]) => method), ["sessions.create", "chat.send"]);
+    assert.equal("permissionMode" in (creates()[0] ?? {}), false);
+  });
+
+  it("puts each of its own sessions in the pick when it changes and back when its time is up, and leaves Home as it is", async () => {
+    await bridge.adoptAgents({ defaultId: "main", agents: [{ id: "main" }] });
+    const main = "agt_agent:main:chips-main";
+    await bridge.onChips(said("Which channels are set up?", { space_id: MAIN_ROOM, addressed_to: [main], for: [main], message_id: "msg_01K4ZQPX0000000000000000A3" }));
+    await bridge.onChips(said("What can you do?"));
+    // The Main agent speaks in Home, opened with no mode however it is picked.
+    assert.deepEqual(creates().map((params) => [params["key"], params["permissionMode"]]), [["agent:main:main", undefined], [key(), undefined]]);
+    calls = [];
+    picked = { id: "guarded", until: UNTIL };
+    bridge.onModeChange();
+    await bridge.settled();
+    picked = undefined;
+    bridge.onModeChange();
+    await bridge.settled();
+    assert.deepEqual(patches(), [
+      { key: key(), permissionMode: "guarded" },
+      { key: key(), permissionMode: null },
+    ]);
+    // A message for the Main agent while a pick holds still leaves Home's mode alone.
+    picked = { id: "full" };
+    calls = [];
+    await bridge.onChips(said("And now?", { space_id: MAIN_ROOM, addressed_to: [main], for: [main], message_id: "msg_01K4ZQPX0000000000000000A4" }));
+    assert.deepEqual(calls.map(([method]) => method), ["chat.send"]);
+    assert.deepEqual(
+      logged.filter((line) => line.includes("mode from Chips")),
+      [`openclaw: mode from Chips, Ask me until ${UNTIL}: 1 session moved`, "openclaw: mode from Chips, back to Default: 1 session moved"],
+    );
+  });
+
+  it("ends the cards of a session's asks still open when its mode changes, since OpenClaw cancels them", async () => {
+    await bridge.onChips(said("List the files"));
+    chat(R1, "status");
+    bridge.onClaw({ event: "exec.approval.requested", payload: { id: "ap-1", request: { command: "ls -la", sessionKey: key(), runId: R1 } } });
+    await bridge.settled();
+    const card = sent.find((event) => event.type === "approval.request");
+    picked = { id: "full" };
+    bridge.onModeChange();
+    await bridge.settled();
+    const ended = sent.find((event) => event.type === "approval.resolved");
+    assert.deepEqual(
+      { ...ended, actor: undefined },
+      {
+        type: "approval.resolved",
+        run_id: card?.["run_id"],
+        approval_id: card?.["approval_id"],
+        decision: "denied",
+        scope: "once",
+        reason: "OpenClaw cancelled it when its mode changed to Full access.",
+        idempotency_key: "openclaw-approval:ap-1:cancelled",
+        actor: undefined,
+      },
+    );
+    // An answer given after it reaches OpenClaw no more: the ask is gone there.
+    calls = [];
+    await bridge.onChips({ type: "approval.resolved", approval_id: card?.["approval_id"], run_id: card?.["run_id"], decision: "approved", scope: "once" });
+    assert.deepEqual(calls, []);
+  });
+
+  it("keeps the mode of a session whose run refuses the change, logs why, says it runs in it, and tries again once the run ends", async () => {
+    clawConfig = { tools: { exec: { mode: "ask" } } };
+    await bridge.startModes();
+    await bridge.onChips(said("Plan the weekend"));
+    chat(R1, "status");
+    refusePatch = () => "active CLI-backed runs do not support live permission changes";
+    picked = { id: "full", until: UNTIL };
+    bridge.onModeChange();
+    await bridge.settled();
+    assert.ok(logged.includes(`openclaw: ${key()} keeps Default, not Full access: Error: active CLI-backed runs do not support live permission changes`));
+    assert.ok(logged.includes(`openclaw: mode from Chips, Full access until ${UNTIL}: 0 sessions moved, 1 kept their own`));
+    assert.equal(copies.at(-1)?.modes?.running, "default");
+    assert.equal(copies.at(-1)?.everything, undefined);
+    refusePatch = undefined;
+    chat(R1, "final", { message: "Saturday it is." });
+    await bridge.settled();
+    assert.deepEqual(patches().at(-1), { key: key(), permissionMode: "full" });
+    assert.equal(copies.at(-1)?.modes?.running, "full");
+    assert.equal(copies.at(-1)?.everything, true);
+  });
+
+  it("at start, puts back a session a pick left in its mode while it was away, and sends the modes with Default's line", async () => {
+    clawConfig = { tools: { exec: { mode: "ask" } } };
+    clawRows = [
+      { key: key(), kind: "direct", permissionMode: "full" },
+      { key: "agent:main:main", kind: "direct", permissionMode: "full" },
+      { key: bridge.claimKeyFor(ROOM), kind: "direct" },
+      { key: "agent:main:cron:nightly", kind: "direct", permissionMode: "guarded" },
+    ];
+    await bridge.startModes();
+    assert.deepEqual(patches(), [{ key: key(), permissionMode: null }]);
+    assert.ok(logged.includes("openclaw: mode at start, Default: 1 session moved"));
+    const copy = copies.at(-1);
+    assert.equal(copy?.mode, "Default");
+    assert.equal(copy?.note, `Every command asks. One nobody answers is a no. ${HOME_NOTE}`);
+    assert.deepEqual(copy?.modes?.offers[0], { id: "default", name: "Default", words: "Runs as its settings say. Yours ask before every command." });
+    assert.deepEqual(copy?.modes?.offers.map((offer) => offer.id), ["default", "read-only", "guarded", "workspace", "full"]);
+  });
+
+  it("opens a session as its settings say where OpenClaw won't open it in the pick, and says so", async () => {
+    refuseCreateMode = true;
+    refusePatch = () => "active CLI-backed runs do not support live permission changes";
+    picked = { id: "workspace" };
+    await bridge.onChips(said("What can you do?"));
+    assert.deepEqual(creates().map((params) => params["permissionMode"]), ["workspace", undefined]);
+    assert.deepEqual(patches(), [{ key: key(), permissionMode: "workspace" }]);
+    assert.equal(calls.at(-1)?.[0], "chat.send");
+    assert.ok(logged.includes(`openclaw: ${key()} opens as its settings say, not in Auto-review: Error: permission mode refused for a CLI-backed run`));
   });
 });
