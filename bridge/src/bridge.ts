@@ -2592,22 +2592,27 @@ export class Bridge {
   }
 
   /**
-   * The cards of a session's asks still open, ended: OpenClaw cancels them when the session's mode
-   * changes (Chips ADR 0300), so no answer would reach it. Settled as an ask answered in OpenClaw's
-   * own tools is, and a paused run whose last open ask that was is stopped, as then.
+   * The cards of a session's asks still open, ended when the session's mode changes (Chips ADR
+   * 0300). OpenClaw's docs say it cancels them then; it is told no as well, so an ask it kept doesn't
+   * leave the turn waiting with no card, and a no to one it cancelled is refused there and changes
+   * nothing. Settled as an ask answered in OpenClaw's own tools is, and a paused run whose last open
+   * ask that was is stopped, as then.
    */
   private cancelledAsks(sessionKey: string): void {
     const name = modeNameOf(this.modes?.inForce() ?? null);
     for (const [approvalId, asked] of [...this.approvals]) {
       if (asked.run.sessionKey !== sessionKey) continue;
       this.approvals.delete(approvalId);
+      this.claw
+        .request(asked.method, { id: asked.id, decision: "deny" })
+        .catch((error: unknown) => this.log(`openclaw: ask ${asked.id} not told no after its mode changed: ${String(error)}`));
       this.write(asked.run, {
         type: "approval.resolved",
         run_id: asked.run.chipsRun,
         approval_id: approvalId,
         decision: "denied",
         scope: "once",
-        reason: `OpenClaw cancelled it when its mode changed to ${name}.`,
+        reason: `Ended when its mode changed to ${name}.`,
         idempotency_key: `openclaw-approval:${asked.id}:cancelled`,
       });
       this.stopIfPaused(asked.run);

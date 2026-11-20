@@ -3567,7 +3567,7 @@ describe("the mode a person picks in Chips (Chips ADR 0300)", () => {
     );
   });
 
-  it("ends the cards of a session's asks still open when its mode changes, since OpenClaw cancels them", async () => {
+  it("ends the cards of a session's asks still open when its mode changes, and tells OpenClaw no", async () => {
     await bridge.onChips(said("List the files"));
     chat(R1, "status");
     bridge.onClaw({ event: "exec.approval.requested", payload: { id: "ap-1", request: { command: "ls -la", sessionKey: key(), runId: R1 } } });
@@ -3585,10 +3585,15 @@ describe("the mode a person picks in Chips (Chips ADR 0300)", () => {
         approval_id: card?.["approval_id"],
         decision: "denied",
         scope: "once",
-        reason: "OpenClaw cancelled it when its mode changed to Full access.",
+        reason: "Ended when its mode changed to Full access.",
         idempotency_key: "openclaw-approval:ap-1:cancelled",
         actor: undefined,
       },
+    );
+    // OpenClaw is told no too, in case it kept the ask.
+    assert.deepEqual(
+      calls.filter(([method]) => method === "exec.approval.resolve").map(([, params]) => params),
+      [{ id: "ap-1", decision: "deny" }],
     );
     // An answer given after it reaches OpenClaw no more: the ask is gone there.
     calls = [];
