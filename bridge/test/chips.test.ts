@@ -154,6 +154,34 @@ describe("the routes, as the bridge reads them", () => {
     assert.equal((await chips.agents()).find((each) => each.agent_id === copy.agent_id)?.room, room);
   });
 
+  it("hands over the mode a person picks for OpenClaw's sessions, and says each change (Chips ADR 0300)", async () => {
+    let changes = 0;
+    const chips = new Chips({
+      url: fake.address.url,
+      harnessId: fake.address.harnessId,
+      token: fake.address.token,
+      stateDir,
+      log: () => undefined,
+      onMode: () => {
+        changes += 1;
+      },
+    });
+    opened.push(chips);
+    await chips.open();
+    chips.stream(async () => undefined);
+    const before = chips.mode;
+    assert.equal(before, undefined);
+    await fake.asOwner({
+      type: "policy.updated",
+      harness_id: fake.address.harnessId,
+      policy: { autonomy: 1, rules: [], mode: { id: "full", name: "Full access", everything: true, until: "2099-01-01T00:00:00.000Z" } },
+      workspace_max_autonomy: 3,
+    });
+    for (let waited = 0; changes === 0 && waited < 5_000; waited += 20) await new Promise((done) => setTimeout(done, 20));
+    assert.equal(changes, 1);
+    assert.equal(chips.mode?.id, "full");
+  });
+
   it("uploads a file and hands back the id a post names", async () => {
     const chips = await open();
     const id = await chips.upload("notes.md", Buffer.from("# Notes\n"));

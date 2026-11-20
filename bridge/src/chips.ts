@@ -21,7 +21,7 @@ import {
   RefusedError,
   type SettingsHandlers,
 } from "@chipschat/harness";
-import type { JobRun } from "@chipschat/protocol";
+import type { JobRun, PolicyMode } from "@chipschat/protocol";
 import { type OwnRules, sendOwnRules } from "./own-rules.ts";
 import { VERSION } from "./version.js";
 
@@ -46,6 +46,11 @@ export interface ChipsOptions {
   readonly log: (message: string) => void;
   /** A person asked OpenClaw to restart, from its page in Chips (Chips ADR 0094). */
   readonly onRestart?: (ask: { readonly askedBy: string; readonly askedAt: string }) => void;
+  /**
+   * The mode a person picked in Chips for OpenClaw's sessions changed, or its time ran out (Chips
+   * ADR 0300): SDK 1.0.11's `mode` event, said once things settle. `mode` holds the pick.
+   */
+  readonly onMode?: () => void;
   /**
    * A person's changes from an agent's page (Chips ADRs 0134, 0140, 0143, 0146): each made in
    * OpenClaw, and answered with the copy as it is now, or refused by throwing.
@@ -144,6 +149,8 @@ export class Chips {
     }
     this.connection.on("state", (state) => this.options.log(`chips: ${state}`));
     this.connection.on("event", (event) => this.take(event as unknown as ChipsEvent));
+    const onMode = this.options.onMode;
+    if (onMode !== undefined) this.connection.on("mode", () => onMode());
     this.options.log(`chips: connected to workspace ${this.connection.workspaceId}, from seq ${this.cursor ?? "now"}`);
   }
 
@@ -183,6 +190,14 @@ export class Chips {
     if (this.cursor !== undefined && seq <= this.cursor) return;
     this.cursor = seq;
     writeFileSync(this.cursorFile, JSON.stringify({ since: seq }), { mode: 0o600 });
+  }
+
+  /**
+   * The mode a person picked in Chips for OpenClaw's sessions, while it holds (Chips ADR 0300):
+   * nothing while none is picked, once its time is up, or before Chips is connected.
+   */
+  get mode(): PolicyMode | undefined {
+    return this.connection?.mode;
   }
 
   private get chips(): Connection {
